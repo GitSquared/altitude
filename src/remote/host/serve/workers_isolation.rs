@@ -81,16 +81,20 @@ impl WorkersIsolation {
         self.call_on(&worker, call).await
     }
 
-    async fn lease(&self, id: &str) -> Result<String, IsolationError> {
-        let worker = self.fleet.lease().await.map_err(IsolationError::new)?;
+    async fn provision_box(&self, id: &str) -> Result<String, IsolationError> {
+        let worker = self
+            .fleet
+            .provision_worker()
+            .await
+            .map_err(IsolationError::new)?;
         self.place(id, &worker);
         Ok(worker)
     }
 
-    async fn release(&self, id: &str) {
+    async fn deprovision_box(&self, id: &str) {
         let worker = self.placements.lock().ok().and_then(|mut p| p.remove(id));
         if let Some(worker) = worker {
-            self.fleet.release(&worker).await;
+            self.fleet.deprovision_worker(&worker).await;
         }
     }
 
@@ -197,7 +201,7 @@ impl IsolationEngine for WorkersIsolation {
     }
 
     fn sandbox_room(&self) -> SandboxRoom {
-        let (connected, leased, ceiling) = self.fleet.capacity();
+        let (connected, assigned, ceiling) = self.fleet.capacity();
         let _ = connected;
         SandboxRoom {
             offered: Some(SandboxCeiling {
@@ -206,7 +210,7 @@ impl IsolationEngine for WorkersIsolation {
                 disk_mib: 30 * 1024,
             }),
             promised_mib: 0,
-            fitting: ceiling.saturating_sub(leased),
+            fitting: ceiling.saturating_sub(assigned),
         }
     }
 
@@ -253,7 +257,7 @@ impl IsolationEngine for WorkersIsolation {
             .unwrap_or_default();
         // The box is fresh, so the operator's profile files travel with the spawn.
         let profiles = self.profile_bundles(&recipes)?;
-        let worker = self.lease(&id).await?;
+        let worker = self.provision_box(&id).await?;
         let call = WorkerCall::Provision {
             id: id.clone(),
             snapshot: None,
@@ -266,7 +270,7 @@ impl IsolationEngine for WorkersIsolation {
         match self.call_on(&worker, call).await.and_then(expect_ok) {
             Ok(()) => Ok(()),
             Err(error) => {
-                self.release(&id).await;
+                self.deprovision_box(&id).await;
                 Err(error)
             }
         }
@@ -284,7 +288,7 @@ impl IsolationEngine for WorkersIsolation {
         profile: &str,
         _progress: &dyn EnvironmentProgressSink,
     ) -> Result<String, IsolationError> {
-        let worker = self.lease(&sandbox.id).await?;
+        let worker = self.provision_box(&sandbox.id).await?;
         let profiles = self.profile_bundles(&sandbox.recipes)?;
         let call = WorkerCall::CredentialShell {
             id: sandbox.id.clone(),
@@ -296,11 +300,11 @@ impl IsolationEngine for WorkersIsolation {
         match self.call_on(&worker, call).await? {
             WorkerReply::Text(command) => Ok(command),
             WorkerReply::Failed(reason) => {
-                self.release(&sandbox.id).await;
+                self.deprovision_box(&sandbox.id).await;
                 Err(IsolationError::new(reason))
             }
             other => {
-                self.release(&sandbox.id).await;
+                self.deprovision_box(&sandbox.id).await;
                 Err(IsolationError::new(format!(
                     "unexpected answer from an isolation worker: {other:?}"
                 )))
@@ -315,7 +319,7 @@ impl IsolationEngine for WorkersIsolation {
         recipes: Vec<ProfileRecipe>,
         _progress: &dyn EnvironmentProgressSink,
     ) -> Result<(), IsolationError> {
-        let worker = self.lease(&id).await?;
+        let worker = self.provision_box(&id).await?;
         let profiles = self.profile_bundles(&recipes)?;
         let call = WorkerCall::Watcher {
             id: id.clone(),
@@ -325,11 +329,11 @@ impl IsolationEngine for WorkersIsolation {
         match self.call_on(&worker, call).await? {
             WorkerReply::Ok => Ok(()),
             WorkerReply::Failed(reason) => {
-                self.release(&id).await;
+                self.deprovision_box(&id).await;
                 Err(IsolationError::new(reason))
             }
             other => {
-                self.release(&id).await;
+                self.deprovision_box(&id).await;
                 Err(IsolationError::new(format!(
                     "unexpected answer from an isolation worker: {other:?}"
                 )))
@@ -343,7 +347,7 @@ impl IsolationEngine for WorkersIsolation {
         options: SandboxOptions,
         purpose: SandboxPurpose,
     ) -> Result<(), IsolationError> {
-        let worker = self.lease(&id).await?;
+        let worker = self.provision_box(&id).await?;
         let call = WorkerCall::Create {
             id: id.clone(),
             options,
@@ -352,7 +356,7 @@ impl IsolationEngine for WorkersIsolation {
         match self.call_on(&worker, call).await.and_then(expect_ok) {
             Ok(()) => Ok(()),
             Err(error) => {
-                self.release(&id).await;
+                self.deprovision_box(&id).await;
                 Err(error)
             }
         }
@@ -424,7 +428,7 @@ impl IsolationEngine for WorkersIsolation {
         checks: Vec<CredentialCheck>,
         _progress: &dyn EnvironmentProgressSink,
     ) -> Result<Option<Vec<(String, CredentialReport)>>, IsolationError> {
-        let worker = self.lease(&sandbox.id).await?;
+        let worker = self.provision_box(&sandbox.id).await?;
         let profiles = self.profile_bundles(&sandbox.recipes)?;
         let call = WorkerCall::CredentialReports {
             id: sandbox.id.clone(),
@@ -436,11 +440,11 @@ impl IsolationEngine for WorkersIsolation {
         match self.call_on(&worker, call).await? {
             WorkerReply::Reports(reports) => Ok(reports),
             WorkerReply::Failed(reason) => {
-                self.release(&sandbox.id).await;
+                self.deprovision_box(&sandbox.id).await;
                 Err(IsolationError::new(reason))
             }
             other => {
-                self.release(&sandbox.id).await;
+                self.deprovision_box(&sandbox.id).await;
                 Err(IsolationError::new(format!(
                     "unexpected answer from an isolation worker: {other:?}"
                 )))
@@ -459,7 +463,7 @@ impl IsolationEngine for WorkersIsolation {
                 .call_on(&worker, WorkerCall::Remove { id: id.clone() })
                 .await
                 .and_then(expect_ok);
-            self.release(&id).await;
+            self.deprovision_box(&id).await;
             result
         } else {
             Ok(())
@@ -484,7 +488,7 @@ impl IsolationEngine for WorkersIsolation {
     ) -> Result<PathBuf, IsolationError> {
         // A box cannot be snapshotted for a later box to restore; destroying it and
         // saying so is how the task learns to rebuild from the repository.
-        self.release(&id).await;
+        self.deprovision_box(&id).await;
         Err(IsolationError::missing_sandbox(format!(
             "sandbox {id} lives on a box that is now gone"
         )))

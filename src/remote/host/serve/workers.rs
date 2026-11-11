@@ -50,7 +50,7 @@ struct FleetState {
     provisioning: HashSet<String>,
     // Boxes a sandbox has been placed on, so a second sandbox is not given the
     // same box.
-    leased: HashSet<String>,
+    assigned: HashSet<String>,
     // Boxes the isolation provider is waiting for. It is raised when a sandbox
     // needs compute and lowered when one ends; nothing raises it yet.
     demand: usize,
@@ -126,15 +126,15 @@ impl WorkerFleet {
         let state = self.state.lock().expect("worker fleet lock poisoned");
         (
             state.connected.len(),
-            state.leased.len(),
+            state.assigned.len(),
             self.settings.ceiling(),
         )
     }
 
-    // Ask for a box to run one sandbox on. The fleet spawns toward the demand, and
+    // Provision a box for one sandbox. The fleet spawns toward the demand, and
     // this waits for one that has not already been given a sandbox. A box is not
-    // returned to the pool: it is released, which destroys it.
-    pub(crate) async fn lease(&self) -> Result<String, String> {
+    // returned to the pool: deprovisioning it destroys it.
+    pub(crate) async fn provision_worker(&self) -> Result<String, String> {
         {
             let mut state = self.state.lock().expect("worker fleet lock poisoned");
             state.demand += 1;
@@ -147,10 +147,10 @@ impl WorkerFleet {
                 if let Some(name) = state
                     .connected
                     .keys()
-                    .find(|name| !state.leased.contains(*name))
+                    .find(|name| !state.assigned.contains(*name))
                     .cloned()
                 {
-                    state.leased.insert(name.clone());
+                    state.assigned.insert(name.clone());
                     return Ok(name);
                 }
             }
@@ -167,10 +167,10 @@ impl WorkerFleet {
     }
 
     // A sandbox is over, so its box is destroyed rather than reused.
-    pub(crate) async fn release(&self, name: &str) {
+    pub(crate) async fn deprovision_worker(&self, name: &str) {
         {
             let mut state = self.state.lock().expect("worker fleet lock poisoned");
-            state.leased.remove(name);
+            state.assigned.remove(name);
             state.provisioned.remove(name);
             state.connected.remove(name);
             state.demand = state.demand.saturating_sub(1);
