@@ -278,13 +278,13 @@ impl BootStatus {
         }
     }
 
-    // Why this wait exists, in the width of a row. A first start is the one that does
-    // this work, and saying so turns a long wait into a one-time one.
+    // Why this wait exists, in the width of a row. Only the base build is slow enough
+    // to need it, and saying the work is one-time is what turns a long wait into a
+    // step; the download's own label already says what it is fetching.
     fn hint(&self) -> Option<&'static str> {
         match self {
-            Self::Downloading { .. } => Some("every task shares this one image"),
             Self::Installing { .. } => Some("built once, then reused by every task"),
-            Self::Working(_) => None,
+            Self::Working(_) | Self::Downloading { .. } => None,
         }
     }
 }
