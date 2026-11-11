@@ -33,6 +33,13 @@ pub(crate) use sandbox::private_directory;
 pub use sandbox::{DefaultFile, GuestPath, PersistentDirectory, ProfileRecipe, SignInCommand};
 pub(crate) use sandbox::{run_collecting, shell_quote};
 
+// A command's search path inside a sandbox. `/root` is the guest's home whatever
+// account the host runs as, because a host engine maps it onto the sandbox's own.
+pub(crate) const GUEST_PATH: &str = concat!(
+    "/root/.cargo/bin:/root/.local/bin",
+    ":/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+);
+
 #[derive(Clone, Debug)]
 pub enum IsolationStatus {
     Starting,

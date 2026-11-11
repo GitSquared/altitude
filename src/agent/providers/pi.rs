@@ -3,7 +3,8 @@ use crate::agent::{
     TaskStreamDecoder, TaskUsage, activity, system_prompt,
 };
 use crate::isolation::{
-    DefaultFile, GuestPath, PersistentDirectory, ProfileRecipe, SignInCommand, shell_quote,
+    DefaultFile, GUEST_PATH, GuestPath, PersistentDirectory, ProfileRecipe, SignInCommand,
+    shell_quote,
 };
 use crate::task::TaskAgentTurnContext;
 use serde_json::Value;
@@ -12,10 +13,16 @@ use uuid::Uuid;
 
 // A major is a decision, not a schedule: the 72-hour environment refresh takes the
 // newest 1.x on its own, and moving to 2.x is an edit someone makes here.
+//
+// `--prefix` installs into the home the sandbox gave it rather than into `/usr`:
+// a worker's sandbox is the account the host runs as, which can write its own home
+// and nothing system-wide.
 const INSTALL_COMMAND: &str = concat!(
-    "npm install -g --ignore-scripts --no-fund --no-audit --no-progress --color=false ",
+    ": \"${HOME:?the sandbox did not set HOME}\" && ",
+    "npm install -g --prefix \"$HOME/.local\" --ignore-scripts --no-fund --no-audit ",
+    "--no-progress --color=false ",
     "@earendil-works/pi-coding-agent@1",
-    " && command -v pi >/dev/null"
+    " && test -x \"$HOME/.local/bin/pi\""
 );
 
 const DEFAULT_SETTINGS: &str = r#"{
@@ -305,6 +312,7 @@ impl AgentEngine for PiCode {
                 ("PI_CODING_AGENT_DIR", "/altitude/pi"),
                 ("PI_SKIP_VERSION_CHECK", "1"),
                 ("PI_TELEMETRY", "0"),
+                ("PATH", GUEST_PATH),
             ],
         }
     }

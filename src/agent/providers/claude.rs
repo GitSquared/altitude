@@ -4,7 +4,8 @@ use crate::agent::{
     activity, system_prompt,
 };
 use crate::isolation::{
-    DefaultFile, GuestPath, PersistentDirectory, ProfileRecipe, SignInCommand, shell_quote,
+    DefaultFile, GUEST_PATH, GuestPath, PersistentDirectory, ProfileRecipe, SignInCommand,
+    shell_quote,
 };
 use crate::task::TaskAgentTurnContext;
 use crate::vcs::now_ms;
@@ -56,8 +57,12 @@ impl ClaudeCode {
     // checked here rather than assumed: the vendor's stable pointer names a
     // release, the refresh takes the newest 2.x it names, and the day it names a
     // 3.x this build stops instead of taking the major for us.
+    //
+    // It installs into the home the sandbox gave it rather than into `/root`
+    // outright: on a worker the sandbox is the account the host runs as, and that
+    // account's home is where the guest's `/root` points.
     fn install_command() -> &'static str {
-        "export HOME=/root\n\
+        ": \"${HOME:?the sandbox did not set HOME}\"\n\
          version=$(curl -fsSL https://downloads.claude.ai/claude-code-releases/stable)\n\
          case \"$version\" in\n\
            2.*) ;;\n\
@@ -66,7 +71,7 @@ impl ClaudeCode {
          esac\n\
          curl -fsSL https://claude.ai/install.sh -o /tmp/install-claude\n\
          bash /tmp/install-claude \"$version\"\n\
-         test -x /root/.local/bin/claude\n\
+         test -x \"$HOME/.local/bin/claude\"\n\
          rm /tmp/install-claude"
     }
 }
@@ -461,10 +466,7 @@ impl AgentEngine for ClaudeCode {
             environment: vec![
                 ("CLAUDE_CONFIG_DIR", "/altitude/claude"),
                 ("DISABLE_AUTOUPDATER", "1"),
-                (
-                    "PATH",
-                    "/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-                ),
+                ("PATH", GUEST_PATH),
             ],
         }
     }
