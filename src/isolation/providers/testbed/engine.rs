@@ -6,7 +6,7 @@ use crate::{
     isolation::{
         BaseSandboxRecipe, BaseSandboxSnapshot, CommandSession, CredentialCheck, CredentialReport,
         CredentialSandbox, EnvironmentDescription, EnvironmentProgressSink, FileTally,
-        FileTransferSink, IsolationEngine, IsolationError, IsolationStatus, Pressure,
+        FileTransferSink, IsolationEngine, IsolationError, IsolationStatus, LayerView, Pressure,
         ProfileRecipe, SandboxOptions, SandboxPurpose, SandboxRoom, VsockRoute, private_directory,
         sandbox::{self, ProvisionRequest},
     },
@@ -117,13 +117,14 @@ impl IsolationEngine for TestbedIsolation {
     async fn ensure_base(
         &self,
         layers: Vec<BaseSandboxRecipe>,
+        view: LayerView,
         progress: &dyn EnvironmentProgressSink,
     ) -> Result<BaseSandboxSnapshot, IsolationError> {
         // The machine is the base, so there is no workspace image to build: a layer
         // is only its commands, run once here.
         let mut snapshot = self.host_base_snapshot();
         for layer in layers {
-            snapshot = self.ensure_layer(layer, progress).await?;
+            snapshot = self.ensure_layer(layer, &view, progress).await?;
         }
         Ok(snapshot)
     }

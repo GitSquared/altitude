@@ -7,13 +7,14 @@ use std::{
 };
 
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+use tokio::process::Command as TokioCommand;
 use tokio::sync::mpsc;
 
 use crate::isolation::{
-    Command, CommandEvent, CommandSession, IsolationError, OutputStream, shell_quote,
+    Command, CommandEvent, CommandSession, GUEST_PATH, IsolationError, OutputStream, shell_quote,
 };
 
-use super::{SandboxRecord, machine_path};
+use super::{SandboxRecord, output_tail};
 
 // The skeleton a sandbox's own disk holds. Everything else a command sees is bound
 // over it: the machine's system trees, and the plan's mounts.
@@ -83,7 +84,9 @@ pub(super) fn command_session(
     // depending on whether the machine's account can reach that path. `chroot`
     // puts the command at `/` inside it either way.
     builder.cwd(&root);
-    builder.env("PATH", machine_path(&home));
+    // The guest's own search path, not the machine's: the command is chrooted, so a
+    // path naming the account's home is a path that does not exist inside it.
+    builder.env("PATH", GUEST_PATH);
     for (key, value) in &record.environment {
         builder.env(key, value);
     }
@@ -173,6 +176,53 @@ pub(super) fn command_session(
         commands: command_tx,
         events: event_rx,
     })
+}
+
+// Runs one of a layer's steps in the view a sandbox's commands run in: the same
+// mounts, paths and variables as `command_session`, without a terminal. A step that
+// writes its config into `$HOME` has to write it where the task will read it, and a
+// cache it fills is the one the task finds full.
+pub(super) async fn run_step(
+    root: &Path,
+    record: &SandboxRecord,
+    command: &str,
+    home: &Path,
+) -> Result<(), IsolationError> {
+    let mut builder = TokioCommand::new("/usr/bin/unshare");
+    builder.args([
+        "--user",
+        "--map-root-user",
+        "--mount",
+        "--propagation",
+        "private",
+        "/bin/bash",
+        "-c",
+    ]);
+    builder.arg(mount_script(root, record, home));
+    builder.arg("altitude-testbed");
+    builder.arg(command);
+    builder.current_dir(root);
+    builder.env("PATH", GUEST_PATH);
+    for (key, value) in &record.environment {
+        builder.env(key, value);
+    }
+    let output = builder
+        .output()
+        .await
+        .map_err(|error| IsolationError::new(error.to_string()))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = output_tail(&String::from_utf8_lossy(&output.stderr)).to_owned();
+    let said = if stderr.is_empty() {
+        output_tail(&String::from_utf8_lossy(&output.stdout)).to_owned()
+    } else {
+        stderr
+    };
+    Err(IsolationError::new(format!(
+        "setup exited with code {:?}: {said}",
+        output.status.code()
+    )))
 }
 
 // A fresh namespace per command, because the mounts a command needs are what make

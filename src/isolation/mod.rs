@@ -346,6 +346,15 @@ pub struct SandboxMount {
     pub quota_mib: u32,
 }
 
+// What a layer's steps run in: the mounts and the variables the sandbox's commands
+// will have. A profile that writes its own configuration has to write it where the
+// task will read it, so a step that runs outside this view prepares a sandbox it
+// cannot fill.
+pub struct LayerView {
+    pub mounts: Vec<SandboxMount>,
+    pub environment: Vec<(String, String)>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Command {
     Input(Vec<u8>),
@@ -487,6 +496,7 @@ pub trait IsolationEngine: Send + Sync {
     fn ensure_base(
         &self,
         layers: Vec<BaseSandboxRecipe>,
+        view: LayerView,
         progress: &dyn EnvironmentProgressSink,
     ) -> impl Future<Output = Result<BaseSandboxSnapshot, IsolationError>> + Send;
 

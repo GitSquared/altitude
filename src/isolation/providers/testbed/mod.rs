@@ -7,13 +7,14 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use tar::{Archive, Builder};
-use tokio::process::Command as TokioCommand;
+// `tokio`'s, not `std`'s, because it is held across running a step.
+use tokio::sync::Mutex as LayerBuild;
 
 use crate::{
     config::Config,
     isolation::{
         BaseSandboxRecipe, BaseSandboxSnapshot, EnvironmentProgress, EnvironmentProgressSink,
-        IsolationError, SetupStep, capacity::HostPressure, private_directory,
+        IsolationError, LayerView, SetupStep, capacity::HostPressure, private_directory,
     },
 };
 
@@ -26,6 +27,9 @@ mod machine;
 // have already run here. The directory is named after the commands, so a changed
 // command builds again without anything having to compare them.
 const LAYER_MARKER: &str = "testbed-built";
+
+// The sandbox directory a layer's steps run in: the view, without a task in it.
+const LAYER_SANDBOX: &str = "layer";
 
 // The directories every sandbox is given over the machine rather than from its own
 // disk. A command resolves paths against these, so the same absolute path means the
@@ -48,6 +52,9 @@ pub struct TestbedIsolation {
     // Shared rather than per view, like the microVM provider's: how much this
     // machine can take is the same answer for every operator on it.
     host_pressure: Arc<Mutex<HostPressure>>,
+    // A layer's steps run in a sandbox directory of their own, so two layers
+    // building at once would share one view and each see the other's work.
+    layer_build: Arc<LayerBuild<()>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -71,6 +78,7 @@ impl TestbedIsolation {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("/root")),
             host_pressure: Arc::new(Mutex::new(HostPressure::new(&config.isolation_data_dir()))),
+            layer_build: Arc::new(LayerBuild::new(())),
         }
     }
 
@@ -164,6 +172,7 @@ impl TestbedIsolation {
     async fn ensure_layer(
         &self,
         layer: BaseSandboxRecipe,
+        view: &LayerView,
         progress: &dyn EnvironmentProgressSink,
     ) -> Result<BaseSandboxSnapshot, IsolationError> {
         let marker = layer.snapshots_dir.join(LAYER_MARKER);
@@ -182,15 +191,33 @@ impl TestbedIsolation {
             .iter()
             .filter(|step| !step.command.trim().is_empty())
             .collect();
+        let _build = self.layer_build.lock().await;
+        let root = self.sandboxes_dir().join(LAYER_SANDBOX);
+        machine::prepare_root(&root)?;
+        let record = SandboxRecord {
+            mounts: view
+                .mounts
+                .iter()
+                .map(|mount| MountRecord {
+                    host_path: mount.host_path.clone(),
+                    guest_path: mount.guest_path.clone(),
+                    readonly: mount.readonly,
+                })
+                .collect(),
+            environment: view.environment.clone(),
+        };
         for (completed, step) in steps.iter().enumerate() {
             progress.report(EnvironmentProgress {
                 label: step.label.clone(),
                 completed,
                 total: steps.len(),
             });
-            self.run_on_host(&step.command)
+            machine::run_step(&root, &record, &step.command, &self.home)
                 .await
                 .map_err(|error| IsolationError::new(format!("{}: {error}", step.label)))?;
+        }
+        if let Err(error) = fs::remove_dir_all(&root) {
+            tracing::warn!(%error, path = %root.display(), "could not remove the layer build's sandbox directory");
         }
         fs::write(&marker, b"built\n").map_err(|error| IsolationError::new(error.to_string()))?;
         Ok(BaseSandboxSnapshot {
@@ -200,33 +227,6 @@ impl TestbedIsolation {
             packages: String::new(),
             setup_command: layer.setup_command(),
         })
-    }
-
-    // A layer's commands are the machine's own setup, run where the sandbox can see
-    // their result: on the machine, not in a chroot. The toolchains a project
-    // installs live in `/usr` and `/root`, which every sandbox binds.
-    async fn run_on_host(&self, command: &str) -> Result<(), IsolationError> {
-        let output = TokioCommand::new("/bin/bash")
-            .arg("-c")
-            .arg(command)
-            .env("HOME", &self.home)
-            .env("PATH", machine_path(&self.home))
-            .output()
-            .await
-            .map_err(|error| IsolationError::new(error.to_string()))?;
-        if output.status.success() {
-            return Ok(());
-        }
-        let stderr = output_tail(&String::from_utf8_lossy(&output.stderr)).to_owned();
-        let said = if stderr.is_empty() {
-            output_tail(&String::from_utf8_lossy(&output.stdout)).to_owned()
-        } else {
-            stderr
-        };
-        Err(IsolationError::new(format!(
-            "setup exited with code {:?}: {said}",
-            output.status.code()
-        )))
     }
 
     // A host that is about to be destroyed has no machine to come back to, so a
@@ -317,13 +317,6 @@ pub(super) fn os_release() -> String {
                 .map(|value| value.trim_matches('"').to_owned())
         })
         .unwrap_or_default()
-}
-
-pub(super) fn machine_path(home: &Path) -> String {
-    format!(
-        "{home}/.cargo/bin:{home}/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-        home = home.display()
-    )
 }
 
 pub(super) fn output_tail(output: &str) -> &str {

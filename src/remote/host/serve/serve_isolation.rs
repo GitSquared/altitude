@@ -6,8 +6,9 @@ use crate::{
     isolation::{
         BaseSandboxRecipe, BaseSandboxSnapshot, CommandSession, CredentialCheck, CredentialReport,
         CredentialSandbox, EnvironmentDescription, EnvironmentProgressSink, FileTally,
-        FileTransferSink, IsolationEngine, IsolationError, IsolationStatus, MicrosandboxIsolation,
-        Pressure, ProfileRecipe, SandboxOptions, SandboxPurpose, SandboxRoom, VsockRoute,
+        FileTransferSink, IsolationEngine, IsolationError, IsolationStatus, LayerView,
+        MicrosandboxIsolation, Pressure, ProfileRecipe, SandboxOptions, SandboxPurpose,
+        SandboxRoom, VsockRoute,
     },
     project::Project,
 };
@@ -170,12 +171,13 @@ impl IsolationEngine for ServeIsolation {
     fn ensure_base(
         &self,
         layers: Vec<BaseSandboxRecipe>,
+        view: LayerView,
         progress: &dyn EnvironmentProgressSink,
     ) -> impl Future<Output = Result<BaseSandboxSnapshot, IsolationError>> + Send {
         async move {
             match self {
-                Self::Microsandbox(engine) => engine.ensure_base(layers, progress).await,
-                Self::Workers(engine) => engine.ensure_base(layers, progress).await,
+                Self::Microsandbox(engine) => engine.ensure_base(layers, view, progress).await,
+                Self::Workers(engine) => engine.ensure_base(layers, view, progress).await,
             }
         }
     }

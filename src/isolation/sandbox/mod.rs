@@ -11,9 +11,9 @@ use crate::{config::Config, project::Project};
 
 use super::{
     BaseSandboxRecipe, BaseSandboxSnapshot, CommandEvent, CredentialCheck, CredentialReport,
-    CredentialSandbox, EnvironmentProgressSink, IsolationEngine, IsolationError, OutputStream,
-    PORT_RELAY_GUEST_PORT, PROJECT_CACHE_QUOTA_MIB, STORE_QUOTA_MIB, SandboxMount, SandboxOptions,
-    SandboxPurpose, SetupStep, VsockRoute,
+    CredentialSandbox, EnvironmentProgressSink, IsolationEngine, IsolationError, LayerView,
+    OutputStream, PORT_RELAY_GUEST_PORT, PROJECT_CACHE_QUOTA_MIB, STORE_QUOTA_MIB, SandboxMount,
+    SandboxOptions, SandboxPurpose, SetupStep, VsockRoute,
 };
 
 mod guest;
@@ -401,6 +401,15 @@ impl SandboxPlan {
             mount.host_path = fs::canonicalize(&mount.host_path).map_err(io_error)?;
         }
         Ok(())
+    }
+
+    // Taken after `initialize`, which is what makes the mount sources exist and
+    // settles their paths.
+    fn layer_view(&self) -> LayerView {
+        LayerView {
+            mounts: self.options.mounts.clone(),
+            environment: self.options.environment.clone(),
+        }
     }
 }
 

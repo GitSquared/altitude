@@ -16,7 +16,7 @@ use crate::{
     isolation::{
         BaseSandboxRecipe, BaseSandboxSnapshot, CommandSession, CredentialCheck, CredentialReport,
         CredentialSandbox, EnvironmentDescription, EnvironmentProgressSink, FileTally,
-        FileTransferSink, IsolationEngine, IsolationError, IsolationStatus, Pressure,
+        FileTransferSink, IsolationEngine, IsolationError, IsolationStatus, LayerView, Pressure,
         ProfileRecipe, SandboxCeiling, SandboxOptions, SandboxPurpose, SandboxRoom, VsockRoute,
         guest_absolute,
         worker_protocol::{WorkerCall, WorkerProfile, WorkerReply, WorkerRequest},
@@ -436,6 +436,7 @@ impl IsolationEngine for WorkersIsolation {
     async fn ensure_base(
         &self,
         _layers: Vec<BaseSandboxRecipe>,
+        _view: LayerView,
         _progress: &dyn EnvironmentProgressSink,
     ) -> Result<BaseSandboxSnapshot, IsolationError> {
         Ok(BaseSandboxSnapshot {

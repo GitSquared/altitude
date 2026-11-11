@@ -14,9 +14,9 @@ use crate::isolation::{
     BaseSandboxRecipe, BaseSandboxSnapshot, CREDENTIAL_PREFIX, Command, CommandEvent,
     CommandSession, CredentialCheck, CredentialReport, CredentialSandbox, EnvironmentDescription,
     EnvironmentProgressSink, FileTally, FileTransferSink, ImagePull, IsolationEngine,
-    IsolationError, IsolationStatus, OutputStream, PackageInstall, PackageInstallSink, Pressure,
-    ProfileRecipe, SandboxCeiling, SandboxOptions, SandboxPurpose, SandboxRoom, VsockRoute,
-    WATCHER_PREFIX,
+    IsolationError, IsolationStatus, LayerView, OutputStream, PackageInstall, PackageInstallSink,
+    Pressure, ProfileRecipe, SandboxCeiling, SandboxOptions, SandboxPurpose, SandboxRoom,
+    VsockRoute, WATCHER_PREFIX,
     sandbox::{self, REFRESH_AFTER, private_directory},
 };
 
@@ -325,8 +325,12 @@ impl IsolationEngine for MicrosandboxIsolation {
     async fn ensure_base(
         &self,
         layers: Vec<BaseSandboxRecipe>,
+        _view: LayerView,
         progress: &dyn EnvironmentProgressSink,
     ) -> Result<BaseSandboxSnapshot, IsolationError> {
+        // A layer is built inside a guest this provider made, which is the guest a
+        // task runs in, so the steps already have the view: only a provider whose
+        // steps run outside the sandbox they prepare needs it handed over.
         let _build = self.build_lock.acquire().await?;
         // The workspace base is app startup's concern and reports on its own
         // screen; a task waits only on the environment built from it.
