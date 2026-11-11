@@ -5,6 +5,7 @@ pub mod tools;
 use crate::isolation::ProfileRecipe;
 use providers::answering;
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -18,6 +19,31 @@ impl VcsProviderKind {
 
     pub fn sole() -> Self {
         Self::ALL[0]
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::GitHub => "github",
+        }
+    }
+}
+
+impl FromStr for VcsProviderKind {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|kind| kind.name() == value.trim().to_ascii_lowercase())
+            .ok_or_else(|| {
+                let known = Self::ALL
+                    .iter()
+                    .map(|kind| kind.name())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("unknown version-control provider {value:?}; use {known}")
+            })
     }
 }
 

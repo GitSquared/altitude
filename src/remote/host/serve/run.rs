@@ -42,6 +42,7 @@ use crate::{
     task::{TaskEventLoop, TaskExecutionUpdate, TaskService, TaskStore},
     tracker::providers::linear::host as linear_host,
     tracker::{DelegatedWork, TrackerIntegration, TrackerKind},
+    vcs::VcsProviderKind,
 };
 
 use super::settings::ServeSettings;
@@ -75,6 +76,17 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
                 admin::evict(&config, key)
                     .await
                     .map_err(|error| error.to_string())?;
+                return Ok(());
+            }
+            // What a host image has to carry, printed from this machine's own
+            // configuration so the tags are the ones a host of this build looks for.
+            ServeCommand::Environment(environment) => {
+                let report = isolation::environment_report(
+                    &config,
+                    environment.agent,
+                    environment.vcs.unwrap_or_else(VcsProviderKind::sole),
+                )?;
+                println!("{report}");
                 return Ok(());
             }
             // A service definition carries this machine's own paths, so it is

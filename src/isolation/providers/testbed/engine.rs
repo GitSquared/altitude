@@ -6,16 +6,15 @@ use crate::{
     isolation::{
         BaseSandboxRecipe, BaseSandboxSnapshot, CommandSession, CredentialCheck, CredentialReport,
         CredentialSandbox, EnvironmentDescription, EnvironmentProgressSink, FileTally,
-        FileTransferSink, IsolationEngine, IsolationError, IsolationStatus, LayerView, Pressure,
-        ProfileRecipe, SandboxOptions, SandboxPurpose, SandboxRoom, VsockRoute, private_directory,
+        FileTransferSink, IsolationEngine, IsolationError, IsolationStatus, LAYER_MARKER,
+        LayerView, Pressure, ProfileRecipe, SandboxOptions, SandboxPurpose, SandboxRoom,
+        VsockRoute, private_directory,
         sandbox::{self, ProvisionRequest},
     },
     project::Project,
 };
 
-use super::{
-    LAYER_MARKER, MountRecord, SandboxRecord, TestbedIsolation, check_environment, files, machine,
-};
+use super::{MountRecord, SandboxRecord, TestbedIsolation, check_environment, files, machine};
 
 impl IsolationEngine for TestbedIsolation {
     fn pressure(&self) -> Option<Pressure> {

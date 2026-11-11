@@ -13,12 +13,13 @@ use super::{
     BaseSandboxRecipe, BaseSandboxSnapshot, CommandEvent, CredentialCheck, CredentialReport,
     CredentialSandbox, EnvironmentProgressSink, IsolationEngine, IsolationError, LayerView,
     OutputStream, PORT_RELAY_GUEST_PORT, PROJECT_CACHE_QUOTA_MIB, STORE_QUOTA_MIB, SandboxMount,
-    SandboxOptions, SandboxPurpose, SetupStep, VsockRoute,
+    SandboxOptions, SandboxPurpose, SetupStep, VsockRoute, environment_identity,
 };
 
 mod guest;
 mod plan;
 mod profile;
+mod report;
 mod run;
 
 use guest::relative_path;
@@ -29,6 +30,7 @@ pub(crate) use plan::{
     ProvisionRequest, SandboxKind, SnapshotSource, environment_top_layer, provision,
 };
 pub use profile::{DefaultFile, GuestPath, PersistentDirectory, ProfileRecipe, SignInCommand};
+pub(crate) use report::environment_report;
 pub(crate) use run::{
     add_commits_env, create, credential_reports, credential_shell, ensure_project, watcher,
 };
@@ -58,14 +60,19 @@ pub(super) struct SandboxPlan {
 }
 
 // The commands are the build: two layers with the same ones are the same layer,
-// whichever project asked for it.
+// whichever project asked for it. The host's own environment is part of that, since
+// what a marker records is that the commands ran on *this* image.
 fn tag_of(steps: &[SetupStep]) -> String {
-    let identity = steps
+    let mut layer = steps
         .iter()
         .map(|step| step.command.as_str())
         .collect::<Vec<_>>()
         .join("\n");
-    blake3::hash(identity.as_bytes()).to_hex()[..12].to_owned()
+    if let Some(environment) = environment_identity() {
+        layer.push('\n');
+        layer.push_str(&environment);
+    }
+    blake3::hash(layer.as_bytes()).to_hex()[..12].to_owned()
 }
 
 impl SandboxPlan {

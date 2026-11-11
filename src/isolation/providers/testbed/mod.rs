@@ -14,19 +14,14 @@ use crate::{
     config::Config,
     isolation::{
         BaseSandboxRecipe, BaseSandboxSnapshot, EnvironmentProgress, EnvironmentProgressSink,
-        IsolationError, LayerView, SetupStep, capacity::HostPressure, private_directory,
+        IsolationError, LAYER_MARKER, LayerView, SetupStep, capacity::HostPressure,
+        private_directory,
     },
 };
 
 mod engine;
 mod files;
 mod machine;
-
-// The marker a built layer leaves in its snapshot directory. It is not a snapshot:
-// the machine is the base, and the marker only records that the layer's commands
-// have already run here. The directory is named after the commands, so a changed
-// command builds again without anything having to compare them.
-const LAYER_MARKER: &str = "testbed-built";
 
 // The sandbox directory a layer's steps run in: the view, without a task in it.
 const LAYER_SANDBOX: &str = "layer";

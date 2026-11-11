@@ -28,6 +28,7 @@ pub(crate) use providers::workers::protocol as worker_protocol;
 pub use providers::{IsolationBackend, MicrosandboxIsolation, TestbedIsolation};
 pub(crate) use relay::{PORT_RELAY_GUEST_PORT, install_script, with_port_relay};
 pub use relay::{PortNotice, PortRelays};
+pub(crate) use sandbox::environment_report;
 pub(crate) use sandbox::guest_absolute;
 pub(crate) use sandbox::private_directory;
 pub use sandbox::{DefaultFile, GuestPath, PersistentDirectory, ProfileRecipe, SignInCommand};
@@ -353,6 +354,21 @@ pub struct SandboxMount {
 pub struct LayerView {
     pub mounts: Vec<SandboxMount>,
     pub environment: Vec<(String, String)>,
+}
+
+// Where a machine that is its own base records that a layer's steps have already run
+// on it: a note rather than an image, in the layer's own snapshot directory.
+pub(crate) const LAYER_MARKER: &str = "testbed-built";
+
+// What the image a host runs is, when its operator says so. A layer is built on a
+// machine and is only valid for that machine, so the tag it is stored under has to
+// name what the machine is: an image that changes invalidates it by construction,
+// and a host that declares nothing keeps the tags it already has.
+pub(crate) fn environment_identity() -> Option<String> {
+    env::var("ALTITUDE_WORKER_ENVIRONMENT")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -2,7 +2,12 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
-use crate::{tracker::TrackerKind, version::VERSION};
+use crate::{
+    agent::{AgentError, AgentKind},
+    tracker::TrackerKind,
+    vcs::VcsProviderKind,
+    version::VERSION,
+};
 
 const SERVE_MODE: &str = "Run altitude serve on a headless server to let your team run agents beyond their own machines, and pilot them directly from your task tracker.";
 
@@ -84,6 +89,7 @@ pub struct ServeArgs {
 #[derive(Debug, Subcommand)]
 pub enum ServeCommand {
     Clients,
+    Environment(EnvironmentArgs),
     Evict {
         key: String,
     },
@@ -97,6 +103,9 @@ pub enum ServeCommand {
 
 const WORKER_MODE: &str =
     "Run altitude serve as a disposable host that runs one task's sandbox for a remote.";
+
+const ENVIRONMENT_MODE: &str =
+    "Print the layers a host builds to run a task's sandboxes, so an image can carry them.";
 
 // Shown as the worker subcommand's help, and printed by the worker itself when it
 // is launched from a terminal, so that a stray invocation reads this rather than
@@ -169,6 +178,36 @@ pub struct WorkerArgs {
         help = "Run even from a terminal, for debugging a provision script"
     )]
     pub yes: bool,
+}
+
+#[derive(Debug, Args)]
+#[command(long_about = ENVIRONMENT_MODE)]
+pub struct EnvironmentArgs {
+    #[arg(
+        long,
+        value_name = "AGENT",
+        display_order = 1,
+        value_parser = parse_agent,
+        help = "The agent harness a task of this project runs: claude or pi"
+    )]
+    pub agent: AgentKind,
+
+    #[arg(
+        long,
+        value_name = "PROVIDER",
+        display_order = 2,
+        value_parser = parse_vcs,
+        help = "The version-control profile its tasks use (default: the only one)"
+    )]
+    pub vcs: Option<VcsProviderKind>,
+}
+
+fn parse_agent(value: &str) -> Result<AgentKind, String> {
+    value.parse().map_err(|error: AgentError| error.to_string())
+}
+
+fn parse_vcs(value: &str) -> Result<VcsProviderKind, String> {
+    value.parse()
 }
 
 #[derive(Debug, Args)]
