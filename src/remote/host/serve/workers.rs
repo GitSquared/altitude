@@ -43,6 +43,13 @@ struct ConnectedWorker {
     last_seen: Instant,
 }
 
+// What the fleet is carrying: hosts given a sandbox, and the most it may run.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct FleetCapacity {
+    pub assigned: usize,
+    pub ceiling: usize,
+}
+
 #[derive(Default)]
 struct FleetState {
     connected: HashMap<String, ConnectedWorker>,
@@ -122,13 +129,14 @@ impl WorkerFleet {
 
     // How many hosts are joined, how many are given a sandbox, and how many this
     // remote will ever run at once.
-    pub(crate) fn capacity(&self) -> (usize, usize, usize) {
+    // How many hosts are given a sandbox and how many this remote will ever run at
+    // once.
+    pub(crate) fn capacity(&self) -> FleetCapacity {
         let state = self.state.lock().expect("worker fleet lock poisoned");
-        (
-            state.connected.len(),
-            state.assigned.len(),
-            self.settings.ceiling(),
-        )
+        FleetCapacity {
+            assigned: state.assigned.len(),
+            ceiling: self.settings.ceiling(),
+        }
     }
 
     // Provision a host for one sandbox. The fleet spawns toward the demand, and

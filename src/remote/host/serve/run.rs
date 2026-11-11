@@ -36,6 +36,7 @@ use crate::{
     remote::{
         ClientRecord, InstallationKey, LinkClient, LinkServer, TrackerConnection,
         announce::{Phase, TrackerReadiness},
+        cache::CacheService,
         server::{AgentChannelAccess, ServerParts, WorkerHost},
     },
     task::{TaskEventLoop, TaskExecutionUpdate, TaskService, TaskStore},
@@ -372,6 +373,9 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
             directory: config.agent_channel_dir(),
             token: fleet.token().to_owned(),
         }),
+        cache: fleet
+            .as_ref()
+            .map(|fleet| Arc::new(CacheService::new(&config, fleet.token().to_owned()))),
     })
     .await
     .map_err(io::Error::other)?;
