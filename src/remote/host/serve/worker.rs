@@ -22,7 +22,7 @@ use crate::{
     cli::{WORKER_GUIDE, WorkerArgs},
     config::Config,
     isolation::{
-        CommandEvent, IsolationEngine, IsolationStatus, MicrosandboxIsolation, prepare,
+        CommandEvent, IsolationEngine, IsolationStatus, TestbedIsolation, prepare,
         worker_protocol::{CommandFrame, WORKER_ALPN, WorkerCall, WorkerReply, WorkerRequest},
     },
     logging,
@@ -54,10 +54,10 @@ pub(crate) async fn run(args: &WorkerArgs, base: Config) -> Result<(), Box<dyn E
     );
     let key = InstallationKey::load_or_create(base.data_dir().join("worker.key"))
         .map_err(io::Error::other)?;
-    // A box that cannot make sandboxes is not a box, so it says so before it
-    // registers rather than taking work it will fail.
-    MicrosandboxIsolation::check_host().map_err(io::Error::other)?;
-    let engine = MicrosandboxIsolation::new(&base);
+    // A box is spawned for one task and its whole host is the sandbox, so it
+    // needs no nested microVM: the box is the boundary. The host engine is the
+    // closest thing we have — a chroot over the machine, not a microVM.
+    let engine = TestbedIsolation::new(&base);
     // Preparing pulls the runtime and builds the base image, which is minutes of
     // work. The box registers before it is ready so the master can see it, and
     // says it is not ready until this finishes.
@@ -148,7 +148,7 @@ pub(crate) async fn run(args: &WorkerArgs, base: Config) -> Result<(), Box<dyn E
 }
 
 struct WorkerService {
-    engine: MicrosandboxIsolation,
+    engine: TestbedIsolation,
     token: String,
     snapshots_dir: PathBuf,
     readiness: Arc<Mutex<Readiness>>,
