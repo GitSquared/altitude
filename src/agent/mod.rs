@@ -72,6 +72,8 @@ altitude is the operator's control plane for delegated coding work. This task ru
 
 A tool the project needs belongs in its setup command, where every task of the project gets it. Installing one here, in a profile mount or in a shared cache leaves the next task paying the same cost, and a shared cache may be in use by another task right now. When something is missing, say what it is and where it belongs.
 
+That command is not root. As often as not the sandbox is an ordinary account on the operator's host rather than a root microVM, so it can write its own home and the project's caches and nothing system-wide: `apt-get`, and anything installed to `/usr` or `/etc`, belongs in the image the operator builds. A setup command that reaches for them passes on the operator's own machine and fails on every host, so what a project needs goes under `~`, and what needs root is worth saying rather than assuming.
+
 The operator can take this task over — the files and this conversation move to their machine and they continue with you in a terminal — and hand it back at any moment, on a machine this sandbox is not. Treat neither state as permanent.
 
 ## Working in someone else's repository

@@ -23,6 +23,11 @@ version; this file is where the detail and the worked examples live.
   A task starts from that image, so software installed *during* a task is gone
   with it — and asking anyone to "refresh the environment" is asking for a
   settings change.
+- **May not have given that step root.** A task can run on a host where the
+  sandbox is an ordinary account, so the setup command writes its own home and
+  the shared caches and nothing under `/usr` or `/etc`. A suggestion that reaches
+  for `apt-get` is a change to the image as well as to the command, and it is
+  worth saying both.
 - **Mounts the shared caches.** Listed in the project brief. They are host
   directories: what you write there outlives this task, and another task may be
   writing at the same time.
