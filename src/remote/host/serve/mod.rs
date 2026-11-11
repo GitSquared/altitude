@@ -31,6 +31,8 @@ pub(crate) mod settings;
 mod task_host;
 mod tracker_host;
 mod transfer;
+mod worker;
+mod workers;
 
 use transfer::TRANSFER_IDLE_MS;
 

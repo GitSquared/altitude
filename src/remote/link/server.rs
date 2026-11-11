@@ -44,8 +44,8 @@ use crate::credentials::Service;
 use crate::remote::protocol::SignalCommand;
 use crate::remote::protocol::{
     BlobHash, Handover, LINK_ALPN, LinkRequest, LinkResponse, MAX_BLOB_BYTES, RemoteTicket,
-    TRANSFER_PIECE_BYTES, TaskRequest, TaskSummary, WatchEvent, builder, read_body, read_frame,
-    write_frame,
+    TRANSFER_PIECE_BYTES, TaskRequest, TaskSummary, WatchEvent, WorkerReport, builder, read_body,
+    read_frame, write_frame,
 };
 use crate::remote::transfer::{TransferUpdate, Unit};
 use crate::tracker::{ACCOUNT_FILE, TrackerAccount, TrackerKind};
@@ -120,6 +120,7 @@ struct LinkHandler {
     data_dir: PathBuf,
     config_lock: Arc<AsyncMutex<()>>,
     tasks: Arc<dyn TaskHost>,
+    workers: Option<Arc<dyn WorkerHost>>,
 }
 
 impl fmt::Debug for LinkHandler {
@@ -356,6 +357,23 @@ pub struct ServerParts {
     pub phase: watch::Receiver<Phase>,
     pub trackers: Vec<TrackerConnection>,
     pub tasks: Arc<dyn TaskHost>,
+    /// How isolation workers announce themselves, when this machine takes them.
+    /// A remote with none rejects the request rather than pretending to listen.
+    pub workers: Option<Arc<dyn WorkerHost>>,
+}
+
+// The other half of the link that is not about tasks: a provisioned worker
+// proving it belongs and saying it is still there. It is a separate contract from
+// `TaskHost` because a worker is compute, not a client with work of its own.
+pub trait WorkerHost: Send + Sync + 'static {
+    fn register_worker(
+        &self,
+        peer: EndpointId,
+        token: String,
+        name: String,
+        capacity: WorkerReport,
+    ) -> BoxFuture<Result<(), String>>;
+    fn worker_heartbeat(&self, peer: EndpointId, name: String) -> BoxFuture<Result<(), String>>;
 }
 
 pub trait TaskHost: Send + Sync + 'static {
@@ -729,6 +747,34 @@ async fn answer(
             };
             write_frame(&mut send, &response).await?;
         }
+        LinkRequest::RegisterWorker {
+            token,
+            name,
+            capacity,
+        } => {
+            let response = match &handler.workers {
+                Some(workers) => match workers.register_worker(peer, token, name, capacity).await {
+                    Ok(()) => LinkResponse::Accepted,
+                    Err(reason) => LinkResponse::Rejected { reason },
+                },
+                None => LinkResponse::Rejected {
+                    reason: "this machine does not take isolation workers".into(),
+                },
+            };
+            write_frame(&mut send, &response).await?;
+        }
+        LinkRequest::WorkerHeartbeat { name } => {
+            let response = match &handler.workers {
+                Some(workers) => match workers.worker_heartbeat(peer, name).await {
+                    Ok(()) => LinkResponse::Accepted,
+                    Err(reason) => LinkResponse::Rejected { reason },
+                },
+                None => LinkResponse::Rejected {
+                    reason: "this machine does not take isolation workers".into(),
+                },
+            };
+            write_frame(&mut send, &response).await?;
+        }
     }
     send.finish()?;
     Ok(())
@@ -751,12 +797,14 @@ impl LinkServer {
             phase,
             trackers,
             tasks,
+            workers,
         } = parts;
         let handler = LinkHandler {
             id: identity.id(),
             data_dir,
             config_lock: Arc::new(AsyncMutex::new(())),
             tasks,
+            workers,
         };
         let log = ClientLog {
             record: clients.clone(),

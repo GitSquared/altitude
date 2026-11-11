@@ -126,6 +126,24 @@ pub enum LinkRequest {
         len: u64,
         take_tracker: bool,
     },
+    // A provisioned isolation worker tying itself to this machine. The name is the
+    // worker's identity across restarts; the peer key is only where it is now.
+    RegisterWorker {
+        token: String,
+        name: String,
+        capacity: WorkerReport,
+    },
+    WorkerHeartbeat {
+        name: String,
+    },
+}
+
+// What an empty box says it can host. The master keeps its own book of what it
+// has promised; this is only the size of the box.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct WorkerReport {
+    pub cpus: usize,
+    pub memory_mib: u64,
 }
 
 #[derive(Clone, Debug)]

@@ -91,6 +91,80 @@ pub enum ServeCommand {
     Uninstall,
     #[command(after_help = CONNECT_AFTER_HELP)]
     Connect(ConnectArgs),
+    #[command(long_about = WORKER_MODE, after_help = WORKER_GUIDE)]
+    Worker(WorkerArgs),
+}
+
+const WORKER_MODE: &str =
+    "Run altitude serve as a disposable box that runs one task's sandbox for a remote.";
+
+// Shown as the worker subcommand's help, and printed by the worker itself when it
+// is launched from a terminal, so that a stray invocation reads this rather than
+// turning the machine it was typed on into a box.
+pub(crate) const WORKER_GUIDE: &str = "\
+A worker is a box a remote spawns for one task: its whole host is the sandbox, so
+nothing inside it needs a nested isolation. The remote does not provision it
+itself; it runs the scripts in serve.toml, which are handed:
+
+  ALTITUDE_MASTER_TICKET   the address to dial (this worker's --master)
+  ALTITUDE_WORKER_TOKEN    the shared secret (this worker's --token)
+  ALTITUDE_WORKER_NAME     the name it registers under (this worker's --name)
+
+To set workers up on a remote:
+
+ 1. Write a provision script that brings a machine up and starts a worker on it:
+      altitude serve worker --master \"$ALTITUDE_MASTER_TICKET\" \\
+        --token \"$ALTITUDE_WORKER_TOKEN\" --name \"$ALTITUDE_WORKER_NAME\"
+    It exits 0 once that box can reach the remote. A worker refuses to run in a
+    terminal, so a provision script cannot leave a person looking at a prompt.
+ 2. Write a deprovision script that destroys the box named by
+    ALTITUDE_WORKER_NAME and exits 0 once it is gone.
+ 3. Point the remote's serve.toml at both, with the most it may run at once:
+      [workers]
+      provision = \"/etc/altitude/provision-worker.sh\"
+      deprovision = \"/etc/altitude/deprovision-worker.sh\"
+      max = 8
+ 4. Stock the box's image: its host is the sandbox, so it carries what a task needs
+    (git, the agent harness) or has the network to install it, and it can reach the
+    remote.
+ 5. Recommended: bake a warm copy of each project's environment and caches into the
+    image, so a start does not rebuild them.
+
+The remote spawns a box when a task needs one and destroys it when the task ends.
+Run this by hand only to debug a provision script.";
+
+#[derive(Debug, Args)]
+pub struct WorkerArgs {
+    #[arg(
+        long,
+        value_name = "TICKET",
+        display_order = 1,
+        help = "The master's address ticket, from its worker settings or debug log"
+    )]
+    pub master: String,
+
+    #[arg(
+        long,
+        value_name = "TOKEN",
+        display_order = 2,
+        help = "The master's worker token, from its data directory if not given in the script"
+    )]
+    pub token: String,
+
+    #[arg(
+        long,
+        value_name = "NAME",
+        display_order = 3,
+        help = "The name this box was provisioned under"
+    )]
+    pub name: String,
+
+    #[arg(
+        long,
+        display_order = 4,
+        help = "Run even from a terminal, for debugging a provision script"
+    )]
+    pub yes: bool,
 }
 
 #[derive(Debug, Args)]
