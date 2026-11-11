@@ -1,9 +1,4 @@
-use std::{
-    error::Error,
-    future::Future,
-    io,
-    time::{Duration, Instant},
-};
+use std::{error::Error, future::Future, io, time::Instant};
 
 use crossterm::event::{EventStream, KeyCode, KeyModifiers};
 use futures_util::StreamExt;
@@ -44,7 +39,7 @@ where
         terminate,
         interrupt,
         animations,
-        || BootStatus::Working("migrating the database…"),
+        || BootStatus::Working("migrating tasks database…"),
         async { initialize.await.map_err(io::Error::other) },
     )
     .await
@@ -120,18 +115,15 @@ async fn wait_for<T>(
     let mut pulled = Pull::default();
     let mut shimmer = 0;
     tokio::pin!(operation);
-    let began = Instant::now();
 
     loop {
         let status = label();
         let rate = pulled.rate(&status);
-        let elapsed = began.elapsed();
         terminal.draw(|frame| {
             draw(
                 frame,
                 &status,
                 rate,
-                elapsed,
                 animations.then_some(shimmer),
                 animations.then_some(&mut terrain),
             )
@@ -231,8 +223,9 @@ fn draw_question(
 
 fn isolation_status(status: &IsolationStatus) -> BootStatus {
     match status {
-        IsolationStatus::Starting | IsolationStatus::InstallingRuntime => {
-            BootStatus::Working("starting up…")
+        IsolationStatus::Starting => BootStatus::Working("starting up…"),
+        IsolationStatus::InstallingRuntime => {
+            BootStatus::Working("installing the sandbox runtime…")
         }
         IsolationStatus::PreparingBaseImage(pull) => BootStatus::Downloading {
             label: "fetching the sandbox image…",
@@ -277,16 +270,6 @@ impl BootStatus {
             _ => None,
         }
     }
-
-    // Why this wait exists, in the width of a row. Only the base build is slow enough
-    // to need it, and saying the work is one-time is what turns a long wait into a
-    // step; the download's own label already says what it is fetching.
-    fn hint(&self) -> Option<&'static str> {
-        match self {
-            Self::Installing { .. } => Some("built once, then reused by every task"),
-            Self::Working(_) | Self::Downloading { .. } => None,
-        }
-    }
 }
 
 // The pull's own speed, which the status only carries the bytes of: how fast the
@@ -326,7 +309,6 @@ fn draw(
     frame: &mut Frame,
     status: &BootStatus,
     rate: Option<f64>,
-    elapsed: Duration,
     tick: Option<usize>,
     terrain: Option<&mut terrain::Terrain>,
 ) {
@@ -350,9 +332,6 @@ fn draw(
     if measured.is_some() {
         rows.push(Constraint::Length(1));
     }
-    // The time says how long the wait has been, which is what keeps a slow step from
-    // reading as a hang; the hint says why the step is there.
-    rows.push(Constraint::Length(1));
     rows.push(Constraint::Fill(1));
     let rows = Layout::vertical(rows).split(area);
 
@@ -373,16 +352,6 @@ fn draw(
             rows[4],
         );
     }
-
-    let mut detail = vec![Span::styled(elapsed_words(elapsed), palette::muted())];
-    if let Some(hint) = status.hint() {
-        detail.push(Span::raw(" · "));
-        detail.push(Span::styled(hint, palette::muted()));
-    }
-    frame.render_widget(
-        Paragraph::new(Line::from(detail)).centered(),
-        rows[rows.len() - 2],
-    );
 
     if let Some(terrain) = terrain {
         terrain.draw(frame.buffer_mut(), area);
@@ -421,13 +390,4 @@ fn installed(install: &PackageInstall) -> Line<'static> {
         line.push(Span::raw(format!("setting up {current}")));
     }
     Line::from(line)
-}
-
-fn elapsed_words(elapsed: Duration) -> String {
-    let seconds = elapsed.as_secs();
-    match seconds {
-        0..=59 => format!("{seconds}s"),
-        60..=3_599 => format!("{}m {:02}s", seconds / 60, seconds % 60),
-        _ => format!("{}h {:02}m", seconds / 3_600, (seconds % 3_600) / 60),
-    }
 }
