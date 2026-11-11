@@ -275,7 +275,8 @@ impl RemoteTracker {
                 // the issue said In Progress because the run that just ended put it
                 // there. Leaving it says the agent is still busy when the only thing
                 // busy is the operator's attention.
-                if asking == Some(TaskAskKind::Review) && !self.is_settled(&report.issue_id) {
+                if asking == Some(TaskAskKind::ReadyForReview) && !self.is_settled(&report.issue_id)
+                {
                     *status = Some(TrackerStatus::InReview);
                 }
             }
@@ -289,6 +290,44 @@ impl RemoteTracker {
                     &stable_id(&format!("{}-{index}", report.task_id), "failed"),
                     AgentActivityContent::Error {
                         body: failure_notice(error),
+                    },
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+            }
+            // A task that was awake has the operator's message in the turn it is in, and
+            // one that was not is woken to read it. Only the loop knows which, so nothing
+            // here asks the task how it feels.
+            TaskHistoryEvent::Steer => {
+                let agent = host
+                    .session_agent(report.task_id.clone())
+                    .await
+                    .ok()
+                    .flatten();
+                let body = match agent
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|agent| !agent.is_empty())
+                {
+                    Some(agent) => {
+                        format!("altitude forwarded a new message to {}", agent_name(agent))
+                    }
+                    None => "altitude forwarded a new message to the agent".to_owned(),
+                };
+                self.say_system(
+                    report,
+                    &stable_id(&format!("{}-{index}", report.task_id), "steered"),
+                    AgentActivityContent::Thought { body },
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+            }
+            TaskHistoryEvent::Wake => {
+                self.say_system(
+                    report,
+                    &stable_id(&format!("{}-{index}", report.task_id), "woken"),
+                    AgentActivityContent::Thought {
+                        body: "altitude is waking this task to read a new message.".to_owned(),
                     },
                 )
                 .await
@@ -383,9 +422,19 @@ impl RemoteTracker {
             TaskHistoryEvent::OperatorSignalResolved {
                 signal_id,
                 resolved: true,
+                resolving_message_id,
                 ..
             } => {
-                self.follow_signal_thread(report, signal_id, true).await;
+                let settled = threads
+                    .iter()
+                    .find(|thread| &thread.id == signal_id)
+                    .and_then(|thread| {
+                        resolving_message_id
+                            .as_deref()
+                            .and_then(|id| thread.messages.iter().find(|message| message.id == id))
+                    });
+                self.follow_signal_thread(report, signal_id, true, settled)
+                    .await;
                 // Answering a question puts the work back in progress: the issue
                 // said In Review while the task was waiting, and it is not waiting
                 // any more. An issue whose ending was already written is left as
@@ -401,13 +450,15 @@ impl RemoteTracker {
             } => {
                 // Reopening a thread says the question is live again, so the
                 // tracker shows it open and the issue is waiting on the operator.
-                self.follow_signal_thread(report, signal_id, false).await;
+                self.follow_signal_thread(report, signal_id, false, None)
+                    .await;
                 if !self.is_settled(&report.issue_id) {
                     *status = Some(TrackerStatus::InReview);
                 }
             }
             TaskHistoryEvent::OperatorSignalConfirmed { signal_id } => {
-                self.follow_signal_thread(report, signal_id, true).await;
+                self.follow_signal_thread(report, signal_id, true, None)
+                    .await;
                 self.finish_accepted(host, report, &events[..=index])
                     .await?;
                 return Ok(Some(()));

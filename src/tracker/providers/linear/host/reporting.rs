@@ -1,7 +1,7 @@
 use super::ledger::Cursor;
 use crate::tracker::{AskSurface, ask_marker};
 use crate::{
-    task::{TaskAsk, TaskAskKind, TaskHistoryEvent, picture},
+    task::{TaskAsk, TaskAskAuthor, TaskAskKind, TaskAskMessage, TaskHistoryEvent, picture},
     tracker::{IssueReference, TrackerStatus, providers::linear::automation::AgentActivityContent},
 };
 use futures_util::future::join_all;
@@ -512,23 +512,6 @@ impl RemoteTracker {
     // the state it is in, replaced by the next thing this machine says. Neither is a
     // reply: nothing here is addressed to anybody and nothing here is news worth a
     // notification.
-    // A task this machine has just woken says so before the agent's first line: the
-    // operator who wrote in has to see that it was taken, and a session that is about
-    // to work should not sit at "finished" until the model catches up.
-    pub(super) async fn note_wake(&self, report: &Cursor, why: &str) {
-        let id = stable_id(
-            &report.task_id,
-            &format!("wake-{}:{}", self.started_at_ms, now_ms()),
-        );
-        let body = format!("altitude is waking this task: {why}.");
-        if let Err(error) = self
-            .say_system(report, &id, AgentActivityContent::Thought { body })
-            .await
-        {
-            tracing::debug!(task = %report.task_id, %error, "could not say a task was woken");
-        }
-    }
-
     pub(super) async fn report_activity(&self, host: &dyn DelegatedWork) {
         let bound = match host.bound_tasks().await {
             Ok(bound) => bound,
@@ -684,7 +667,7 @@ impl RemoteTracker {
         let marker = ask_marker(&report.task_id, signal_id);
         let body = self.hosted_body(body).await;
         let (body, status) = match kind {
-            TaskAskKind::Steer => {
+            TaskAskKind::BlockingQuestion => {
                 // A question is not a review: the work is still in progress, and
                 // moving the issue would tell a reader the milestone is finished.
                 // The ask is what asks for attention.
@@ -694,7 +677,7 @@ impl RemoteTracker {
                     None,
                 )
             }
-            TaskAskKind::Review => {
+            TaskAskKind::ReadyForReview => {
                 let who = self.operator_mention(&report.tracker_user_id);
                 let mut body = format!(
                     "**◆ Ready to review:** {}\n\n{who} {}",
@@ -727,7 +710,7 @@ impl RemoteTracker {
                 return;
             }
         }
-        let id = stable_id("reply", &format!("{}:{signal_id}:{body}", report.task_id));
+        let id = ask_reply_id(&report.task_id, signal_id, body);
         if let Err(error) = self
             .config
             .automation
@@ -748,6 +731,7 @@ impl RemoteTracker {
         report: &Cursor,
         signal_id: &str,
         resolved: bool,
+        settled: Option<&TaskAskMessage>,
     ) {
         let marker = ask_marker(&report.task_id, signal_id);
         // A signal resolved before this machine could report it has no discussion to
@@ -761,7 +745,21 @@ impl RemoteTracker {
                 return;
             }
         }
-        if let Err(error) = self.config.automation.close_ask(&marker, resolved).await {
+        // Which comment closed the thread, when the agent named one of its own words.
+        let resolving = settled.and_then(|message| match message.author {
+            // A reply this machine published has an id only this side derives, and it
+            // was published under exactly that id.
+            TaskAskAuthor::Agent => Some(ask_reply_id(&report.task_id, signal_id, &message.body)),
+            // A person's comment has an id in the tracker already, and this machine
+            // never kept it: the provider names their last word in the thread itself.
+            TaskAskAuthor::Operator => None,
+        });
+        if let Err(error) = self
+            .config
+            .automation
+            .close_ask(&marker, resolved, resolving.as_deref())
+            .await
+        {
             tracing::warn!(
                 task = %report.task_id,
                 signal = signal_id,
@@ -785,7 +783,8 @@ impl RemoteTracker {
             if !seen.insert(signal.id.clone()) {
                 continue;
             }
-            self.follow_signal_thread(report, &signal.id, true).await;
+            self.follow_signal_thread(report, &signal.id, true, None)
+                .await;
         }
     }
 
@@ -999,7 +998,7 @@ impl RemoteTracker {
             Some((TaskExecutionStatus::Running | TaskExecutionStatus::Pending, _)) => {
                 Some(TrackerStatus::InProgress)
             }
-            Some((TaskExecutionStatus::Paused, Some(TaskAskKind::Review))) => {
+            Some((TaskExecutionStatus::Paused, Some(TaskAskKind::ReadyForReview))) => {
                 Some(TrackerStatus::InReview)
             }
             Some((TaskExecutionStatus::Completed, _)) if !self.is_settled(&report.issue_id) => {

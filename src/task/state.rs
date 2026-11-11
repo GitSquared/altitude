@@ -45,12 +45,11 @@ pub enum TaskInputSource {
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, sqlx::Type)]
 #[serde(rename_all = "snake_case")]
 #[sqlx(rename_all = "snake_case")]
-// An ask is the one thing a task can want from a person: a question that stops the work
-// until it is answered, or a delivery that wants accepting. Everything else a task has to
-// say is a message, and a message wants nothing.
+// What a thread wants from a person: an answer the work cannot go on without, or work
+// that is ready for them to review.
 pub enum TaskAskKind {
-    Steer,
-    Review,
+    BlockingQuestion,
+    ReadyForReview,
 }
 
 // What a pause means, said once. The tracker writes it into a session and the
@@ -178,6 +177,8 @@ pub struct TaskAsk {
     pub messages: Vec<TaskAskMessage>,
     pub resolved: bool,
     pub resolved_by: Option<TaskAskAuthor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolving_message_id: Option<String>,
     pub resolved_at_ms: Option<i64>,
     #[serde(default)]
     pub transitions: Vec<AskTransition>,
@@ -415,10 +416,22 @@ pub enum TaskHistoryEvent {
         author: TaskAskAuthor,
         body: String,
     },
+    // A message from the operator reached a task that was not working, and the task was
+    // woken to read it.
+    Wake,
+    // A message from the operator reached a task that was already working, and the agent
+    // was handed it in the turn it is in. Which of the two happened is the loop's to
+    // know: nothing else can tell a task that was awake from one that was not.
+    Steer,
     OperatorSignalResolved {
         signal_id: String,
         resolved: bool,
         by: TaskAskAuthor,
+        // The message that settled the thread, when the agent named one. A tracker
+        // reads a closed thread as answered by whatever closed it, and only the agent
+        // knows which of its own words closed a thread it withdrew unanswered.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resolving_message_id: Option<String>,
     },
     OperatorSignalConfirmed {
         signal_id: String,

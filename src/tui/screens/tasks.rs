@@ -60,8 +60,8 @@ impl Standing {
             _ => {}
         }
         match summary.leading_ask.as_ref().map(|ask| ask.kind) {
-            Some(TaskAskKind::Steer) => return Self::NeedsYou,
-            Some(TaskAskKind::Review) => return Self::ReadyToReview,
+            Some(TaskAskKind::BlockingQuestion) => return Self::NeedsYou,
+            Some(TaskAskKind::ReadyForReview) => return Self::ReadyToReview,
             None => {}
         }
         // A question that came through the pause rather than a signal is the same
@@ -94,16 +94,20 @@ impl Standing {
             Self::Paused => "PAUSED".to_owned(),
             Self::Done => "DONE".to_owned(),
             // The signals' own words, in the case a heading is written in.
-            Self::NeedsYou => signal::view(TaskAskKind::Steer).task_label.to_uppercase(),
-            Self::ReadyToReview => signal::view(TaskAskKind::Review).task_label.to_uppercase(),
+            Self::NeedsYou => signal::view(TaskAskKind::BlockingQuestion)
+                .task_label
+                .to_uppercase(),
+            Self::ReadyToReview => signal::view(TaskAskKind::ReadyForReview)
+                .task_label
+                .to_uppercase(),
         }
     }
 
     fn mark(self) -> char {
         match self {
             Self::Failed => '✕',
-            Self::NeedsYou => signal::view(TaskAskKind::Steer).symbol,
-            Self::ReadyToReview => signal::view(TaskAskKind::Review).symbol,
+            Self::NeedsYou => signal::view(TaskAskKind::BlockingQuestion).symbol,
+            Self::ReadyToReview => signal::view(TaskAskKind::ReadyForReview).symbol,
             Self::Working => '●',
             Self::Queued => '◔',
             Self::Limited => '◷',

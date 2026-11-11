@@ -79,6 +79,9 @@ pub trait DelegatedWork: Send + Sync + 'static {
         signal_id: String,
         answer: String,
     ) -> DelegatedWorkFuture<'_, ()>;
+    // A reaction, which is not an instruction: the machine hands it to a task that is
+    // working and does nothing for one that is not.
+    fn react(&self, task_id: String, note: String) -> DelegatedWorkFuture<'_, ()>;
     fn accept(&self, task_id: String, signal_id: String) -> DelegatedWorkFuture<'_, ()>;
     fn is_kept(&self, task_id: String) -> DelegatedWorkFuture<'_, bool>;
 

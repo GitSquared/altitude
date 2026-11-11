@@ -12,13 +12,13 @@ pub struct SignalView {
 
 pub fn view(kind: TaskAskKind) -> SignalView {
     match kind {
-        TaskAskKind::Review => SignalView {
+        TaskAskKind::ReadyForReview => SignalView {
             label: "Ready to review",
             task_label: "Ready to review",
             symbol: '◆',
             tone: palette::good(),
         },
-        TaskAskKind::Steer => SignalView {
+        TaskAskKind::BlockingQuestion => SignalView {
             label: "Blocked",
             task_label: "Needs you",
             symbol: '?',

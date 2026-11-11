@@ -227,10 +227,17 @@ impl DelegatedWork for OwnTasks {
     fn accept(&self, task_id: String, signal_id: String) -> DelegatedWorkFuture<'_, ()> {
         Box::pin(async move {
             self.tasks
-                .service()
-                .confirm_operator_signal(&task_id, &signal_id)
+                .accept(&task_id, &signal_id)
                 .await
-                .map(|_| ())
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    fn react(&self, task_id: String, note: String) -> DelegatedWorkFuture<'_, ()> {
+        Box::pin(async move {
+            self.tasks
+                .react(&task_id, note)
+                .await
                 .map_err(|error| error.to_string())
         })
     }

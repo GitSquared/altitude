@@ -159,10 +159,8 @@ impl RemoteTracker {
         // An answer in the issue belongs in the ask it answers. One is open at a time,
         // so there is nothing to choose between; a task with none is steered directly.
         let Some(signal) = waiting.first().copied() else {
-            self.note_wake(&report, "the operator answered").await;
             return host.steer(report.task_id.clone(), answer.to_owned()).await;
         };
-        self.note_wake(&report, "the operator answered").await;
         host.reply(report.task_id.clone(), signal.id.clone(), answer.to_owned())
             .await
     }
@@ -192,7 +190,6 @@ impl RemoteTracker {
         else {
             return Ok(());
         };
-        let report = self.report_for_task(&task.task_id);
         let operator = self.user_for_owner(&task.owner);
         let actor = if operator.as_deref() == Some(event.actor_id.as_str()) {
             Actor::Operator
@@ -252,10 +249,6 @@ impl RemoteTracker {
                 } else {
                     event.body.clone()
                 };
-                if let Some(report) = &report {
-                    self.note_wake(report, "the operator wrote on the issue")
-                        .await;
-                }
                 if let Some(thread) = &answered {
                     // The reply answers the thread it is in. Whether an answer
                     // settles a question is the agent's to judge and it says so with
@@ -378,14 +371,10 @@ impl RemoteTracker {
             .find(|line| !line.is_empty())
             .unwrap_or("a comment in this thread");
         let said = format!(
-            "The operator reacted {} to this comment:\n\n{about}",
-            event.emoji
+            "The operator reacted {} to a comment in the thread \"{}\":\n\n{about}",
+            event.emoji, thread.title
         );
-        if let Some(report) = self.report_for_task(&task.task_id) {
-            self.note_wake(&report, "the operator reacted to a message")
-                .await;
-        }
-        host.reply(task.task_id, thread.id, said).await
+        host.react(task.task_id, said).await
     }
 
     pub(super) async fn react_eyes(&self, comment_id: &str) {

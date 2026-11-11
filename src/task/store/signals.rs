@@ -108,6 +108,7 @@ impl TaskStore {
                             }],
                             resolved: false,
                             resolved_by: None,
+                            resolving_message_id: None,
                             resolved_at_ms: None,
                             transitions: Vec::new(),
                             proposal: signal.proposal,
@@ -135,10 +136,13 @@ impl TaskStore {
                     signal_id,
                     resolved,
                     by,
+                    resolving_message_id,
                 } => {
                     if let Some(thread) = threads.iter_mut().find(|thread| thread.id == signal_id) {
                         thread.resolved = resolved;
                         thread.resolved_by = resolved.then_some(by);
+                        thread.resolving_message_id =
+                            resolved.then_some(resolving_message_id).flatten();
                         thread.resolved_at_ms = resolved.then_some(at_ms);
                         thread.transitions.push(AskTransition {
                             at_ms,
@@ -241,6 +245,7 @@ impl TaskStore {
         signal_id: &str,
         resolved: bool,
         by: TaskAskAuthor,
+        resolving_message_id: Option<String>,
     ) -> Result<Task, TaskError> {
         self.thread_of(task_id, signal_id).await?;
         self.append_events(
@@ -249,6 +254,7 @@ impl TaskStore {
                 signal_id: signal_id.to_owned(),
                 resolved,
                 by,
+                resolving_message_id,
             }],
         )
         .await
@@ -330,7 +336,7 @@ impl TaskStore {
         // host watches them and delivers it when they can answer, so the operator
         // is asked to look at work that is actually reviewable. One with nothing to
         // watch goes out at once.
-        let event = if kind == TaskAskKind::Review && !task.code_contributions.is_empty() {
+        let event = if kind == TaskAskKind::ReadyForReview && !task.code_contributions.is_empty() {
             TaskHistoryEvent::ReviewDeferred { signal }
         } else {
             TaskHistoryEvent::OperatorSignalRaised { signal }
@@ -375,7 +381,7 @@ impl TaskStore {
         .fetch_one(&mut *transaction)
         .await
         .map_err(TaskError::Database)?;
-        if kind.0 != TaskAskKind::Review {
+        if kind.0 != TaskAskKind::ReadyForReview {
             return Err(TaskError::OperationRejected(
                 "only a review request can be accepted",
             ));

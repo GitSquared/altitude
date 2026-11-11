@@ -99,8 +99,8 @@ pub fn primary_action(thread: &TaskAsk) -> Option<SignalAction> {
         return Some(SignalAction::Apply);
     }
     Some(match thread.kind {
-        TaskAskKind::Steer => SignalAction::Reply,
-        TaskAskKind::Review => SignalAction::Accept,
+        TaskAskKind::BlockingQuestion => SignalAction::Reply,
+        TaskAskKind::ReadyForReview => SignalAction::Accept,
     })
 }
 
@@ -111,7 +111,7 @@ pub fn secondary_action(thread: &TaskAsk) -> Option<SignalAction> {
         return None;
     }
     Some(
-        if thread.kind == TaskAskKind::Steer || thread.proposal.is_some() {
+        if thread.kind == TaskAskKind::BlockingQuestion || thread.proposal.is_some() {
             SignalAction::Resolve
         } else {
             SignalAction::Reply

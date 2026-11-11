@@ -57,13 +57,22 @@ where
             body,
             external_id: None,
         };
-        let task = self
-            .record(&task.id, &[TaskHistoryEvent::TaskInputExpressed { input }])
-            .await?;
-        if matches!(
+        let awake = matches!(
             task.facts.execution_status,
             TaskExecutionStatus::Running | TaskExecutionStatus::Pending
-        ) {
+        );
+        let taken = if awake {
+            TaskHistoryEvent::Steer
+        } else {
+            TaskHistoryEvent::Wake
+        };
+        let task = self
+            .record(
+                &task.id,
+                &[TaskHistoryEvent::TaskInputExpressed { input }, taken],
+            )
+            .await?;
+        if awake {
             return Ok(());
         }
         let intends = self.inputs(&task.id).await?;
@@ -72,6 +81,51 @@ where
             render_inputs(&intends)
         );
         self.queue_wake(&task, prompt).await
+    }
+
+    // A reaction is not an instruction: it is read by a run that is already going, and a
+    // task that is not working has not asked for a sandbox to be built so it can hear
+    // about an emoji. Nothing is said in the thread either, because an operator's message
+    // there is their answer and this is not one.
+    pub async fn note_operator_reaction(
+        &self,
+        task_id: &str,
+        note: String,
+    ) -> Result<(), TaskServiceError> {
+        let task = self
+            .store
+            .get(task_id)
+            .await
+            .map_err(TaskServiceError::Task)?
+            .ok_or(TaskServiceError::Task(TaskError::OperationRejected(
+                "this task is no longer in play",
+            )))?;
+        if !matches!(
+            task.facts.execution_status,
+            TaskExecutionStatus::Running | TaskExecutionStatus::Pending
+        ) {
+            return Ok(());
+        }
+        let input = TaskInput {
+            id: uuid::Uuid::new_v4().to_string(),
+            at_ms: chrono::Utc::now().timestamp_millis(),
+            author: TaskInputAuthor::Operator {
+                id: task.facts.operator_id.clone().unwrap_or_default(),
+                label: task.facts.operator_label.clone().unwrap_or_default(),
+            },
+            source: TaskInputSource::Altitude,
+            body: note,
+            external_id: None,
+        };
+        self.record(
+            &task.id,
+            &[
+                TaskHistoryEvent::TaskInputExpressed { input },
+                TaskHistoryEvent::Steer,
+            ],
+        )
+        .await?;
+        Ok(())
     }
 
     pub async fn unresolved_signal_threads(
@@ -98,7 +152,7 @@ where
         resolved: bool,
     ) -> Result<Task, TaskServiceError> {
         self.store
-            .resolve_signal(task_id, signal_id, resolved, TaskAskAuthor::Operator)
+            .resolve_signal(task_id, signal_id, resolved, TaskAskAuthor::Operator, None)
             .await
             .map_err(TaskServiceError::Task)
     }
@@ -148,12 +202,21 @@ where
             .await
             .map_err(TaskServiceError::Task)?;
         if task.facts.accepted
-            || matches!(
-                task.facts.execution_status,
-                TaskExecutionStatus::Running | TaskExecutionStatus::Pending
-            )
             || task.facts.execution_pause_reason == Some(TaskExecutionPauseReason::Transfer)
         {
+            return Ok(());
+        }
+        let awake = matches!(
+            task.facts.execution_status,
+            TaskExecutionStatus::Running | TaskExecutionStatus::Pending
+        );
+        let taken = if awake {
+            TaskHistoryEvent::Steer
+        } else {
+            TaskHistoryEvent::Wake
+        };
+        let task = self.record(&task.id, &[taken]).await?;
+        if awake {
             return Ok(());
         }
         // The turn reads the whole task and the thread; it does not receive a

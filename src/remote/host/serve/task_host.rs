@@ -121,8 +121,7 @@ impl TaskHost for OwnTasks {
                     .map_err(|error| error.to_string())?,
                 SignalCommand::Accept { task_id, signal_id } => {
                     tasks
-                        .service()
-                        .confirm_operator_signal(&task_id, &signal_id)
+                        .accept(&task_id, &signal_id)
                         .await
                         .map_err(|error| error.to_string())?;
                 }

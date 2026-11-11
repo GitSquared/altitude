@@ -231,6 +231,7 @@ where
                 signal_id: deferred.signal.id.clone(),
                 resolved: true,
                 by: TaskAskAuthor::Agent,
+                resolving_message_id: None,
             },
         ];
         if is_running {

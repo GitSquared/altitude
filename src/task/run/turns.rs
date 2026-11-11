@@ -235,6 +235,7 @@ where
                             signal_id: deferred.signal.id,
                             resolved: true,
                             by: TaskAskAuthor::Operator,
+                            resolving_message_id: None,
                         },
                     ],
                 )
@@ -247,7 +248,10 @@ where
         let mut answered = Vec::new();
         for thread in self.signal_threads(&task.id).await? {
             if !thread.is_unresolved()
-                || !matches!(thread.kind, TaskAskKind::Steer | TaskAskKind::Review)
+                || !matches!(
+                    thread.kind,
+                    TaskAskKind::BlockingQuestion | TaskAskKind::ReadyForReview
+                )
             {
                 continue;
             }
@@ -255,6 +259,7 @@ where
                 signal_id: thread.id,
                 resolved: true,
                 by: TaskAskAuthor::Operator,
+                resolving_message_id: None,
             });
         }
         if !answered.is_empty() {
@@ -361,7 +366,10 @@ where
                 // and it stops nothing: an agent that raises one every turn is
                 // circling exactly like one that says nothing at all.
                 TaskHistoryEvent::OperatorSignalRaised { signal }
-                    if !matches!(signal.kind, TaskAskKind::Steer | TaskAskKind::Review) =>
+                    if !matches!(
+                        signal.kind,
+                        TaskAskKind::BlockingQuestion | TaskAskKind::ReadyForReview
+                    ) =>
                 {
                     continue;
                 }

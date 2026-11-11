@@ -121,10 +121,10 @@ fn pause_message(
     asking: Option<TaskAskKind>,
 ) -> String {
     match (reason, asking) {
-        (TaskExecutionPauseReason::AwaitingOperator, Some(TaskAskKind::Steer)) => {
+        (TaskExecutionPauseReason::AwaitingOperator, Some(TaskAskKind::BlockingQuestion)) => {
             format!("Waiting for {operator} on the question.")
         }
-        (TaskExecutionPauseReason::AwaitingOperator, Some(TaskAskKind::Review)) => {
+        (TaskExecutionPauseReason::AwaitingOperator, Some(TaskAskKind::ReadyForReview)) => {
             format!("Waiting for {operator} on the review.")
         }
         (TaskExecutionPauseReason::AwaitingOperator, None) => format!("Waiting for {operator}."),
@@ -140,24 +140,26 @@ fn open_in(threads: &[TaskAsk], signal_id: &str) -> bool {
 
 fn picking_up(operator: Option<&str>, agent: Option<&str>) -> String {
     let operator = operator.map(str::trim).filter(|name| !name.is_empty());
-    // altitude names its agents in lower case, which belongs mid-sentence in the
-    // session summary and not in a sentence the operator reads.
     let agent = agent
         .map(str::trim)
         .filter(|agent| !agent.is_empty())
-        .map(|agent| {
-            let mut characters = agent.chars();
-            match characters.next() {
-                Some(first) => format!("{}{}", first.to_uppercase(), characters.as_str()),
-                None => String::new(),
-            }
-        })
+        .map(agent_name)
         .filter(|agent| !agent.is_empty());
     match (operator, agent) {
         (Some(operator), Some(agent)) => format!("{operator}'s {agent} is picking up this task."),
         (None, Some(agent)) => format!("{agent} is picking up this task."),
         (Some(operator), None) => format!("{operator}'s agent is picking up this task."),
         (None, None) => "altitude is picking up this task.".to_owned(),
+    }
+}
+
+// altitude names its agents in lower case, which belongs mid-sentence in the session
+// summary and not in a sentence the operator reads.
+fn agent_name(agent: &str) -> String {
+    let mut characters = agent.chars();
+    match characters.next() {
+        Some(first) => format!("{}{}", first.to_uppercase(), characters.as_str()),
+        None => String::new(),
     }
 }
 
@@ -180,6 +182,13 @@ fn stable_id(namespace: &str, discriminator: &str) -> String {
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
     uuid::Uuid::from_bytes(bytes).to_string()
+}
+
+// The id a thread's reply is published under. Whoever publishes it and whoever closes
+// the thread behind it have to name the same comment, and neither keeps the other's
+// ids, so both derive it from the reply itself.
+fn ask_reply_id(task_id: &str, signal_id: &str, body: &str) -> String {
+    stable_id("reply", &format!("{task_id}:{signal_id}:{body}"))
 }
 
 fn contribution_urls(events: &[(i64, TaskHistoryEvent)]) -> Vec<String> {

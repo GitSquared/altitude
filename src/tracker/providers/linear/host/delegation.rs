@@ -732,7 +732,8 @@ impl RemoteTracker {
             .into_iter()
             .filter(TaskAsk::is_unresolved)
             .find(|signal| {
-                signal.kind == TaskAskKind::Review && signal.last_raised_at_ms <= occurred_at_ms
+                signal.kind == TaskAskKind::ReadyForReview
+                    && signal.last_raised_at_ms <= occurred_at_ms
             }))
     }
 

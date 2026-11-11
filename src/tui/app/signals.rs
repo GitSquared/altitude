@@ -566,7 +566,7 @@ impl App {
                     .await;
             }
             SignalAction::Accept => {
-                if thread.kind != TaskAskKind::Review || thread.resolved {
+                if thread.kind != TaskAskKind::ReadyForReview || thread.resolved {
                     return;
                 }
                 let question = "Accept this work and close the task?\n\

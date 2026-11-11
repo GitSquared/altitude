@@ -26,8 +26,14 @@ pub trait AskSurface: Send + Sync {
 
     // Closing is the operator's word that the question is over. A surface without
     // the idea keeps the ask where it is and returns success: there is nothing to
-    // do, not something that failed.
-    fn close_ask<'a>(&'a self, _marker: &'a str, _closed: bool) -> TrackerFuture<'a, ()> {
+    // do, not something that failed. `resolving` is the comment that settled it,
+    // when one is known; a surface that shows a close as answered finds its own.
+    fn close_ask<'a>(
+        &'a self,
+        _marker: &'a str,
+        _closed: bool,
+        _resolving: Option<&'a str>,
+    ) -> TrackerFuture<'a, ()> {
         Box::pin(async { Ok(()) })
     }
 

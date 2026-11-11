@@ -245,6 +245,25 @@ where
         Ok(())
     }
 
+    // Accepting is the end of a task whichever door it came through, and the ending is
+    // announced here rather than by whoever asked for it: a card on another machine goes
+    // away when the task does, not when something happens to look again.
+    pub async fn accept(&self, task_id: &str, signal_id: &str) -> Result<(), TaskServiceError> {
+        let task = self
+            .service
+            .confirm_operator_signal(task_id, signal_id)
+            .await?;
+        let _ = self
+            .events
+            .send(TaskExecutionUpdate::Removed(task.id, Ok(())));
+        Ok(())
+    }
+
+    // A reaction is news for a run that is going and nothing worth starting one for.
+    pub async fn react(&self, task_id: &str, note: String) -> Result<(), TaskServiceError> {
+        self.service.note_operator_reaction(task_id, note).await
+    }
+
     fn activity(&self) -> MutexGuard<'_, HashMap<String, Activity>> {
         self.current_activity
             .lock()

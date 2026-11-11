@@ -299,8 +299,8 @@ impl TaskAgentTools {
         let title = argument(arguments, "title")?;
         let body = argument(arguments, "body")?;
         let kind = match arguments.get("kind").and_then(Value::as_str) {
-            Some("steer") => TaskAskKind::Steer,
-            Some("review") => TaskAskKind::Review,
+            Some("steer") => TaskAskKind::BlockingQuestion,
+            Some("review") => TaskAskKind::ReadyForReview,
             Some(other) => {
                 return Err(AgentToolError::new(format!(
                     "unknown ask kind {other:?}; use steer or review"
@@ -409,16 +409,36 @@ impl TaskAgentTools {
             .get("resolved")
             .and_then(Value::as_bool)
             .unwrap_or(true);
-        if let Some(reason) = arguments.get("reason").and_then(Value::as_str)
-            && !reason.trim().is_empty()
-        {
-            self.store
-                .message_signal(&self.task_id, signal_id, reason)
-                .await
-                .map_err(tool_failure)?;
+        let resolving_message_id = arguments
+            .get("resolving_message_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned);
+        if let Some(id) = &resolving_message_id {
+            let thread = self.thread(signal_id).await?;
+            let Some(message) = thread.messages.iter().find(|message| &message.id == id) else {
+                return Err(AgentToolError::new(format!(
+                    "this thread has no message {id}: read it to see the ids before naming one"
+                )));
+            };
+            // Only a reply of the agent's own can be named: what a person wrote is a
+            // comment the tracker already has an id for, and altitude does not keep it.
+            if message.author != TaskAskAuthor::Agent {
+                return Err(AgentToolError::new(format!(
+                    "{id} is the operator's message: leave resolving_message_id out when their \
+                     answer settled the thread"
+                )));
+            }
         }
         self.store
-            .resolve_signal(&self.task_id, signal_id, resolved, TaskAskAuthor::Agent)
+            .resolve_signal(
+                &self.task_id,
+                signal_id,
+                resolved,
+                TaskAskAuthor::Agent,
+                resolving_message_id,
+            )
             .await
             .map_err(tool_failure)?;
         self.announce();
@@ -491,7 +511,7 @@ impl TaskAgentTools {
             .store
             .open_signal(
                 &self.task_id,
-                TaskAskKind::Steer,
+                TaskAskKind::BlockingQuestion,
                 "The project setup needs a change",
                 reason,
                 Some(proposal),
@@ -558,6 +578,7 @@ fn thread_json(thread: &TaskAsk, attachments: &Path) -> Value {
         "status": if thread.is_resolved() { "resolved" } else { "unresolved" },
         "opened_at_ms": thread.opened_at_ms,
         "resolved_by": thread.resolved_by,
+        "resolving_message_id": thread.resolving_message_id,
         "resolved_at_ms": thread.resolved_at_ms,
         "messages": thread.messages,
         "proposal": thread.proposal,
@@ -586,18 +607,18 @@ impl AgentToolProvider for TaskAgentTools {
             ),
             AgentTool::new(
                 "tasks_signal",
-                "Read and change this task's conversations with the operator, which is the only way you address them. A body is markdown their interface draws, and may carry diagrams and pictures.\n\nAn ask is the one thing that needs a person, and there are two kinds. `steer` stops the work until they answer, because continuing without their word would be guessing at their intent. `review` puts finished work to them for acceptance, which only they can give; altitude holds it until the linked pull requests settle. One ask is open at a time, and an ask is a wait rather than a log. While it is open and unanswered, what has changed belongs in that thread. When their answer moves you past what you asked about, that thread is answered: say so in it, resolve it, do the work, and when you have the next thing to look at, open a new ask on what you now have. A review of work you have since replaced, left open in front of the new one, is a decision they cannot make.\n\nEverything else you have to say is a message: say it in your turn and it is delivered, in a form the operator reads at a glance and can unfold. What you assumed, what you found, what you deliberately did not do, and what you chose without them belong there, because they ask nothing and cost nobody a reply. A conclusion you wrote down so that they may challenge it later is a message, not a question: a question is only for what you cannot proceed without.\n\nA review is the operator's whole picture of a delivery, so it reads in the order they would ask it: what changed since they last looked, what you decided without them and how to undo it, what you verified and what you could not, and anything you deliberately left undone. Prose, because a form is longer to read than a paragraph: headings only when the answer is genuinely long. altitude appends what it can confirm for itself, so do not restate the pull request and the checks. A question is only for what you cannot proceed without: if you can name what you would do without their answer, that is a decision, and decisions are what messages are for.\n\naction=list returns every thread; action=read needs signal_id; action=open needs kind, title and body; action=reply needs signal_id and body; action=resolve needs signal_id, defaults resolved=true, and accepts an optional reason. A reply is a message and not a question: it joins the thread and leaves it as open or closed as it was, so reopening one is its own action. Messages carry ids m1, m2, ... inside their thread.\n\nResolving a thread means it needs nothing more from the operator. It does not mean you have said your part, and it does not mean your last reply was answered: it means the reason the thread exists is over and this task is not waiting on anything in it. A thread that asked nothing — a question they have answered themselves, or one you opened and then no longer need — is yours to close, and say in it what it was for so it closes as withdrawn rather than as answered. If their message asks you something, or you still need a direction from them, it stays unresolved. This holds for a review: when their answer moves you past what you put in front of them, that review is over and closing it is yours to do before you open the next one — but only they accept one, and a review you closed is not work they agreed to.",
+                "Read and change this task's conversations with the operator, which is the only way you address them. A body is markdown their interface draws, and may carry diagrams and pictures.\n\nAn ask is the one thing that needs a person, and there are two kinds. `question` stops the work until they answer, because continuing without their word would be guessing at their intent. `acceptance` puts finished work to them for accepting, which only they can give; altitude holds it until the linked pull requests settle. One ask is open at a time, and an ask is a wait rather than a log. While it is open and unanswered, what has changed belongs in that thread. When their answer moves you past what you asked about, that thread is answered: say so in it, resolve it, do the work, and when you have the next thing to look at, open a new ask on what you now have. A delivery you have since replaced, left open in front of them for acceptance, is a decision they cannot make.\n\nEverything else you have to say is a message: say it in your turn and it is delivered, in a form the operator reads at a glance and can unfold. What you assumed, what you found, what you deliberately did not do, and what you chose without them belong there, because they ask nothing and cost nobody a reply. A conclusion you wrote down so that they may challenge it later is a message, not a question: a question is only for what you cannot proceed without.\n\nAn acceptance is the operator's whole picture of a delivery, so it reads in the order they would ask it: what changed since they last looked, what you decided without them and how to undo it, what you verified and what you could not, and anything you deliberately left undone. Prose, because a form is longer to read than a paragraph: headings only when the answer is genuinely long. altitude appends what it can confirm for itself, so do not restate the pull request and the checks. A question is only for what you cannot proceed without: if you can name what you would do without their answer, that is a decision, and decisions are what messages are for.\n\naction=list returns every thread; action=read needs signal_id; action=open needs kind, title and body; action=reply needs signal_id and body; action=resolve needs signal_id and defaults resolved=true. A reply is a message and not a question: it joins the thread and leaves it as open or closed as it was, so reopening one is its own action. Messages carry ids m1, m2, ... inside their thread. What you have to say after a thread has been settled belongs in a new thread, not in the closed one: a follow-up in a settled thread reads as closing it again, and the operator finds it where they stopped looking.\n\nResolving a thread means it needs nothing more from the operator. It does not mean you have said your part, and it does not mean your last reply was answered: it means the reason the thread exists is over and this task is not waiting on anything in it. When a thread closes on something you said — a withdrawn question, a direction you settled yourself — name that message so the thread reads as closed by it; when their answer settled it, name nothing. A thread that asked nothing — a question they have answered themselves, or one you opened and then no longer need — is yours to close, and say in it what it was for so it closes as withdrawn rather than as answered. If their message asks you something, or you still need a direction from them, it stays unresolved. This holds for an acceptance: when their answer moves you past what you put in front of them, that delivery is no longer what you are asking them for, and closing it is yours to do before you put the next one in front of them — but only they accept one, and a delivery you closed is not work they agreed to.",
                 json!({
                     "type": "object",
                     "additionalProperties": false,
                     "properties": {
-                        "action": { "enum": ["list", "read", "open", "reply", "resolve"], "description": "list all threads; read one; open a steer or a review; reply in one; resolve or reopen one." },
+                        "action": { "enum": ["list", "read", "open", "reply", "resolve"], "description": "list all threads; read one; open a blocking question or a review of finished work; reply in one; resolve or reopen one." },
                         "signal_id": { "type": "string", "description": "The thread for read, reply, or resolve." },
-                        "kind": { "enum": ["steer", "review"], "description": "For open: steer stops the task until they answer, because you cannot proceed without their word; review puts finished work to them for acceptance." },
+                        "kind": { "enum": ["blocking_question", "ready_for_review"], "description": "For open: blocking_question stops the task until they answer, because you cannot proceed without their word; ready_for_review puts finished work to them to review." },
                         "title": { "type": "string", "description": "For open: one line the operator reads in the list." },
                         "body": { "type": "string", "description": "For open or reply: the message itself, as the operator reads it. Markdown: headings, lists, tables, `code`, quotes and links are drawn as such. A fenced ```mermaid block is drawn as a diagram in the operator's interface and in the task's issue. A picture from your workspace goes in as ordinary markdown, `![what it shows](/absolute/path/in/your/workspace.png)`, and the operator sees the picture where you put it: use one for what only pixels can show, such as the screen you changed or the failure you are explaining. Do not prefix the body with status or a summary heading." },
                         "resolved": { "type": "boolean", "description": "For resolve: true to resolve, false to reopen. Defaults to true." },
-                        "reason": { "type": "string", "description": "For resolve: optional final message in the thread." }
+                        "resolving_message_id": { "type": "string", "description": "For resolve: the id of your own message that settled this thread, when one did. Leave it out when their answer is what closed it: the thread then closes without naming a comment." }
                     },
                     "required": ["action"]
                 }),

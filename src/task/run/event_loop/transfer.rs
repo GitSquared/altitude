@@ -387,7 +387,12 @@ where
             .unresolved_signal_threads(task_id)
             .await?
             .iter()
-            .any(|thread| matches!(thread.kind, TaskAskKind::Steer | TaskAskKind::Review));
+            .any(|thread| {
+                matches!(
+                    thread.kind,
+                    TaskAskKind::BlockingQuestion | TaskAskKind::ReadyForReview
+                )
+            });
         self.service
             .record(
                 task_id,
