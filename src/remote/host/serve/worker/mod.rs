@@ -1,0 +1,264 @@
+use std::{
+    collections::HashMap,
+    error::Error,
+    fmt, io,
+    io::IsTerminal,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+
+#[cfg(target_os = "linux")]
+use fuser::BackgroundSession;
+
+use iroh::{
+    EndpointAddr,
+    endpoint::Connection,
+    protocol::{AcceptError, ProtocolHandler, Router},
+};
+use tokio::{
+    signal::unix::{SignalKind, signal},
+    task::JoinHandle,
+    time,
+};
+
+use crate::{
+    agent::AgentEngines,
+    brand,
+    cli::{WORKER_GUIDE, WorkerArgs},
+    config::Config,
+    isolation::{
+        IsolationStatus, TestbedIsolation, prepare,
+        worker_protocol::{WORKER_ALPN, WorkerCall, WorkerReply, WorkerRequest},
+    },
+    logging,
+    remote::{
+        InstallationKey, LinkClient,
+        protocol::{RemoteTicket, WorkerReport, builder, read_frame, write_frame},
+    },
+    version::VERSION,
+};
+
+use super::workers::HEARTBEAT_INTERVAL;
+
+// The other end of the fleet contract: an empty host that knows nothing but who
+// made it. It registers, says it is still there, and answers the master's calls
+// for sandboxes on the same endpoint it registered over.
+pub(crate) async fn run(args: &WorkerArgs, base: Config) -> Result<(), Box<dyn Error>> {
+    // A worker is spawned by a script, never typed at a terminal. Running one by
+    // hand is how a host becomes a host by accident, so say what this is instead
+    // of taking the machine over.
+    if !args.yes && io::stdin().is_terminal() && io::stdout().is_terminal() {
+        println!("{WORKER_GUIDE}");
+        return Ok(());
+    }
+    logging::init_service();
+    tracing::info!(
+        "{}  altitude {VERSION} · isolation worker {}",
+        brand::MOUNTAIN,
+        args.name
+    );
+    let key = InstallationKey::load_or_create(base.data_dir().join("worker.key"))
+        .map_err(io::Error::other)?;
+    // A host is spawned for one task and its whole host is the sandbox, so it
+    // needs no nested microVM: the host is the boundary. The host engine is the
+    // closest thing we have — a chroot over the machine, not a microVM.
+    let engine = TestbedIsolation::new(&base);
+    // Preparing pulls the runtime and builds the base image, which is minutes of
+    // work. The host registers before it is ready so the master can see it, and
+    // says it is not ready until this finishes.
+    let readiness = Arc::new(Mutex::new(Readiness::Preparing));
+    {
+        let mut status = prepare(engine.clone());
+        let readiness = Arc::clone(&readiness);
+        tokio::spawn(async move {
+            loop {
+                match &*status.borrow_and_update() {
+                    IsolationStatus::Ready => {
+                        tracing::info!("sandbox runtime ready");
+                        *readiness.lock().expect("worker readiness") = Readiness::Ready;
+                        return;
+                    }
+                    IsolationStatus::Failed(error) => {
+                        tracing::error!(%error, "the sandbox runtime could not be prepared");
+                        *readiness.lock().expect("worker readiness") =
+                            Readiness::Failed(error.clone());
+                        return;
+                    }
+                    _ => {}
+                }
+                if status.changed().await.is_err() {
+                    return;
+                }
+            }
+        });
+    }
+
+    let endpoint = builder()
+        .secret_key(key.secret_key().clone())
+        .alpns(vec![WORKER_ALPN.to_vec()])
+        .bind()
+        .await
+        .map_err(io::Error::other)?;
+    let client = LinkClient::from_endpoint(endpoint.clone());
+    let master: RemoteTicket = args.master.parse().map_err(io::Error::other)?;
+    let peer: EndpointAddr = master.into();
+    let service = WorkerService {
+        engine,
+        config: base.clone(),
+        agents: AgentEngines::new(),
+        token: args.token.clone(),
+        snapshots_dir: base.task_snapshots_dir(),
+        readiness,
+        client: client.clone(),
+        master: peer.clone(),
+        channels: Arc::new(Mutex::new(HashMap::new())),
+        #[cfg(target_os = "linux")]
+        caches: Arc::new(Mutex::new(HashMap::new())),
+    };
+    let _router = Router::builder(endpoint)
+        .accept(WORKER_ALPN, service)
+        .spawn();
+
+    let capacity = local_capacity();
+    let mut terminate = signal(SignalKind::terminate())?;
+    let mut interrupt = signal(SignalKind::interrupt())?;
+
+    'serving: loop {
+        loop {
+            match client
+                .register_worker(peer.clone(), &args.token, &args.name, capacity)
+                .await
+            {
+                Ok(()) => break,
+                Err(error) => {
+                    tracing::warn!(%error, "could not register with the master; retrying");
+                    tokio::select! {
+                        _ = time::sleep(Duration::from_secs(5)) => {}
+                        _ = terminate.recv() => break 'serving,
+                        _ = interrupt.recv() => break 'serving,
+                    }
+                }
+            }
+        }
+        tracing::info!(master = %args.master, "registered as an isolation worker");
+        loop {
+            tokio::select! {
+                _ = time::sleep(HEARTBEAT_INTERVAL) => {
+                    if let Err(error) = client.worker_heartbeat(peer.clone(), &args.name).await {
+                        tracing::warn!(%error, "a heartbeat did not reach the master; registering again");
+                        break;
+                    }
+                }
+                _ = terminate.recv() => break 'serving,
+                _ = interrupt.recv() => break 'serving,
+            }
+        }
+    }
+    client.shutdown().await;
+    tracing::info!("isolation worker stopped");
+    Ok(())
+}
+
+struct WorkerService {
+    engine: TestbedIsolation,
+    config: Config,
+    // The same provider definitions the master builds recipes from, so a profile
+    // id is enough to rebuild a recipe here.
+    agents: AgentEngines,
+    token: String,
+    snapshots_dir: PathBuf,
+    readiness: Arc<Mutex<Readiness>>,
+    client: LinkClient,
+    master: EndpointAddr,
+    // The loopback listeners carrying each sandbox's agent channel to the master.
+    channels: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
+    // The FUSE mount of each sandbox's project cache, kept alive until the sandbox
+    // is gone and unmounted when it drops.
+    #[cfg(target_os = "linux")]
+    caches: Arc<Mutex<HashMap<String, BackgroundSession>>>,
+}
+
+// Whether this host can make sandboxes yet. Preparing is minutes, and a master
+// that asks before it is done is told to wait rather than given a failure.
+enum Readiness {
+    Preparing,
+    Ready,
+    Failed(String),
+}
+
+impl fmt::Debug for WorkerService {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("WorkerService")
+    }
+}
+
+impl ProtocolHandler for WorkerService {
+    async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+        let Ok((send, recv)) = connection.accept_bi().await else {
+            return Ok(());
+        };
+        let mut send = send;
+        let mut recv = recv;
+        let request: WorkerRequest = match read_frame(&mut recv).await {
+            Ok(request) => request,
+            Err(error) => {
+                tracing::warn!(%error, "an unreadable worker call arrived");
+                return Ok(());
+            }
+        };
+        if request.token != self.token {
+            let _ = write_frame(
+                &mut send,
+                &WorkerReply::Failed("this host does not hold the master's token".into()),
+            )
+            .await;
+            return Ok(());
+        }
+        match request.call {
+            WorkerCall::RunCommand { id, command } => {
+                self.run_command(send, recv, id, command).await;
+                Ok(())
+            }
+            WorkerCall::DeliverFile { id, guest_path } => {
+                self.receive_file(send, recv, id, guest_path).await;
+                Ok(())
+            }
+            WorkerCall::DeliverFiles { id, root } => {
+                self.receive_tree(send, recv, id, root).await;
+                Ok(())
+            }
+            WorkerCall::CollectFile { id, guest_path } => {
+                self.send_file(send, recv, id, guest_path).await;
+                Ok(())
+            }
+            WorkerCall::CollectFiles { id, root, excluded } => {
+                self.send_tree(send, recv, id, root, excluded).await;
+                Ok(())
+            }
+            call => {
+                let reply = self.dispatch(call).await;
+                let _ = write_frame(&mut send, &reply).await;
+                let _ = send.finish();
+                Ok(())
+            }
+        }
+    }
+}
+
+mod files;
+mod service;
+
+fn local_capacity() -> WorkerReport {
+    let Ok(mut system) = sysinfo::System::new() else {
+        return WorkerReport {
+            cpus: 1,
+            memory_mib: 0,
+        };
+    };
+    system.refresh_memory();
+    WorkerReport {
+        cpus: system.cpus().len().max(1),
+        memory_mib: system.total_memory() / (1024 * 1024),
+    }
+}
