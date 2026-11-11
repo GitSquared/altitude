@@ -304,16 +304,12 @@ pub(in crate::tui) async fn handle_confirm_key<E>(
                     );
                     return;
                 }
-                match event_loop
-                    .service()
-                    .confirm_operator_signal(&task_id, &signal_id)
-                    .await
-                {
-                    Ok(task) => {
-                        app.replace_task(task);
+                // Accepting is the end of the task, and the ending is the loop's to
+                // record and announce: the card goes to done here the way it does when
+                // the same acceptance arrives from the tracker.
+                match event_loop.accept(&task_id, &signal_id).await {
+                    Ok(()) => {
                         app.reload_signals(event_loop.service()).await;
-                        // Accepting is the end of the task, so there is nothing
-                        // left to read here: the list is where the next one is.
                         app.foreground = Foreground::Tasks;
                     }
                     Err(error) => {

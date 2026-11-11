@@ -225,7 +225,8 @@ where
             return Ok(());
         }
         self.service.release_resources(&task).await?;
-        self.service
+        let task = self
+            .service
             .record(
                 &task.id,
                 &[TaskHistoryEvent::TaskCompleted {
@@ -233,9 +234,10 @@ where
                 }],
             )
             .await?;
+        tracing::debug!(task = %task.id, "a task ended in the tracker");
         let _ = self
             .events
-            .send(TaskExecutionUpdate::Removed(task.id, Ok(())));
+            .send(TaskExecutionUpdate::Finished(task.id.clone(), Ok(task)));
         Ok(())
     }
 

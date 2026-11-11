@@ -246,16 +246,17 @@ where
     }
 
     // Accepting is the end of a task whichever door it came through, and the ending is
-    // announced here rather than by whoever asked for it: a card on another machine goes
-    // away when the task does, not when something happens to look again.
+    // announced here rather than by whoever asked for it: every surface watching learns
+    // that the task finished, rather than reading a card until something refreshes.
     pub async fn accept(&self, task_id: &str, signal_id: &str) -> Result<(), TaskServiceError> {
         let task = self
             .service
             .confirm_operator_signal(task_id, signal_id)
             .await?;
+        tracing::debug!(task = %task.id, signal = %signal_id, "a task was accepted");
         let _ = self
             .events
-            .send(TaskExecutionUpdate::Removed(task.id, Ok(())));
+            .send(TaskExecutionUpdate::Finished(task.id.clone(), Ok(task)));
         Ok(())
     }
 
