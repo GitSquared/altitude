@@ -22,8 +22,6 @@ real interface cannot start one. Keep it that way when adding tasks.
 
 import argparse
 import json
-import os
-import shutil
 import sqlite3
 import subprocess
 import time
@@ -96,6 +94,8 @@ class Dataset:
         self.events.append((task_id, at_ms, json.dumps({"type": kind, "data": data})))
 
 
+# A signal is a thread, and a thread is a wait on the operator: the two kinds are the
+# question the work cannot go on without and the work that is ready to read.
 def signal(task_id, index, kind, title, body):
     return (
         "operator_signal_raised",
@@ -121,7 +121,7 @@ def deferred():
             "signal": {
                 "id": "held-review",
                 "task_id": "",
-                "kind": "in_review",
+                "kind": "ready_for_review",
                 "title": "held",
                 "body": "held",
                 "raised_at_ms": 0,
@@ -290,21 +290,21 @@ def dataset(now_ms):
             signal(
                 "replay-me",
                 1,
-                "blocked",
+                "blocking_question",
                 "Which retry policy should a delegation use?",
                 "A dropped link can be retried on the same call or handed back to the queue. The first is faster and can repeat a side effect; the second is safe and slower.",
             ),
             signal(
                 "replay-me",
                 2,
-                "blocked",
+                "blocking_question",
                 "Retry the relay or wait for mDNS?",
                 "The relay answered twice with a stale certificate. Waiting for discovery avoids it but can take minutes.",
             ),
             signal(
                 "replay-me",
                 3,
-                "blocked",
+                "blocking_question",
                 "Should the retry budget be per task or per issue?",
                 "Per task is simple. Per issue is what an operator means when they say a thing failed too often today.",
             ),
@@ -324,7 +324,7 @@ def dataset(now_ms):
             signal(
                 "tool-names",
                 1,
-                "blocked",
+                "blocking_question",
                 "Which harness is right about tool names?",
                 "pi reports `tasks_signal`, claude reports `signal`. One registry with two names is a bug waiting to be read as a feature.",
             ),
@@ -347,7 +347,7 @@ def dataset(now_ms):
             signal(
                 "review",
                 1,
-                "in_review",
+                "ready_for_review",
                 "The card rewrite is ready to read",
                 "Eight sections, one line a task, and the age is now the last fact that moved.",
             ),
@@ -361,16 +361,7 @@ def dataset(now_ms):
         "pi",
         "One store per machine, and no copy",
         60,
-        [
-            running(),
-            signal(
-                "store",
-                1,
-                "decision",
-                "I am keeping one store per machine",
-                "The mirror table would have to agree with the event log forever, and the log is the only thing that cannot lie.",
-            ),
-        ],
+        [running()],
     )
 
     data.task(
@@ -379,23 +370,7 @@ def dataset(now_ms):
         "pi",
         "Activity stream reads as lines",
         190,
-        [
-            running(),
-            signal(
-                "activity",
-                1,
-                "update",
-                "The stream now shows what the agent says and thinks",
-                "Shell output left it, so a task that is thinking no longer looks idle.",
-            ),
-            signal(
-                "activity",
-                2,
-                "update",
-                "Dropped the shell rows from the pane",
-                "They were the noisiest thing in the column and the least read.",
-            ),
-        ],
+        [running()],
     )
 
     data.task(
@@ -514,8 +489,10 @@ def build(root):
     )
 
     database = data / "altitude.db"
-    if database.exists():
-        database.unlink()
+    # A database left by an earlier run brings its journal, and a journal whose head
+    # does not match the file beside it is a disk error on the next fetch.
+    for stale in (database, *database.glob("altitude.db-*")):
+        stale.unlink(missing_ok=True)
     # Do not copy the real tasks: the copy is for the schema and the migration
     # bookkeeping sqlx keeps, which is what a hand-made database would get wrong.
     subprocess.run(
