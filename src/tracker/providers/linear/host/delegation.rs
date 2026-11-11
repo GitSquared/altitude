@@ -530,7 +530,6 @@ impl RemoteTracker {
             failed_at: None,
             failed_attempts: 0,
             unhooked_at: None,
-            session_broken: false,
             activities: 0,
             activity_line: None,
         })?;

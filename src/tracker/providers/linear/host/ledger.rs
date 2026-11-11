@@ -108,11 +108,6 @@ pub(super) struct Cursor {
     // report's bookkeeping lives: the number names the next activity so a restart does
     // not reuse an id Linear already has, and the line is what makes a restart not say
     // the same thing twice.
-    // A write into the session failed, so the session may be gone. The next pass opens
-    // one on the issue and moves here rather than letting the report talk into a thread
-    // nobody can read.
-    #[serde(default)]
-    pub(super) session_broken: bool,
     #[serde(default)]
     pub(super) activities: u32,
     #[serde(default)]

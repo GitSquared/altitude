@@ -32,25 +32,20 @@ pub(super) struct QueueNotice {
 }
 
 impl RemoteTracker {
-    // Everything this machine says in a session goes through one of these, so a write
-    // that failed because the session has gone away is noticed where it happens: the
-    // report is marked, and the next pass opens a session on the issue rather than
-    // leaving the operator a thread that never says anything again.
+    // A write that fails is not a session that has ended: the line is only recorded once
+    // Linear has it, so the next pass says the same thing in the same thread. What is
+    // left is asking on the way up whether a session a previous run left behind can still
+    // receive, which `verify_sessions` does.
     async fn write_activity(
         &self,
         report: &Cursor,
         activity_id: &str,
         content: AgentActivityContent,
     ) -> Result<(), TrackerError> {
-        let written = self
-            .config
+        self.config
             .automation
             .create_activity(&report.session, activity_id, content)
-            .await;
-        if written.is_err() {
-            self.break_session(&report.task_id);
-        }
-        written
+            .await
     }
 
     pub(super) async fn say_system(
@@ -97,15 +92,10 @@ impl RemoteTracker {
         activity_id: &str,
         body: String,
     ) -> Result<(), TrackerError> {
-        let written = self
-            .config
+        self.config
             .automation
             .create_ephemeral_thought(&report.session, activity_id, body)
-            .await;
-        if written.is_err() {
-            self.break_session(&report.task_id);
-        }
-        written
+            .await
     }
 
     // The paths that write into a session before a report exists still sign the
@@ -127,15 +117,10 @@ impl RemoteTracker {
         report: &Cursor,
         steps: &[TaskPlanStep],
     ) -> Result<(), TrackerError> {
-        let written = self
-            .config
+        self.config
             .automation
             .update_session_plan(&report.session, steps)
-            .await;
-        if written.is_err() {
-            self.break_session(&report.task_id);
-        }
-        written
+            .await
     }
 
     pub async fn start_reporting(
@@ -197,7 +182,6 @@ impl RemoteTracker {
             failed_at: None,
             failed_attempts: 0,
             unhooked_at: None,
-            session_broken: false,
             activities: 0,
             activity_line: None,
         })?;
@@ -383,6 +367,10 @@ impl RemoteTracker {
         }
     }
 
+    // A session can go away under a report: dismissed in Linear, or closed once the work
+    // it carried ended. A failure is not how that is known — a line Linear refused is one
+    // the next pass says again — so this is only reached by the paths that ask Linear
+    // whether a session can still receive: the way up, and the start of a task.
     async fn replace_session(&self, host: &dyn DelegatedWork, report: &Cursor) {
         let session = match self.open_session(&report.issue_id).await {
             Ok(session) => session,
@@ -413,25 +401,13 @@ impl RemoteTracker {
             "a session had gone away, so the report has a new one"
         );
         // A new session arrives with a prompt nobody has answered, and Linear says it is
-        // thinking until something is said in it.
-        self.introduce(host, report).await;
-    }
-
-    // A session can go away under a report — dismissed in Linear, or closed once the
-    // work it carried ended — and a report writing into a thread nobody can read is the
-    // silence this whole mechanism exists to prevent. Opening one on the issue and
-    // moving there is cheap and rare, so it happens on the pass after the failure
-    // rather than being retried where the write failed.
-    pub(super) async fn repair_sessions(&self, host: &dyn DelegatedWork) {
-        for report in self
-            .cursors()
-            .into_iter()
-            .filter(|report| report.session_broken && !report.finished)
-        {
-            // A move that fails leaves the flag, so the next pass asks again rather
-            // than the report going quiet for good.
-            self.replace_session(host, &report).await;
-        }
+        // thinking until something is said in it. The line belongs in the session that was
+        // just opened: the one it replaced takes nothing more, and saying it there is how a
+        // dead thread looks like it is still in use.
+        let moved = self
+            .report_for_task(&report.task_id)
+            .unwrap_or_else(|| report.clone());
+        self.introduce(host, &moved).await;
     }
 
     // Answers when a line that says nothing new becomes worth saying again, which is

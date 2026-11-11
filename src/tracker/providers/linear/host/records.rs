@@ -67,25 +67,13 @@ impl RemoteTracker {
             .map(|report| (*report).clone())
     }
 
-    // A session write failed: the session may have been dismissed or closed, and the
-    // next pass replaces it. What has already been said in it does not count as said in
-    // the one that replaces it, so the line is forgotten with it.
-    pub(super) fn break_session(&self, task_id: &str) {
-        if let Err(error) = self.mutate(|ledger| {
-            if let Some(report) = ledger.cursors.iter_mut().find(|r| r.task_id == task_id) {
-                report.session_broken = true;
-                report.activity_line = None;
-            }
-        }) {
-            tracing::warn!(%error, "could not record that a session has gone away");
-        }
-    }
-
+    // What was said in the session left behind does not count as said in the one that
+    // replaces it, so the line is forgotten with it and the next pass says it again where
+    // the operator can read it.
     pub(super) fn move_session(&self, task_id: &str, session: &str) -> Result<(), String> {
         self.mutate(|ledger| {
             if let Some(report) = ledger.cursors.iter_mut().find(|r| r.task_id == task_id) {
                 report.session = session.to_owned();
-                report.session_broken = false;
                 report.activity_line = None;
                 report.activities = 0;
             }
