@@ -1,7 +1,9 @@
 use std::{
+    collections::HashMap,
     error::Error,
     fmt, fs, io,
     io::IsTerminal,
+    net::Ipv4Addr,
     path::PathBuf,
     sync::{Arc, Mutex},
     time::Duration,
@@ -15,19 +17,21 @@ use iroh::{
     protocol::{AcceptError, ProtocolHandler, Router},
 };
 use tokio::{
+    net::TcpListener,
     signal::unix::{SignalKind, signal},
+    task::JoinHandle,
     time,
 };
 
 use crate::{
-    agent::AgentEngines,
+    agent::{AgentEngines, mcp},
     brand,
     cli::{WORKER_GUIDE, WorkerArgs},
     config::Config,
     credentials::profile_recipe,
     isolation::{
-        CommandEvent, IsolationEngine, IsolationStatus, TestbedIsolation, Unwatched, mounts,
-        prepare, private_directory,
+        CommandEvent, IsolationEngine, IsolationStatus, TestbedIsolation, Unwatched, VsockRoute,
+        mounts, prepare, private_directory,
         worker_protocol::{
             CommandFrame, WORKER_ALPN, WorkerCall, WorkerProfile, WorkerReply, WorkerRequest,
         },
@@ -102,6 +106,8 @@ pub(crate) async fn run(args: &WorkerArgs, base: Config) -> Result<(), Box<dyn E
         .await
         .map_err(io::Error::other)?;
     let client = LinkClient::from_endpoint(endpoint.clone());
+    let master: RemoteTicket = args.master.parse().map_err(io::Error::other)?;
+    let peer: EndpointAddr = master.into();
     let service = WorkerService {
         engine,
         config: base.clone(),
@@ -109,13 +115,14 @@ pub(crate) async fn run(args: &WorkerArgs, base: Config) -> Result<(), Box<dyn E
         token: args.token.clone(),
         snapshots_dir: base.task_snapshots_dir(),
         readiness,
+        client: client.clone(),
+        master: peer.clone(),
+        channels: Arc::new(Mutex::new(HashMap::new())),
     };
     let _router = Router::builder(endpoint)
         .accept(WORKER_ALPN, service)
         .spawn();
 
-    let master: RemoteTicket = args.master.parse().map_err(io::Error::other)?;
-    let peer: EndpointAddr = master.into();
     let capacity = local_capacity();
     let mut terminate = signal(SignalKind::terminate())?;
     let mut interrupt = signal(SignalKind::interrupt())?;
@@ -165,6 +172,10 @@ struct WorkerService {
     token: String,
     snapshots_dir: PathBuf,
     readiness: Arc<Mutex<Readiness>>,
+    client: LinkClient,
+    master: EndpointAddr,
+    // The loopback listeners carrying each sandbox's agent channel to the master.
+    channels: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
 }
 
 // Whether this box can make sandboxes yet. Preparing is minutes, and a master
@@ -215,6 +226,64 @@ impl ProtocolHandler for WorkerService {
 }
 
 impl WorkerService {
+    // The box's end of the agent channel: it listens on the loopback the sandbox
+    // shares and carries each connection to the master over the link. A vsock route
+    // for the agent's channel is what says a sandbox has one.
+    fn start_channels(&self, id: &str, vsock: &[VsockRoute]) {
+        for route in vsock {
+            if route.guest_port != mcp::AGENT_CHANNEL_PORT {
+                continue;
+            }
+            let socket = route.host_socket.to_string_lossy().into_owned();
+            let port = route.guest_port as u16;
+            let client = self.client.clone();
+            let master = self.master.clone();
+            let token = self.token.clone();
+            let handle = tokio::spawn(async move {
+                let listener = match TcpListener::bind((Ipv4Addr::LOCALHOST, port)).await {
+                    Ok(listener) => listener,
+                    Err(error) => {
+                        tracing::warn!(%error, port, "could not open an agent channel on this box");
+                        return;
+                    }
+                };
+                loop {
+                    match listener.accept().await {
+                        Ok((tcp, _)) => {
+                            let client = client.clone();
+                            let master = master.clone();
+                            let token = token.clone();
+                            let socket = socket.clone();
+                            tokio::spawn(async move {
+                                if let Err(error) = client
+                                    .pipe_agent_channel(master, &socket, &token, tcp)
+                                    .await
+                                {
+                                    tracing::debug!(%error, "an agent channel connection ended");
+                                }
+                            });
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "an agent channel listener stopped");
+                            return;
+                        }
+                    }
+                }
+            });
+            if let Ok(mut channels) = self.channels.lock() {
+                channels.insert(id.to_owned(), handle);
+            }
+        }
+    }
+
+    fn stop_channel(&self, id: &str) {
+        if let Ok(mut channels) = self.channels.lock()
+            && let Some(handle) = channels.remove(id)
+        {
+            handle.abort();
+        }
+    }
+
     async fn dispatch(&self, call: WorkerCall) -> WorkerReply {
         match call {
             WorkerCall::Probe => {
@@ -260,14 +329,20 @@ impl WorkerService {
                     (Err(error), _) | (_, Err(error)) => Err(error),
                 };
                 match recipes {
-                    Ok(recipes) => match self
-                        .engine
-                        .provision(id, snapshot, project, recipes, vsock, &Unwatched)
-                        .await
-                    {
-                        Ok(()) => WorkerReply::Ok,
-                        Err(error) => WorkerReply::Failed(error.to_string()),
-                    },
+                    Ok(recipes) => {
+                        let channels = vsock.clone();
+                        match self
+                            .engine
+                            .provision(id.clone(), snapshot, project, recipes, vsock, &Unwatched)
+                            .await
+                        {
+                            Ok(()) => {
+                                self.start_channels(&id, &channels);
+                                WorkerReply::Ok
+                            }
+                            Err(error) => WorkerReply::Failed(error.to_string()),
+                        }
+                    }
                     Err(error) => WorkerReply::Failed(error.to_string()),
                 }
             }
@@ -279,12 +354,16 @@ impl WorkerService {
                 Ok(()) => WorkerReply::Ok,
                 Err(error) => WorkerReply::Failed(error.to_string()),
             },
-            WorkerCall::Remove { id } => match self.engine.remove(id).await {
-                Ok(()) => WorkerReply::Ok,
-                Err(error) => WorkerReply::Failed(error.to_string()),
-            },
+            WorkerCall::Remove { id } => {
+                self.stop_channel(&id);
+                match self.engine.remove(id).await {
+                    Ok(()) => WorkerReply::Ok,
+                    Err(error) => WorkerReply::Failed(error.to_string()),
+                }
+            }
             WorkerCall::HasSandbox { id } => WorkerReply::Bool(self.engine.has_sandbox(id).await),
             WorkerCall::Suspend { id, name } => {
+                self.stop_channel(&id);
                 match self
                     .engine
                     .suspend(id, name, self.snapshots_dir.clone())

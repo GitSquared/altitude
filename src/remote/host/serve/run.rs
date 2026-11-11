@@ -36,7 +36,7 @@ use crate::{
     remote::{
         ClientRecord, InstallationKey, LinkClient, LinkServer, TrackerConnection,
         announce::{Phase, TrackerReadiness},
-        server::{ServerParts, WorkerHost},
+        server::{AgentChannelAccess, ServerParts, WorkerHost},
     },
     task::{TaskEventLoop, TaskExecutionUpdate, TaskService, TaskStore},
     tracker::providers::linear::host as linear_host,
@@ -368,6 +368,10 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
         workers: fleet
             .as_ref()
             .map(|fleet| Arc::clone(fleet) as Arc<dyn WorkerHost>),
+        agent_channels: fleet.as_ref().map(|fleet| AgentChannelAccess {
+            directory: config.agent_channel_dir(),
+            token: fleet.token().to_owned(),
+        }),
     })
     .await
     .map_err(io::Error::other)?;

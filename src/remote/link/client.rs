@@ -4,6 +4,8 @@ use crate::remote::InstallationKey;
 use crate::remote::Transfer;
 use crate::remote::TransferPart;
 use iroh::{Endpoint, EndpointAddr, EndpointId, endpoint::Connection};
+use tokio::io::copy;
+use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
 use crate::task::TaskAsk;
@@ -101,6 +103,42 @@ impl LinkClient {
         write_frame(&mut send, request).await?;
         send.finish()?;
         read_frame(&mut recv).await
+    }
+
+    // A box carries one connection from an agent inside its sandbox to the
+    // channel the master serves for that task.
+    pub(crate) async fn pipe_agent_channel(
+        &self,
+        peer: impl Into<EndpointAddr>,
+        socket: &str,
+        token: &str,
+        tcp: TcpStream,
+    ) -> LinkResult<()> {
+        let dial = self.dial(peer).await?;
+        let (mut send, mut recv) = dial.0.open_bi().await?;
+        write_frame(
+            &mut send,
+            &LinkRequest::AgentChannel {
+                socket: socket.to_owned(),
+                token: token.to_owned(),
+            },
+        )
+        .await?;
+        match read_frame::<_, LinkResponse>(&mut recv).await? {
+            LinkResponse::Accepted => {}
+            LinkResponse::Rejected { reason } => return Err(reason.into()),
+            other => return Err(format!("unexpected answer: {other:?}").into()),
+        }
+        let (mut box_read, mut box_write) = tcp.into_split();
+        let to_master = async {
+            let _ = copy(&mut box_read, &mut send).await;
+            let _ = send.finish();
+        };
+        let to_box = async {
+            let _ = copy(&mut recv, &mut box_write).await;
+        };
+        tokio::join!(to_master, to_box);
+        Ok(())
     }
 
     // A command on a worker keeps its stream open: input goes one way and events
