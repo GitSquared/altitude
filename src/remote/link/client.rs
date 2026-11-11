@@ -9,6 +9,7 @@ use tokio::io::copy;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
+use crate::remote::cache::protocol::{CacheReply, CacheRequest};
 use crate::task::TaskAsk;
 use crate::task::picture;
 
@@ -18,8 +19,8 @@ use crate::isolation::{CommandEvent, CommandSession};
 use crate::remote::protocol::SignalCommand;
 use crate::remote::protocol::{
     BlobHash, CHUNK_BYTES, ConfigPush, Handover, LINK_ALPN, LinkRequest, LinkResponse,
-    TRANSFER_PIECE_BYTES, TaskRequest, TransferArchive, WatchEvent, WorkerReport, builder,
-    read_body, read_frame, write_frame,
+    MAX_BLOB_BYTES, TRANSFER_PIECE_BYTES, TaskRequest, TransferArchive, WatchEvent, WorkerReport,
+    builder, read_body, read_frame, write_frame,
 };
 use crate::remote::transfer::{STOPPED, TransferUpdate, Unit};
 use crate::remote::{
@@ -91,6 +92,31 @@ impl LinkClient {
 
     pub async fn scan_remotes(&self) -> LinkResult<Scan> {
         discovery::scan(&self.endpoint).await
+    }
+
+    // One cache call to a master, carrying the body a write needs and returning the
+    // bytes a read produced.
+    pub(crate) async fn cache_call(
+        &self,
+        peer: impl Into<EndpointAddr>,
+        request: &CacheRequest,
+        body: &[u8],
+    ) -> LinkResult<(CacheReply, Vec<u8>)> {
+        let dial = self.dial(peer).await?;
+        let (mut send, mut recv) = dial.0.open_bi().await?;
+        write_frame(&mut send, request).await?;
+        if !body.is_empty() {
+            send.write_all(body).await?;
+        }
+        send.finish()?;
+        let reply: CacheReply = read_frame(&mut recv).await?;
+        let bytes = match &reply {
+            CacheReply::Data { len } => {
+                read_body(&mut recv, u64::from(*len), MAX_BLOB_BYTES).await?
+            }
+            _ => Vec::new(),
+        };
+        Ok((reply, bytes))
     }
 
     // One sandbox call to a worker the master provisioned.

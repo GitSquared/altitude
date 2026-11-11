@@ -12,6 +12,8 @@ use std::{
 use tempfile::{NamedTempFile, TempDir};
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
+#[cfg(target_os = "linux")]
+use fuser::BackgroundSession;
 
 use iroh::{
     EndpointAddr,
@@ -26,6 +28,9 @@ use tokio::{
     task::JoinHandle,
     time,
 };
+
+#[cfg(target_os = "linux")]
+use tokio::runtime::Handle;
 
 use crate::{
     agent::{AgentEngines, mcp},
@@ -48,6 +53,9 @@ use crate::{
     },
     version::VERSION,
 };
+
+#[cfg(target_os = "linux")]
+use crate::remote::cache::{self, CacheFs};
 
 use super::workers::HEARTBEAT_INTERVAL;
 
@@ -123,6 +131,8 @@ pub(crate) async fn run(args: &WorkerArgs, base: Config) -> Result<(), Box<dyn E
         client: client.clone(),
         master: peer.clone(),
         channels: Arc::new(Mutex::new(HashMap::new())),
+        #[cfg(target_os = "linux")]
+        caches: Arc::new(Mutex::new(HashMap::new())),
     };
     let _router = Router::builder(endpoint)
         .accept(WORKER_ALPN, service)
@@ -181,6 +191,10 @@ struct WorkerService {
     master: EndpointAddr,
     // The loopback listeners carrying each sandbox's agent channel to the master.
     channels: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
+    // The FUSE mount of each sandbox's project cache, kept alive until the sandbox
+    // is gone and unmounted when it drops.
+    #[cfg(target_os = "linux")]
+    caches: Arc<Mutex<HashMap<String, BackgroundSession>>>,
 }
 
 // Whether this host can make sandboxes yet. Preparing is minutes, and a master
@@ -308,6 +322,47 @@ impl WorkerService {
             handle.abort();
         }
     }
+
+    // Mount the master's cache for this project where the sandbox will look for it.
+    // A host whose owner is not named, or whose master serves no cache, simply
+    // builds without one.
+    #[cfg(target_os = "linux")]
+    fn mount_cache(&self, id: &str, owner: &str, project: &str) -> Result<(), String> {
+        if owner.is_empty() {
+            return Ok(());
+        }
+        let mountpoint = self.config.project_cache_dir(project);
+        fs::create_dir_all(&mountpoint).map_err(|error| error.to_string())?;
+        let cache = CacheFs::new(
+            self.client.clone(),
+            self.master.clone(),
+            self.token.clone(),
+            owner.to_owned(),
+            project.to_owned(),
+            Handle::current(),
+        );
+        let session = cache::mount(cache, &mountpoint)?;
+        if let Ok(mut caches) = self.caches.lock() {
+            caches.insert(id.to_owned(), session);
+        }
+        Ok(())
+    }
+
+    // A host that is not Linux cannot make sandboxes, so it never gets here.
+    #[cfg(not(target_os = "linux"))]
+    fn mount_cache(&self, _id: &str, _owner: &str, _project: &str) -> Result<(), String> {
+        Err("the network cache is only available on Linux hosts".to_owned())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn unmount_cache(&self, id: &str) {
+        if let Ok(mut caches) = self.caches.lock() {
+            caches.remove(id);
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn unmount_cache(&self, _id: &str) {}
 
     // The bytes on the stream are a file the master is putting in the sandbox.
     async fn receive_file(
@@ -477,12 +532,16 @@ impl WorkerService {
                 id,
                 snapshot,
                 project,
+                owner,
                 agent_profile,
                 vcs_profile,
                 vsock,
                 profiles,
             } => {
                 if let Err(error) = write_profiles(&self.config, &profiles) {
+                    return WorkerReply::Failed(error);
+                }
+                if let Err(error) = self.mount_cache(&id, &owner, &project.id) {
                     return WorkerReply::Failed(error);
                 }
                 let recipes = match (
@@ -520,6 +579,7 @@ impl WorkerService {
             },
             WorkerCall::Remove { id } => {
                 self.stop_channel(&id);
+                self.unmount_cache(&id);
                 match self.engine.remove(id).await {
                     Ok(()) => WorkerReply::Ok,
                     Err(error) => WorkerReply::Failed(error.to_string()),
@@ -528,6 +588,7 @@ impl WorkerService {
             WorkerCall::HasSandbox { id } => WorkerReply::Bool(self.engine.has_sandbox(id).await),
             WorkerCall::Suspend { id, name } => {
                 self.stop_channel(&id);
+                self.unmount_cache(&id);
                 match self
                     .engine
                     .suspend(id, name, self.snapshots_dir.clone())

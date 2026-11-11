@@ -262,6 +262,7 @@ impl IsolationEngine for WorkersIsolation {
             id: id.clone(),
             snapshot: None,
             project,
+            owner: self.owner.clone().unwrap_or_default(),
             agent_profile,
             vcs_profile,
             vsock,
