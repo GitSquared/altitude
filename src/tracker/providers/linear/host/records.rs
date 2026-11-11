@@ -237,4 +237,17 @@ impl RemoteTracker {
             .find(|login| login.owner == owner)
             .map(|login| login.account.user_id)
     }
+
+    pub(super) fn name_for_user(&self, tracker_user_id: &str) -> Option<String> {
+        logins(&self.config.operators_dir)
+            .into_iter()
+            .filter(|login| login.account.user_id == tracker_user_id)
+            .max_by(|left, right| {
+                left.arrived
+                    .cmp(&right.arrived)
+                    .then_with(|| right.owner.cmp(&left.owner))
+            })
+            .map(|login| login.account.display_name)
+            .filter(|name| !name.trim().is_empty())
+    }
 }

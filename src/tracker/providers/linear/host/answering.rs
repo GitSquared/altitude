@@ -401,7 +401,7 @@ impl RemoteTracker {
     }
 
     pub(super) async fn boundary_reply(&self, operator_id: &str) -> String {
-        let operator = self.operator_mention(operator_id).await;
+        let operator = self.operator_mention(operator_id);
         format!(
             "This task belongs to {operator}, so altitude only takes direction from them here. \
              Ask them to reply if you want it changed."
@@ -437,23 +437,21 @@ impl RemoteTracker {
         }
     }
 
-    pub(super) async fn operator_mention(&self, user_id: &str) -> String {
-        match self.config.automation.user_mention(user_id).await {
-            Ok(mention) if !mention.is_empty() => mention,
-            Ok(_) | Err(_) => {
-                tracing::warn!(user = user_id, "could not read the operator's profile URL");
-                "the person who delegated it".to_owned()
-            }
+    pub(super) fn operator_mention(&self, user_id: &str) -> String {
+        match self.name_for_user(user_id) {
+            Some(name) => format!("[@{name}](mention://user/{user_id})"),
+            None => "the person who delegated it".to_owned(),
         }
     }
 
     // The operator's own name, for the lines that say who a task is waiting on: a
     // tracker is shared with a team, and "you" is only one of the people reading it.
-    pub(super) async fn operator_name(&self, user_id: &str) -> String {
-        match self.config.automation.user_name(user_id).await {
-            Ok(name) if !name.trim().is_empty() => name,
-            Ok(_) | Err(_) => "the operator".to_owned(),
-        }
+    // It comes from the login this machine already holds. Asking Linear for it made the
+    // name a round trip, and a round trip that failed left a line saying "Waiting for
+    // the operator" under a task that was waiting for one particular person.
+    pub(super) fn operator_name(&self, user_id: &str) -> String {
+        self.name_for_user(user_id)
+            .unwrap_or_else(|| "the operator".to_owned())
     }
 
     pub(super) async fn post_sync_guidance(&self, session_id: &str) -> Result<(), String> {

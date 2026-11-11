@@ -256,7 +256,7 @@ impl RemoteTracker {
                     None
                 };
                 let content = if waits_on_a_person(execution_pause_reason) {
-                    let operator = self.operator_name(&report.tracker_user_id).await;
+                    let operator = self.operator_name(&report.tracker_user_id);
                     // The last thing a run says is the handoff, and it is said to a
                     // person: it is what leaves the session waiting on them rather than
                     // ticking as if the work were still going on.
@@ -313,12 +313,7 @@ impl RemoteTracker {
                             .await
                             .ok()
                             .flatten();
-                        let operator = self
-                            .config
-                            .automation
-                            .user_name(&report.tracker_user_id)
-                            .await
-                            .ok();
+                        let operator = self.name_for_user(&report.tracker_user_id);
                         self.say_system(
                             report,
                             &stable_id(&report.task_id, "picked-up"),

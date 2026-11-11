@@ -350,7 +350,7 @@ impl RemoteTracker {
     }
 
     async fn introduce_task(&self, report: &Cursor, task: &BoundTask) {
-        let operator = self.operator_name(&report.tracker_user_id).await;
+        let operator = self.operator_name(&report.tracker_user_id);
         let body = match (&task.status, task.pause_reason.as_ref()) {
             (TaskExecutionStatus::Running, _) => {
                 format!(
@@ -688,14 +688,14 @@ impl RemoteTracker {
                 // A question is not a review: the work is still in progress, and
                 // moving the issue would tell a reader the milestone is finished.
                 // The ask is what asks for attention.
-                let who = self.operator_mention(&report.tracker_user_id).await;
+                let who = self.operator_mention(&report.tracker_user_id);
                 (
                     format!("**? Needs you:** {}\n\n{who} {}", title.trim(), body.trim()),
                     None,
                 )
             }
             TaskAskKind::Review => {
-                let who = self.operator_mention(&report.tracker_user_id).await;
+                let who = self.operator_mention(&report.tracker_user_id);
                 let mut body = format!(
                     "**◆ Ready to review:** {}\n\n{who} {}",
                     title.trim(),

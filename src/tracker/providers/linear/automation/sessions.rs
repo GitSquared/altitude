@@ -66,23 +66,6 @@ impl LinearAutomation {
             .ok_or_else(|| TrackerError::new("Linear returned no profile URL for that user"))
     }
 
-    pub async fn user_mention(&self, user_id: &str) -> Result<String, TrackerError> {
-        let name = self.user_name(user_id).await?;
-        Ok(format!("[@{name}](mention://user/{user_id})"))
-    }
-
-    pub async fn user_name(&self, user_id: &str) -> Result<String, TrackerError> {
-        let data = self
-            .graphql(USER_URL_QUERY, json!({ "id": user_id }))
-            .await?;
-        Ok(data
-            .pointer("/user/name")
-            .and_then(Value::as_str)
-            .filter(|name| !name.trim().is_empty())
-            .unwrap_or("the operator")
-            .to_owned())
-    }
-
     pub async fn create_session_on_issue(&self, issue_id: &str) -> Result<String, TrackerError> {
         let data = self
             .graphql(
