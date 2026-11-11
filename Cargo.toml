@@ -92,4 +92,4 @@ portable-pty = { version = "0.9.0", default-features = false }
 [target.'cfg(target_os = "linux")'.dependencies]
 # The host side of the network cache: a worker mounts the master's project cache.
 # A worker is a Linux host (the host engine needs Linux), so the mount is too.
-fuser = { version = "0.15", default-features = false }
+fuser = { version = "0.16", default-features = false }
