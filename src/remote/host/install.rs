@@ -169,6 +169,28 @@ fn domain(scope: Scope, uid: &str) -> String {
     }
 }
 
+fn homebrew_opt_executable(executable: &Path) -> Option<PathBuf> {
+    let keg = executable.parent()?.parent()?;
+    let rack = keg.parent()?;
+    let cellar = rack.parent()?;
+    if executable != keg.join("bin/altitude") || !rack.ends_with("Cellar/altitude") {
+        return None;
+    }
+
+    let prefix = cellar.parent()?;
+    // Homebrew can also keep its Cellar inside the Homebrew repository.
+    let enclosing_prefix = prefix.parent().filter(|_| prefix.ends_with("Homebrew"));
+    [Some(prefix), enclosing_prefix]
+        .into_iter()
+        .flatten()
+        .map(|prefix| prefix.join("opt/altitude/bin/altitude"))
+        .find(|candidate| {
+            candidate
+                .canonicalize()
+                .is_ok_and(|target| target == executable)
+        })
+}
+
 struct Service {
     exe: PathBuf,
     arguments: Vec<String>,
@@ -182,6 +204,11 @@ struct Service {
 impl Service {
     fn now(args: &ServeArgs, base: &Config) -> Result<Self, Box<dyn Error>> {
         let exe = env::current_exe()?.canonicalize()?;
+        let exe = if cfg!(target_os = "macos") {
+            homebrew_opt_executable(&exe).unwrap_or(exe)
+        } else {
+            exe
+        };
         let home = home();
         if home.as_os_str().is_empty() {
             return Err(io::Error::other("this machine has no HOME to install for").into());
