@@ -14,6 +14,43 @@ tui script:
 dev:
     watchexec --restart --stop-signal SIGTERM --stop-timeout 2s --wrap-process=none --watch src --watch migrations --watch Cargo.toml --watch Cargo.lock --shell=none -- sh -c 'cargo build && exec ./target/debug/altitude'
 
+# Run a debug build against an empty state under /tmp, so a demo never reads the
+# real installation. `just demo clean` throws that state away first.
+[positional-arguments]
+demo action='':
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    root="${ALTITUDE_DEMO_ROOT:-/tmp/altitude-demo}"
+    case "{{action}}" in
+        '') ;;
+        clean) rm -rf -- "$root" ;;
+        *)
+            echo "usage: just demo [clean]" >&2
+            exit 1
+            ;;
+    esac
+    mkdir -p "$root"/{home,config,data,cache}
+
+    cargo build
+
+    # env -i drops the real installation's variables: the three directories below,
+    # and the tool logins HOME and the settings pages reach for.
+    environment=(
+        HOME="$root/home"
+        PATH="$PATH"
+        TERM="${TERM:-xterm-256color}"
+        ALTITUDE_CONFIG_DIR="$root/config"
+        ALTITUDE_DATA_DIR="$root/data"
+        ALTITUDE_CACHE_DIR="$root/cache"
+    )
+    if [[ -n "${LOG_LEVEL:-}" ]]; then
+        environment+=(LOG_LEVEL="$LOG_LEVEL")
+    fi
+
+    echo "altitude is running against $root"
+    exec env -i "${environment[@]}" ./target/debug/altitude
+
 # Build a release binary using the locked dependency versions.
 build:
     cargo build --release --locked
