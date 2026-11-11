@@ -170,6 +170,10 @@ machine). `task` is `store`, `agent`, `run` and `mirror`.
   unnecessary dependencies and recreating terminal or networking infrastructure.
 - Extensions and companion tools need not all be written in Rust.
 - Use Conventional Commits.
+- Stack pull requests with `gh stack` when a change needs more than one reviewable
+  step: `gh stack init` the branches and `gh stack submit`, or `gh stack link`
+  the branches that already exist. A stack is the shape, not one large pull
+  request and not branches chained by hand.
 
 ## Documentation
 
