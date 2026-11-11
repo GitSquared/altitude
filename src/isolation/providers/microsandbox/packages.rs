@@ -2,11 +2,9 @@ use std::mem;
 
 use crate::isolation::PackageInstall;
 
-// What an install is doing, read out of the line apt and dpkg write: apt counts
-// the packages it is about to add before it starts ("0 upgraded, 34 newly
-// installed"), and dpkg names each one as it configures it ("Setting up jq
-// (1.7.1-3build2) ..."). A build runs as many installs as it likes, so the
-// announcements add up and the names are counted against them.
+// What an install is doing, read out of the lines dpkg writes: it names each package
+// as it configures it ("Setting up jq (1.7.1-3build2) ..."). The count only grows,
+// and the name it last printed is the one being configured now.
 #[derive(Default)]
 pub(super) struct Packages {
     // The last line is held back until it is whole: a chunk can end mid-line, and
@@ -31,28 +29,19 @@ impl Packages {
             let line = mem::take(&mut self.pending);
             moved |= self.read(&line);
         }
-        moved.then_some(self.install)
+        moved.then(|| self.install.clone())
     }
 
     fn read(&mut self, line: &str) -> bool {
-        let line = line.trim();
-        if line.starts_with("Setting up ") {
-            self.install.installed += 1;
-            return true;
-        }
-        let Some(rest) = line.rsplit_once(" newly installed").map(|(rest, _)| rest) else {
+        let Some(rest) = line.trim().strip_prefix("Setting up ") else {
             return false;
         };
-        let count = rest
-            .rsplit(|c: char| !c.is_ascii_digit())
-            .next()
-            .and_then(|count| count.parse::<u64>().ok());
-        match count {
-            Some(count) => {
-                self.install.total += count;
-                true
-            }
-            None => false,
-        }
+        // "Setting up jq (1.7.1-3build2) ...": the name is the first word.
+        let Some(name) = rest.split_whitespace().next() else {
+            return false;
+        };
+        self.install.installed += 1;
+        self.install.current = Some(name.to_owned());
+        true
     }
 }

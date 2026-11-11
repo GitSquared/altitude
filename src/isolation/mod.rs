@@ -49,13 +49,14 @@ pub struct ImagePull {
     pub total_bytes: u64,
 }
 
-// How far an environment's installs have come. apt says up front how many
-// packages it is about to add and dpkg names each one as it sets it up, so both
-// halves are zero until an install announces itself.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+// How far an environment's installs have come. dpkg names each package as it sets it
+// up, and the count only grows; the name is the one being configured now. There is no
+// total: a build runs apt more than once, and a denominator that grows with each run
+// is a number that promises an end it keeps moving.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PackageInstall {
     pub installed: u64,
-    pub total: u64,
+    pub current: Option<String>,
 }
 
 pub struct CommandSession {

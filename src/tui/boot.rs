@@ -1,4 +1,9 @@
-use std::{error::Error, future::Future, io, time::Instant};
+use std::{
+    error::Error,
+    future::Future,
+    io,
+    time::{Duration, Instant},
+};
 
 use crossterm::event::{EventStream, KeyCode, KeyModifiers};
 use futures_util::StreamExt;
@@ -115,15 +120,18 @@ async fn wait_for<T>(
     let mut pulled = Pull::default();
     let mut shimmer = 0;
     tokio::pin!(operation);
+    let began = Instant::now();
 
     loop {
         let status = label();
-        let rate = pulled.rate(status);
+        let rate = pulled.rate(&status);
+        let elapsed = began.elapsed();
         terminal.draw(|frame| {
             draw(
                 frame,
-                status,
+                &status,
                 rate,
+                elapsed,
                 animations.then_some(shimmer),
                 animations.then_some(&mut terrain),
             )
@@ -232,13 +240,13 @@ fn isolation_status(status: &IsolationStatus) -> BootStatus {
         },
         IsolationStatus::PreparingBasePackages(install) => BootStatus::Installing {
             label: "installing base packages…",
-            install: *install,
+            install: install.clone(),
         },
         IsolationStatus::Ready | IsolationStatus::Failed(_) => BootStatus::Working("starting up…"),
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum BootStatus {
     Working(&'static str),
     Downloading {
@@ -252,7 +260,7 @@ enum BootStatus {
 }
 
 impl BootStatus {
-    fn label(self) -> &'static str {
+    fn label(&self) -> &'static str {
         match self {
             Self::Working(label)
             | Self::Downloading { label, .. }
@@ -260,13 +268,23 @@ impl BootStatus {
         }
     }
 
-    fn pull(self) -> Option<ImagePull> {
+    fn pull(&self) -> Option<ImagePull> {
         // The manifest says how large the image is before a byte of it moves, and
         // an image that is already here moves none: neither is a download to
         // report, so the line waits for the first byte.
         match self {
-            Self::Downloading { pull, .. } if pull.downloaded_bytes > 0 => Some(pull),
+            Self::Downloading { pull, .. } if pull.downloaded_bytes > 0 => Some(*pull),
             _ => None,
+        }
+    }
+
+    // Why this wait exists, in the width of a row. A first start is the one that does
+    // this work, and saying so turns a long wait into a one-time one.
+    fn hint(&self) -> Option<&'static str> {
+        match self {
+            Self::Downloading { .. } => Some("every task shares this one image"),
+            Self::Installing { .. } => Some("built once, then reused by every task"),
+            Self::Working(_) => None,
         }
     }
 }
@@ -280,7 +298,7 @@ struct Pull {
 }
 
 impl Pull {
-    fn rate(&mut self, status: BootStatus) -> Option<f64> {
+    fn rate(&mut self, status: &BootStatus) -> Option<f64> {
         let Some(pull) = status.pull() else {
             self.sampled = None;
             return None;
@@ -306,8 +324,9 @@ impl Pull {
 
 fn draw(
     frame: &mut Frame,
-    status: BootStatus,
+    status: &BootStatus,
     rate: Option<f64>,
+    elapsed: Duration,
     tick: Option<usize>,
     terrain: Option<&mut terrain::Terrain>,
 ) {
@@ -319,7 +338,7 @@ fn draw(
     // that used to sit above them says nothing the percentage does not.
     let measured = match status {
         BootStatus::Downloading { .. } => status.pull().map(|pull| downloaded(pull, rate)),
-        BootStatus::Installing { install, .. } if install.total > 0 => Some(installed(install)),
+        BootStatus::Installing { install, .. } if install.installed > 0 => Some(installed(install)),
         _ => None,
     };
     let mut rows = vec![
@@ -331,6 +350,9 @@ fn draw(
     if measured.is_some() {
         rows.push(Constraint::Length(1));
     }
+    // The time says how long the wait has been, which is what keeps a slow step from
+    // reading as a hang; the hint says why the step is there.
+    rows.push(Constraint::Length(1));
     rows.push(Constraint::Fill(1));
     let rows = Layout::vertical(rows).split(area);
 
@@ -339,8 +361,9 @@ fn draw(
         rows[1],
     );
 
+    let label = status.label().to_owned();
     frame.render_widget(
-        Paragraph::new(Line::from_iter(shimmer(status.label(), tick))).centered(),
+        Paragraph::new(Line::from_iter(shimmer(&label, tick))).centered(),
         rows[3],
     );
 
@@ -350,6 +373,16 @@ fn draw(
             rows[4],
         );
     }
+
+    let mut detail = vec![Span::styled(elapsed_words(elapsed), palette::muted())];
+    if let Some(hint) = status.hint() {
+        detail.push(Span::raw(" · "));
+        detail.push(Span::styled(hint, palette::muted()));
+    }
+    frame.render_widget(
+        Paragraph::new(Line::from(detail)).centered(),
+        rows[rows.len() - 2],
+    );
 
     if let Some(terrain) = terrain {
         terrain.draw(frame.buffer_mut(), area);
@@ -378,13 +411,23 @@ fn downloaded(pull: ImagePull, rate: Option<f64>) -> Line<'static> {
     Line::from(line)
 }
 
-fn installed(install: PackageInstall) -> Line<'static> {
-    Line::styled(
-        format!(
-            "{} of {}",
-            install.installed.min(install.total),
-            install.total
-        ),
+fn installed(install: &PackageInstall) -> Line<'static> {
+    let mut line = vec![Span::styled(
+        format!("{} packages", install.installed),
         palette::primary(),
-    )
+    )];
+    if let Some(current) = &install.current {
+        line.push(Span::raw(" · "));
+        line.push(Span::raw(format!("setting up {current}")));
+    }
+    Line::from(line)
+}
+
+fn elapsed_words(elapsed: Duration) -> String {
+    let seconds = elapsed.as_secs();
+    match seconds {
+        0..=59 => format!("{seconds}s"),
+        60..=3_599 => format!("{}m {:02}s", seconds / 60, seconds % 60),
+        _ => format!("{}h {:02}m", seconds / 3_600, (seconds % 3_600) / 60),
+    }
 }
