@@ -12,8 +12,8 @@ use crate::task::picture;
 use crate::remote::protocol::SignalCommand;
 use crate::remote::protocol::{
     BlobHash, CHUNK_BYTES, ConfigPush, Handover, LINK_ALPN, LinkRequest, LinkResponse,
-    TRANSFER_PIECE_BYTES, TaskRequest, TransferArchive, WatchEvent, builder, read_body, read_frame,
-    write_frame,
+    TRANSFER_PIECE_BYTES, TaskRequest, TransferArchive, WatchEvent, WorkerReport, builder,
+    read_body, read_frame, write_frame,
 };
 use crate::remote::transfer::{STOPPED, TransferUpdate, Unit};
 use crate::remote::{
@@ -79,6 +79,52 @@ impl LinkClient {
 
     pub async fn scan_remotes(&self) -> LinkResult<Scan> {
         discovery::scan(&self.endpoint).await
+    }
+
+    // A provisioned worker tying itself to the master it was made for. The token
+    // is the only thing that says the connection is wanted.
+    pub async fn register_worker(
+        &self,
+        peer: impl Into<EndpointAddr>,
+        token: &str,
+        name: &str,
+        capacity: WorkerReport,
+    ) -> LinkResult<()> {
+        match self
+            .say(
+                peer,
+                &LinkRequest::RegisterWorker {
+                    token: token.to_owned(),
+                    name: name.to_owned(),
+                    capacity,
+                },
+            )
+            .await?
+        {
+            LinkResponse::Accepted => Ok(()),
+            LinkResponse::Rejected { reason } => Err(reason.into()),
+            other => Err(format!("unexpected answer: {other:?}").into()),
+        }
+    }
+
+    pub async fn worker_heartbeat(
+        &self,
+        peer: impl Into<EndpointAddr>,
+        name: &str,
+    ) -> LinkResult<()> {
+        match self
+            .say(
+                peer,
+                &LinkRequest::WorkerHeartbeat {
+                    name: name.to_owned(),
+                },
+            )
+            .await?
+        {
+            LinkResponse::Accepted => Ok(()),
+            LinkResponse::Rejected { reason } => Err(reason.into()),
+            other => Err(format!("unexpected answer: {other:?}").into()),
+        }
     }
 
     pub async fn shutdown(&self) {

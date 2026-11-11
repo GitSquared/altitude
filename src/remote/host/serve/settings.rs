@@ -15,6 +15,18 @@ fn default_listen() -> String {
     format!("0.0.0.0:{DEFAULT_PORT}")
 }
 
+fn default_worker_max() -> usize {
+    8
+}
+
+fn default_provision_timeout_secs() -> u64 {
+    10 * 60
+}
+
+fn default_deprovision_timeout_secs() -> u64 {
+    5 * 60
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ServeSettings {
     pub listen: String,
@@ -22,6 +34,33 @@ pub struct ServeSettings {
     pub tracker: Option<LinearSettings>,
     #[serde(default)]
     pub pause_delegated_work: bool,
+    // Configured together: a fleet that can be grown but not shrunk would strand
+    // machines, so the two scripts are one decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workers: Option<WorkersSettings>,
+}
+
+// How a remote grows beyond this machine. The scripts are the whole infra
+// contract: altitude names a worker and runs them, and it does not need to know
+// what a worker actually is.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct WorkersSettings {
+    pub provision: String,
+    pub deprovision: String,
+    #[serde(default)]
+    pub min: usize,
+    #[serde(default = "default_worker_max")]
+    pub max: usize,
+    #[serde(default = "default_provision_timeout_secs")]
+    pub provision_timeout_secs: u64,
+    #[serde(default = "default_deprovision_timeout_secs")]
+    pub deprovision_timeout_secs: u64,
+}
+
+impl WorkersSettings {
+    pub fn ceiling(&self) -> usize {
+        self.max.max(self.min)
+    }
 }
 
 impl Default for ServeSettings {
@@ -30,6 +69,7 @@ impl Default for ServeSettings {
             listen: default_listen(),
             tracker: None,
             pause_delegated_work: false,
+            workers: None,
         }
     }
 }
@@ -56,6 +96,17 @@ fn template() -> String {
          # Stop starting work delegated from a task tracker, without taking the\n\
          # tracker away. An operator consents to that per project; this is the brake.\n\
          # pause_delegated_work = true\n\
+         \n\
+         # Grow this remote beyond this host. Each script is handed\n\
+         # ALTITUDE_MASTER_TICKET, ALTITUDE_WORKER_TOKEN and ALTITUDE_WORKER_NAME and\n\
+         # must bring one worker up or take it down.\n\
+         # [workers]\n\
+         # provision = \"/etc/altitude/provision-worker.sh\"\n\
+         # deprovision = \"/etc/altitude/deprovision-worker.sh\"\n\
+         # min = 0\n\
+         # max = 8\n\
+         # provision_timeout_secs = 600\n\
+         # deprovision_timeout_secs = 300\n\
          \n\
          # A shared {name} app for work delegated from a task tracker. Install it with\n\
          # `altitude serve connect {slug}`, which prints the exact addresses to register.\n\

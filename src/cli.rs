@@ -91,6 +91,43 @@ pub enum ServeCommand {
     Uninstall,
     #[command(after_help = CONNECT_AFTER_HELP)]
     Connect(ConnectArgs),
+    #[command(long_about = WORKER_MODE, after_help = WORKER_AFTER_HELP)]
+    Worker(WorkerArgs),
+}
+
+const WORKER_MODE: &str =
+    "Run altitude serve as an empty box that supplies compute to one `altitude serve` master.";
+
+const WORKER_AFTER_HELP: &str = "\
+The master provisions this process with a provision script. Run by hand only to \
+debug that script: the master generates the token, and the ticket and name it \
+passes are the ones to use here.";
+
+#[derive(Debug, Args)]
+pub struct WorkerArgs {
+    #[arg(
+        long,
+        value_name = "TICKET",
+        display_order = 1,
+        help = "The master's address ticket, from its worker settings or debug log"
+    )]
+    pub master: String,
+
+    #[arg(
+        long,
+        value_name = "TOKEN",
+        display_order = 2,
+        help = "The master's worker token, from its data directory if not given in the script"
+    )]
+    pub token: String,
+
+    #[arg(
+        long,
+        value_name = "NAME",
+        display_order = 3,
+        help = "The name this box was provisioned under"
+    )]
+    pub name: String,
 }
 
 #[derive(Debug, Args)]

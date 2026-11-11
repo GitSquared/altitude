@@ -36,7 +36,7 @@ use crate::{
     remote::{
         ClientRecord, InstallationKey, LinkServer, TrackerConnection,
         announce::{Phase, TrackerReadiness},
-        server::ServerParts,
+        server::{ServerParts, WorkerHost},
     },
     task::{TaskEventLoop, TaskExecutionUpdate, TaskService, TaskStore},
     tracker::providers::linear::host as linear_host,
@@ -46,6 +46,7 @@ use crate::{
 use super::settings::ServeSettings;
 use super::tracker_host::PushedTrackers;
 use super::{OwnTasks, Transfers, Watchers, publish_change, publish_queue, summary_of};
+use super::{worker, workers::WorkerFleet};
 use crate::remote::host::{admin, install};
 
 pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
@@ -93,10 +94,22 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
                     }
                 };
             }
+            ServeCommand::Worker(worker_args) => {
+                return worker::run(worker_args, base).await;
+            }
         }
     }
 
     let settings = ServeSettings::load_or_create(&settings_path)?;
+    // An empty box is a script plus a token, and the fleet is what keeps the boxes
+    // the operator asked for alive and replaced. Which sandboxes land on them is
+    // the isolation provider's business, not the fleet's.
+    let fleet = match settings.workers.clone() {
+        Some(workers) => Some(Arc::new(
+            WorkerFleet::open(workers, config.data_dir()).map_err(io::Error::other)?,
+        )),
+        None => None,
+    };
     let credentials_path = linear_host::credentials_path(&config);
     logging::init_service();
     tracing::info!("{}  altitude {VERSION} · remote", brand::MOUNTAIN);
@@ -339,10 +352,27 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
         phase: phases,
         trackers,
         tasks: host.clone(),
+        workers: fleet
+            .as_ref()
+            .map(|fleet| Arc::clone(fleet) as Arc<dyn WorkerHost>),
     })
     .await
     .map_err(io::Error::other)?;
     let ticket = server.ticket().map_err(io::Error::other)?;
+    if let Some(fleet) = &fleet {
+        fleet.start(ticket.to_string());
+        tracing::info!(
+            minimum = settings
+                .workers
+                .as_ref()
+                .map(|workers| workers.min)
+                .unwrap_or(0),
+            "Isolation workers configured",
+        );
+        tracing::warn!(
+            "isolation workers are connected but not yet given sandboxes; work still runs on this host"
+        );
+    }
     let connect_address = if listen.ip().is_unspecified() {
         whoami::hostname()
             .ok()
@@ -475,6 +505,9 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
         }
     };
     let stopped = server.shutdown().await.map_err(io::Error::other);
+    if let Some(fleet) = &fleet {
+        fleet.shutdown().await;
+    }
     result?;
     suspended?;
     stopped?;
