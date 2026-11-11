@@ -4,10 +4,12 @@ use std::{
     fmt, fs, io,
     io::IsTerminal,
     net::Ipv4Addr,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::Duration,
 };
+
+use tempfile::{NamedTempFile, TempDir};
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 
@@ -17,6 +19,8 @@ use iroh::{
     protocol::{AcceptError, ProtocolHandler, Router},
 };
 use tokio::{
+    fs::File as AsyncFile,
+    io::copy,
     net::TcpListener,
     signal::unix::{SignalKind, signal},
     task::JoinHandle,
@@ -30,8 +34,8 @@ use crate::{
     config::Config,
     credentials::profile_recipe,
     isolation::{
-        CommandEvent, IsolationEngine, IsolationStatus, TestbedIsolation, Unwatched, VsockRoute,
-        mounts, prepare, private_directory,
+        CommandEvent, IsolationEngine, IsolationStatus, TestbedIsolation, Unwatched,
+        UnwatchedFiles, VsockRoute, mounts, prepare, private_directory,
         worker_protocol::{
             CommandFrame, WORKER_ALPN, WorkerCall, WorkerProfile, WorkerReply, WorkerRequest,
         },
@@ -214,14 +218,34 @@ impl ProtocolHandler for WorkerService {
             .await;
             return Ok(());
         }
-        if let WorkerCall::RunCommand { id, command } = request.call {
-            self.run_command(send, recv, id, command).await;
-            return Ok(());
+        match request.call {
+            WorkerCall::RunCommand { id, command } => {
+                self.run_command(send, recv, id, command).await;
+                Ok(())
+            }
+            WorkerCall::DeliverFile { id, guest_path } => {
+                self.receive_file(send, recv, id, guest_path).await;
+                Ok(())
+            }
+            WorkerCall::DeliverFiles { id, root } => {
+                self.receive_tree(send, recv, id, root).await;
+                Ok(())
+            }
+            WorkerCall::CollectFile { id, guest_path } => {
+                self.send_file(send, recv, id, guest_path).await;
+                Ok(())
+            }
+            WorkerCall::CollectFiles { id, root, excluded } => {
+                self.send_tree(send, recv, id, root, excluded).await;
+                Ok(())
+            }
+            call => {
+                let reply = self.dispatch(call).await;
+                let _ = write_frame(&mut send, &reply).await;
+                let _ = send.finish();
+                Ok(())
+            }
         }
-        let reply = self.dispatch(request.call).await;
-        let _ = write_frame(&mut send, &reply).await;
-        let _ = send.finish();
-        Ok(())
     }
 }
 
@@ -282,6 +306,145 @@ impl WorkerService {
         {
             handle.abort();
         }
+    }
+
+    // The bytes on the stream are a file the master is putting in the sandbox.
+    async fn receive_file(
+        &self,
+        mut send: SendStream,
+        mut recv: RecvStream,
+        id: String,
+        guest_path: String,
+    ) {
+        let reply = match receive_to_temp(&mut recv).await {
+            Ok(temp) => {
+                match self
+                    .engine
+                    .deliver_file(id, temp.path().to_path_buf(), guest_path)
+                    .await
+                {
+                    Ok(()) => WorkerReply::Ok,
+                    Err(error) => WorkerReply::Failed(error.to_string()),
+                }
+            }
+            Err(error) => WorkerReply::Failed(error),
+        };
+        let _ = write_frame(&mut send, &reply).await;
+        let _ = send.finish();
+    }
+
+    // The bytes on the stream are a tar of a tree the master is putting in.
+    async fn receive_tree(
+        &self,
+        mut send: SendStream,
+        mut recv: RecvStream,
+        id: String,
+        root: String,
+    ) {
+        let reply = match receive_to_temp(&mut recv).await {
+            Ok(tar) => match TempDir::new() {
+                Ok(directory) => match extract_tree(tar.path(), directory.path()) {
+                    Ok(()) => match self
+                        .engine
+                        .deliver_files(id, directory.path().to_path_buf(), root, &UnwatchedFiles)
+                        .await
+                    {
+                        Ok(_) => WorkerReply::Ok,
+                        Err(error) => WorkerReply::Failed(error.to_string()),
+                    },
+                    Err(error) => WorkerReply::Failed(error),
+                },
+                Err(error) => WorkerReply::Failed(error.to_string()),
+            },
+            Err(error) => WorkerReply::Failed(error),
+        };
+        let _ = write_frame(&mut send, &reply).await;
+        let _ = send.finish();
+    }
+
+    async fn send_file(
+        &self,
+        mut send: SendStream,
+        _recv: RecvStream,
+        id: String,
+        guest_path: String,
+    ) {
+        if let Ok(temp) = NamedTempFile::new()
+            && let Ok(len) = self
+                .engine
+                .collect_file(id, guest_path, temp.path().to_path_buf())
+                .await
+        {
+            if write_frame(
+                &mut send,
+                &WorkerReply::Blob {
+                    len,
+                    files: 1,
+                    bytes: len,
+                },
+            )
+            .await
+            .is_ok()
+                && let Ok(mut file) = AsyncFile::open(temp.path()).await
+            {
+                let _ = copy(&mut file, &mut send).await;
+            }
+            let _ = send.finish();
+            return;
+        }
+        let _ = write_frame(
+            &mut send,
+            &WorkerReply::Failed("could not collect that file".into()),
+        )
+        .await;
+        let _ = send.finish();
+    }
+
+    async fn send_tree(
+        &self,
+        mut send: SendStream,
+        _recv: RecvStream,
+        id: String,
+        root: String,
+        excluded: Vec<String>,
+    ) {
+        if let Ok(directory) = TempDir::new()
+            && let Ok(tally) = self
+                .engine
+                .collect_files(
+                    id,
+                    root,
+                    excluded,
+                    directory.path().to_path_buf(),
+                    &UnwatchedFiles,
+                )
+                .await
+            && let Ok(tar) = NamedTempFile::new()
+            && let Ok(len) = pack_tree(directory.path(), tar.path())
+        {
+            if write_frame(
+                &mut send,
+                &WorkerReply::Blob {
+                    len,
+                    files: tally.files,
+                    bytes: tally.bytes,
+                },
+            )
+            .await
+            .is_ok()
+                && let Ok(mut file) = AsyncFile::open(tar.path()).await
+            {
+                let _ = copy(&mut file, &mut send).await;
+            }
+            let _ = send.finish();
+            return;
+        }
+        let _ = write_frame(
+            &mut send,
+            &WorkerReply::Failed("could not collect that tree".into()),
+        )
+        .await;
+        let _ = send.finish();
     }
 
     async fn dispatch(&self, call: WorkerCall) -> WorkerReply {
@@ -396,7 +559,11 @@ impl WorkerService {
                 self.engine.remove_leftover_sandboxes().await;
                 WorkerReply::Ok
             }
-            WorkerCall::RunCommand { .. } => unreachable!("commands are streamed"),
+            WorkerCall::RunCommand { .. }
+            | WorkerCall::DeliverFile { .. }
+            | WorkerCall::DeliverFiles { .. }
+            | WorkerCall::CollectFile { .. }
+            | WorkerCall::CollectFiles { .. } => unreachable!("this call is streamed"),
         }
     }
 
@@ -469,6 +636,41 @@ fn write_profiles(config: &Config, profiles: &[WorkerProfile]) -> Result<(), Str
         }
     }
     Ok(())
+}
+
+// The bytes on an incoming stream, kept in a temporary file the engine can read as
+// a host path.
+async fn receive_to_temp(recv: &mut RecvStream) -> Result<NamedTempFile, String> {
+    let temp = NamedTempFile::new().map_err(|error| error.to_string())?;
+    let mut file = AsyncFile::create(temp.path())
+        .await
+        .map_err(|error| error.to_string())?;
+    copy(recv, &mut file)
+        .await
+        .map_err(|error| error.to_string())?;
+    file.sync_all().await.map_err(|error| error.to_string())?;
+    Ok(temp)
+}
+
+fn pack_tree(source: &Path, tar_path: &Path) -> Result<u64, String> {
+    let file = fs::File::create(tar_path).map_err(|error| error.to_string())?;
+    let mut builder = tar::Builder::new(file);
+    builder
+        .append_dir_all(".", source)
+        .map_err(|error| error.to_string())?;
+    builder.finish().map_err(|error| error.to_string())?;
+    fs::metadata(tar_path)
+        .map(|metadata| metadata.len())
+        .map_err(|error| error.to_string())
+}
+
+fn extract_tree(tar_path: &Path, destination: &Path) -> Result<(), String> {
+    fs::create_dir_all(destination).map_err(|error| error.to_string())?;
+    let file = fs::File::open(tar_path).map_err(|error| error.to_string())?;
+    let mut archive = tar::Archive::new(file);
+    archive
+        .unpack(destination)
+        .map_err(|error| error.to_string())
 }
 
 fn local_capacity() -> WorkerReport {

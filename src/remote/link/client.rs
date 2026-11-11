@@ -4,6 +4,7 @@ use crate::remote::InstallationKey;
 use crate::remote::Transfer;
 use crate::remote::TransferPart;
 use iroh::{Endpoint, EndpointAddr, EndpointId, endpoint::Connection};
+use tokio::fs::File as AsyncFile;
 use tokio::io::copy;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
@@ -139,6 +140,46 @@ impl LinkClient {
         };
         tokio::join!(to_master, to_box);
         Ok(())
+    }
+
+    // Send a file's bytes to a worker on the stream that carries the call.
+    pub(crate) async fn worker_deliver(
+        &self,
+        peer: impl Into<EndpointAddr>,
+        request: &WorkerRequest,
+        mut file: AsyncFile,
+    ) -> LinkResult<()> {
+        let dial = self.dial(peer).await?;
+        let (mut send, mut recv) = dial.0.open_bi().await?;
+        write_frame(&mut send, request).await?;
+        copy(&mut file, &mut send).await?;
+        send.finish()?;
+        match read_frame::<_, WorkerReply>(&mut recv).await? {
+            WorkerReply::Ok => Ok(()),
+            WorkerReply::Failed(reason) => Err(reason.into()),
+            other => Err(format!("unexpected answer: {other:?}").into()),
+        }
+    }
+
+    // Receive a collected file or tree on the stream the call opened.
+    pub(crate) async fn worker_collect(
+        &self,
+        peer: impl Into<EndpointAddr>,
+        request: &WorkerRequest,
+        mut sink: AsyncFile,
+    ) -> LinkResult<(u64, u64)> {
+        let dial = self.dial(peer).await?;
+        let (mut send, mut recv) = dial.0.open_bi().await?;
+        write_frame(&mut send, request).await?;
+        send.finish()?;
+        match read_frame::<_, WorkerReply>(&mut recv).await? {
+            WorkerReply::Blob { files, bytes, .. } => {
+                copy(&mut recv, &mut sink).await?;
+                Ok((files, bytes))
+            }
+            WorkerReply::Failed(reason) => Err(reason.into()),
+            other => Err(format!("unexpected answer: {other:?}").into()),
+        }
     }
 
     // A command on a worker keeps its stream open: input goes one way and events

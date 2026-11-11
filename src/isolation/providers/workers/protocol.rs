@@ -64,6 +64,25 @@ pub(crate) enum WorkerCall {
         id: String,
         command: String,
     },
+    // A tree or a file moves as a stream on the same connection: the request names
+    // the sandbox side, the bytes follow, and the reply says how it went.
+    DeliverFile {
+        id: String,
+        guest_path: String,
+    },
+    DeliverFiles {
+        id: String,
+        root: String,
+    },
+    CollectFile {
+        id: String,
+        guest_path: String,
+    },
+    CollectFiles {
+        id: String,
+        root: String,
+        excluded: Vec<String>,
+    },
     Remove {
         id: String,
     },
@@ -96,6 +115,9 @@ pub(crate) enum WorkerReply {
     Ready,
     Ok,
     Snapshot(BaseSandboxSnapshot),
+    // Bytes follow on the stream: a collected file or a tar of a collected tree,
+    // and what the collecting machine counted.
+    Blob { len: u64, files: u64, bytes: u64 },
     Bool(bool),
     Path(PathBuf),
     Text(String),

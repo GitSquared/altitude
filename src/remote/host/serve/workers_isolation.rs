@@ -1,9 +1,13 @@
 use std::{
     collections::HashMap,
-    path::PathBuf,
+    fs,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 
+use iroh::EndpointId;
+use tempfile::NamedTempFile;
+use tokio::fs::File as AsyncFile;
 use tokio::sync::watch;
 
 use crate::{
@@ -89,6 +93,57 @@ impl WorkersIsolation {
             self.fleet.release(&worker).await;
         }
     }
+
+    // The box a sandbox lives on, for a call that must reach it directly.
+    fn peer_for(&self, id: &str) -> Result<EndpointId, IsolationError> {
+        let worker = self.placement(id).ok_or_else(|| {
+            IsolationError::missing_sandbox(format!("sandbox {id} is not on a worker"))
+        })?;
+        self.fleet.peer(&worker).ok_or_else(|| {
+            IsolationError::missing_sandbox(format!("isolation worker {worker} is gone"))
+        })
+    }
+}
+
+fn pack_tree(source: &Path, tar_path: &Path) -> Result<FileTally, String> {
+    let file = fs::File::create(tar_path).map_err(|error| error.to_string())?;
+    let mut builder = tar::Builder::new(file);
+    builder
+        .append_dir_all(".", source)
+        .map_err(|error| error.to_string())?;
+    builder.finish().map_err(|error| error.to_string())?;
+    Ok(count_tree(source))
+}
+
+fn count_tree(root: &Path) -> FileTally {
+    let mut tally = FileTally::default();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(directory) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            if metadata.is_dir() {
+                stack.push(entry.path());
+            } else if metadata.is_file() {
+                tally.files += 1;
+                tally.bytes += metadata.len();
+            }
+        }
+    }
+    tally
+}
+
+fn extract_tree(tar_path: &Path, destination: &Path) -> Result<(), String> {
+    fs::create_dir_all(destination).map_err(|error| error.to_string())?;
+    let file = fs::File::open(tar_path).map_err(|error| error.to_string())?;
+    let mut archive = tar::Archive::new(file);
+    archive
+        .unpack(destination)
+        .map_err(|error| error.to_string())
 }
 
 fn expect_ok(reply: WorkerReply) -> Result<(), IsolationError> {
@@ -393,48 +448,93 @@ impl IsolationEngine for WorkersIsolation {
 
     async fn collect_files(
         &self,
-        _id: String,
-        _root: String,
-        _excluded: Vec<String>,
-        _destination: PathBuf,
+        id: String,
+        root: String,
+        excluded: Vec<String>,
+        destination: PathBuf,
         _progress: &dyn FileTransferSink,
     ) -> Result<FileTally, IsolationError> {
-        Err(IsolationError::new(
-            "the workers isolation provider cannot collect files yet",
-        ))
+        let peer = self.peer_for(&id)?;
+        let tar = NamedTempFile::new().map_err(|error| IsolationError::new(error.to_string()))?;
+        let sink = AsyncFile::create(tar.path())
+            .await
+            .map_err(|error| IsolationError::new(error.to_string()))?;
+        let request = WorkerRequest {
+            token: self.fleet.token().to_owned(),
+            call: WorkerCall::CollectFiles { id, root, excluded },
+        };
+        let (files, bytes) = self
+            .client
+            .worker_collect(peer, &request, sink)
+            .await
+            .map_err(|error| IsolationError::new(error.to_string()))?;
+        extract_tree(tar.path(), &destination).map_err(IsolationError::new)?;
+        Ok(FileTally { files, bytes })
     }
 
     async fn collect_file(
         &self,
-        _id: String,
-        _guest_path: String,
-        _host_path: PathBuf,
+        id: String,
+        guest_path: String,
+        host_path: PathBuf,
     ) -> Result<u64, IsolationError> {
-        Err(IsolationError::new(
-            "the workers isolation provider cannot collect a file yet",
-        ))
+        let peer = self.peer_for(&id)?;
+        let sink = AsyncFile::create(&host_path)
+            .await
+            .map_err(|error| IsolationError::new(error.to_string()))?;
+        let request = WorkerRequest {
+            token: self.fleet.token().to_owned(),
+            call: WorkerCall::CollectFile { id, guest_path },
+        };
+        let (_files, bytes) = self
+            .client
+            .worker_collect(peer, &request, sink)
+            .await
+            .map_err(|error| IsolationError::new(error.to_string()))?;
+        Ok(bytes)
     }
 
     async fn deliver_file(
         &self,
-        _id: String,
-        _host_path: PathBuf,
-        _guest_path: String,
+        id: String,
+        host_path: PathBuf,
+        guest_path: String,
     ) -> Result<(), IsolationError> {
-        Err(IsolationError::new(
-            "the workers isolation provider cannot deliver a file yet",
-        ))
+        let peer = self.peer_for(&id)?;
+        let file = AsyncFile::open(&host_path)
+            .await
+            .map_err(|error| IsolationError::new(error.to_string()))?;
+        let request = WorkerRequest {
+            token: self.fleet.token().to_owned(),
+            call: WorkerCall::DeliverFile { id, guest_path },
+        };
+        self.client
+            .worker_deliver(peer, &request, file)
+            .await
+            .map_err(|error| IsolationError::new(error.to_string()))
     }
 
     async fn deliver_files(
         &self,
-        _id: String,
-        _source: PathBuf,
-        _root: String,
+        id: String,
+        source: PathBuf,
+        root: String,
         _progress: &dyn FileTransferSink,
     ) -> Result<FileTally, IsolationError> {
-        Err(IsolationError::new(
-            "the workers isolation provider cannot deliver files yet",
-        ))
+        let peer = self.peer_for(&id)?;
+        let tar = NamedTempFile::new().map_err(|error| IsolationError::new(error.to_string()))?;
+        let tally = pack_tree(&source, tar.path()).map_err(IsolationError::new)?;
+        let file = AsyncFile::open(tar.path())
+            .await
+            .map_err(|error| IsolationError::new(error.to_string()))?;
+        let request = WorkerRequest {
+            token: self.fleet.token().to_owned(),
+            call: WorkerCall::DeliverFiles { id, root },
+        };
+        self.client
+            .worker_deliver(peer, &request, file)
+            .await
+            .map_err(|error| IsolationError::new(error.to_string()))?;
+        Ok(tally)
     }
 }
