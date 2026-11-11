@@ -103,6 +103,35 @@ impl WorkersIsolation {
             IsolationError::missing_sandbox(format!("isolation worker {worker} is gone"))
         })
     }
+
+    // The operator's files for these recipes, gathered as the remote push gathers
+    // them, so a box can mount real credentials.
+    fn profile_bundles(
+        &self,
+        recipes: &[ProfileRecipe],
+    ) -> Result<Vec<WorkerProfile>, IsolationError> {
+        let scope = match &self.owner {
+            Some(owner) => self
+                .config
+                .for_operator(owner)
+                .map_err(|error| IsolationError::new(error.to_string()))?,
+            None => self.config.clone(),
+        };
+        let mut profiles = Vec::new();
+        for recipe in recipes {
+            let bundle = ProfileBundle::of(scope.scoped_data_dir(), &recipe.profile)
+                .map_err(|error| IsolationError::new(error.to_string()))?;
+            profiles.push(WorkerProfile {
+                profile: bundle.profile,
+                files: bundle
+                    .files
+                    .into_iter()
+                    .map(|file| (file.path, file.contents))
+                    .collect(),
+            });
+        }
+        Ok(profiles)
+    }
 }
 
 fn pack_tree(source: &Path, tar_path: &Path) -> Result<FileTally, String> {
@@ -217,26 +246,7 @@ impl IsolationEngine for WorkersIsolation {
             .map(|r| r.profile.clone())
             .unwrap_or_default();
         // The box is fresh, so the operator's profile files travel with the spawn.
-        let scope = match &self.owner {
-            Some(owner) => self
-                .config
-                .for_operator(owner)
-                .map_err(|error| IsolationError::new(error.to_string()))?,
-            None => self.config.clone(),
-        };
-        let mut profiles = Vec::new();
-        for recipe in &recipes {
-            let bundle = ProfileBundle::of(scope.scoped_data_dir(), &recipe.profile)
-                .map_err(|error| IsolationError::new(error.to_string()))?;
-            profiles.push(WorkerProfile {
-                profile: bundle.profile,
-                files: bundle
-                    .files
-                    .into_iter()
-                    .map(|file| (file.path, file.contents))
-                    .collect(),
-            });
-        }
+        let profiles = self.profile_bundles(&recipes)?;
         let worker = self.lease(&id).await?;
         let call = WorkerCall::Provision {
             id: id.clone(),
@@ -264,25 +274,61 @@ impl IsolationEngine for WorkersIsolation {
 
     async fn credential_shell(
         &self,
-        _sandbox: CredentialSandbox,
-        _profile: &str,
+        sandbox: CredentialSandbox,
+        profile: &str,
         _progress: &dyn EnvironmentProgressSink,
     ) -> Result<String, IsolationError> {
-        Err(IsolationError::new(
-            "the workers isolation provider cannot run a credential shell yet",
-        ))
+        let worker = self.lease(&sandbox.id).await?;
+        let profiles = self.profile_bundles(&sandbox.recipes)?;
+        let call = WorkerCall::CredentialShell {
+            id: sandbox.id.clone(),
+            profiles,
+            snapshot: sandbox.snapshot,
+            vsock: sandbox.vsock,
+            profile: profile.to_owned(),
+        };
+        match self.call_on(&worker, call).await? {
+            WorkerReply::Text(command) => Ok(command),
+            WorkerReply::Failed(reason) => {
+                self.release(&sandbox.id).await;
+                Err(IsolationError::new(reason))
+            }
+            other => {
+                self.release(&sandbox.id).await;
+                Err(IsolationError::new(format!(
+                    "unexpected answer from an isolation worker: {other:?}"
+                )))
+            }
+        }
     }
 
     async fn watcher(
         &self,
-        _id: String,
-        _project: Project,
-        _recipes: Vec<ProfileRecipe>,
+        id: String,
+        project: Project,
+        recipes: Vec<ProfileRecipe>,
         _progress: &dyn EnvironmentProgressSink,
     ) -> Result<(), IsolationError> {
-        Err(IsolationError::new(
-            "the workers isolation provider cannot run a watcher yet",
-        ))
+        let worker = self.lease(&id).await?;
+        let profiles = self.profile_bundles(&recipes)?;
+        let call = WorkerCall::Watcher {
+            id: id.clone(),
+            profiles,
+            project,
+        };
+        match self.call_on(&worker, call).await? {
+            WorkerReply::Ok => Ok(()),
+            WorkerReply::Failed(reason) => {
+                self.release(&id).await;
+                Err(IsolationError::new(reason))
+            }
+            other => {
+                self.release(&id).await;
+                Err(IsolationError::new(format!(
+                    "unexpected answer from an isolation worker: {other:?}"
+                )))
+            }
+        }
     }
 
     async fn create(
@@ -368,13 +414,32 @@ impl IsolationEngine for WorkersIsolation {
 
     async fn credential_reports(
         &self,
-        _sandbox: CredentialSandbox,
-        _checks: Vec<CredentialCheck>,
+        sandbox: CredentialSandbox,
+        checks: Vec<CredentialCheck>,
         _progress: &dyn EnvironmentProgressSink,
     ) -> Result<Option<Vec<(String, CredentialReport)>>, IsolationError> {
-        Err(IsolationError::new(
-            "the workers isolation provider cannot run credential checks yet",
-        ))
+        let worker = self.lease(&sandbox.id).await?;
+        let profiles = self.profile_bundles(&sandbox.recipes)?;
+        let call = WorkerCall::CredentialReports {
+            id: sandbox.id.clone(),
+            profiles,
+            snapshot: sandbox.snapshot,
+            vsock: sandbox.vsock,
+            checks,
+        };
+        match self.call_on(&worker, call).await? {
+            WorkerReply::Reports(reports) => Ok(reports),
+            WorkerReply::Failed(reason) => {
+                self.release(&sandbox.id).await;
+                Err(IsolationError::new(reason))
+            }
+            other => {
+                self.release(&sandbox.id).await;
+                Err(IsolationError::new(format!(
+                    "unexpected answer from an isolation worker: {other:?}"
+                )))
+            }
+        }
     }
 
     async fn remove_leftover_sandboxes(&self) {

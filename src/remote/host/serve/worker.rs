@@ -34,8 +34,9 @@ use crate::{
     config::Config,
     credentials::profile_recipe,
     isolation::{
-        CommandEvent, IsolationEngine, IsolationStatus, TestbedIsolation, Unwatched,
-        UnwatchedFiles, VsockRoute, mounts, prepare, private_directory,
+        CommandEvent, CredentialSandbox, IsolationEngine, IsolationStatus, ProfileRecipe,
+        TestbedIsolation, Unwatched, UnwatchedFiles, VsockRoute, mounts, prepare,
+        private_directory,
         worker_protocol::{
             CommandFrame, WORKER_ALPN, WorkerCall, WorkerProfile, WorkerReply, WorkerRequest,
         },
@@ -559,6 +560,81 @@ impl WorkerService {
                 self.engine.remove_leftover_sandboxes().await;
                 WorkerReply::Ok
             }
+            WorkerCall::CredentialShell {
+                id,
+                profiles,
+                snapshot,
+                vsock,
+                profile,
+            } => {
+                if let Err(error) = write_profiles(&self.config, &profiles) {
+                    return WorkerReply::Failed(error);
+                }
+                let recipes = match rebuild_recipes(&profiles, &self.agents) {
+                    Ok(recipes) => recipes,
+                    Err(error) => return WorkerReply::Failed(error),
+                };
+                let sandbox = CredentialSandbox {
+                    id,
+                    recipes,
+                    snapshot,
+                    vsock,
+                };
+                match self
+                    .engine
+                    .credential_shell(sandbox, &profile, &Unwatched)
+                    .await
+                {
+                    Ok(command) => WorkerReply::Text(command),
+                    Err(error) => WorkerReply::Failed(error.to_string()),
+                }
+            }
+            WorkerCall::Watcher {
+                id,
+                profiles,
+                project,
+            } => {
+                if let Err(error) = write_profiles(&self.config, &profiles) {
+                    return WorkerReply::Failed(error);
+                }
+                let recipes = match rebuild_recipes(&profiles, &self.agents) {
+                    Ok(recipes) => recipes,
+                    Err(error) => return WorkerReply::Failed(error),
+                };
+                match self.engine.watcher(id, project, recipes, &Unwatched).await {
+                    Ok(()) => WorkerReply::Ok,
+                    Err(error) => WorkerReply::Failed(error.to_string()),
+                }
+            }
+            WorkerCall::CredentialReports {
+                id,
+                profiles,
+                snapshot,
+                vsock,
+                checks,
+            } => {
+                if let Err(error) = write_profiles(&self.config, &profiles) {
+                    return WorkerReply::Failed(error);
+                }
+                let recipes = match rebuild_recipes(&profiles, &self.agents) {
+                    Ok(recipes) => recipes,
+                    Err(error) => return WorkerReply::Failed(error),
+                };
+                let sandbox = CredentialSandbox {
+                    id,
+                    recipes,
+                    snapshot,
+                    vsock,
+                };
+                match self
+                    .engine
+                    .credential_reports(sandbox, checks, &Unwatched)
+                    .await
+                {
+                    Ok(reports) => WorkerReply::Reports(reports),
+                    Err(error) => WorkerReply::Failed(error.to_string()),
+                }
+            }
             WorkerCall::RunCommand { .. }
             | WorkerCall::DeliverFile { .. }
             | WorkerCall::DeliverFiles { .. }
@@ -612,6 +688,16 @@ impl WorkerService {
         }
         let _ = send.finish();
     }
+}
+
+fn rebuild_recipes(
+    profiles: &[WorkerProfile],
+    agents: &AgentEngines,
+) -> Result<Vec<ProfileRecipe>, String> {
+    profiles
+        .iter()
+        .map(|profile| profile_recipe(&profile.profile, agents).map_err(|error| error.to_string()))
+        .collect()
 }
 
 // The profile files the master pushed with this sandbox, written where the plan

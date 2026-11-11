@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::agent::AgentKind;
 use crate::isolation::{
-    BaseSandboxSnapshot, Command, CommandEvent, EnvironmentDescription, Pressure, SandboxOptions,
-    SandboxPurpose, SandboxRoom, VsockRoute,
+    BaseSandboxSnapshot, Command, CommandEvent, CredentialCheck, CredentialReport,
+    EnvironmentDescription, Pressure, SandboxOptions, SandboxPurpose, SandboxRoom, VsockRoute,
 };
 use crate::project::Project;
 
@@ -83,6 +83,27 @@ pub(crate) enum WorkerCall {
         root: String,
         excluded: Vec<String>,
     },
+    // A command sandbox a credential flow or a provider's read needs. The box
+    // rebuilds the recipes from the pushed profiles, as `Provision` does.
+    CredentialShell {
+        id: String,
+        profiles: Vec<WorkerProfile>,
+        snapshot: Option<String>,
+        vsock: Vec<VsockRoute>,
+        profile: String,
+    },
+    Watcher {
+        id: String,
+        profiles: Vec<WorkerProfile>,
+        project: Project,
+    },
+    CredentialReports {
+        id: String,
+        profiles: Vec<WorkerProfile>,
+        snapshot: Option<String>,
+        vsock: Vec<VsockRoute>,
+        checks: Vec<CredentialCheck>,
+    },
     Remove {
         id: String,
     },
@@ -118,6 +139,7 @@ pub(crate) enum WorkerReply {
     // Bytes follow on the stream: a collected file or a tar of a collected tree,
     // and what the collecting machine counted.
     Blob { len: u64, files: u64, bytes: u64 },
+    Reports(Option<Vec<(String, CredentialReport)>>),
     Bool(bool),
     Path(PathBuf),
     Text(String),
