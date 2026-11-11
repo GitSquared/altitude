@@ -9,7 +9,10 @@ use tokio::io::copy;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
+#[cfg(target_os = "linux")]
 use crate::remote::cache::protocol::{CacheReply, CacheRequest};
+#[cfg(target_os = "linux")]
+use crate::remote::protocol::MAX_BLOB_BYTES;
 use crate::task::TaskAsk;
 use crate::task::picture;
 
@@ -19,8 +22,8 @@ use crate::isolation::{CommandEvent, CommandSession};
 use crate::remote::protocol::SignalCommand;
 use crate::remote::protocol::{
     BlobHash, CHUNK_BYTES, ConfigPush, Handover, LINK_ALPN, LinkRequest, LinkResponse,
-    MAX_BLOB_BYTES, TRANSFER_PIECE_BYTES, TaskRequest, TransferArchive, WatchEvent, WorkerReport,
-    builder, read_body, read_frame, write_frame,
+    TRANSFER_PIECE_BYTES, TaskRequest, TransferArchive, WatchEvent, WorkerReport, builder,
+    read_body, read_frame, write_frame,
 };
 use crate::remote::transfer::{STOPPED, TransferUpdate, Unit};
 use crate::remote::{
@@ -96,6 +99,7 @@ impl LinkClient {
 
     // One cache call to a master, carrying the body a write needs and returning the
     // bytes a read produced.
+    #[cfg(target_os = "linux")]
     pub(crate) async fn cache_call(
         &self,
         peer: impl Into<EndpointAddr>,
