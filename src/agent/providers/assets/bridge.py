@@ -20,6 +20,22 @@ import threading
 HOST_CID = 2
 PORT = int(os.environ.get("ALTITUDE_MCP_PORT", "5000"))
 
+# A host-engine box has no nested microVM to make a vsock to, so its altitude
+# offers the same channel on the box's loopback, which the sandbox shares.
+HOST = os.environ.get("ALTITUDE_MCP_HOST", "127.0.0.1")
+
+
+def connect():
+    """The channel, over vsock where there is one and TCP on the box otherwise."""
+    try:
+        connection = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
+        connection.connect((HOST_CID, PORT))
+        return connection
+    except OSError:
+        connection = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        connection.connect((HOST, PORT))
+        return connection
+
 
 def to_host(connection):
     """Everything the harness writes, until its stdin closes."""
@@ -53,8 +69,7 @@ def to_stdout(connection):
 
 
 def main():
-    connection = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
-    connection.connect((HOST_CID, PORT))
+    connection = connect()
     threading.Thread(target=to_host, args=(connection,), daemon=True).start()
     to_stdout(connection)
     connection.close()
