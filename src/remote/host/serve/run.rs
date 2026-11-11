@@ -362,10 +362,10 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
     if let Some(fleet) = &fleet {
         fleet.start(ticket.to_string());
         tracing::info!(
-            minimum = settings
+            maximum = settings
                 .workers
                 .as_ref()
-                .map(|workers| workers.min)
+                .map(|workers| workers.max)
                 .unwrap_or(0),
             "Isolation workers configured",
         );

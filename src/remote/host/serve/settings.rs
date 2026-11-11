@@ -47,8 +47,6 @@ pub struct ServeSettings {
 pub struct WorkersSettings {
     pub provision: String,
     pub deprovision: String,
-    #[serde(default)]
-    pub min: usize,
     #[serde(default = "default_worker_max")]
     pub max: usize,
     #[serde(default = "default_provision_timeout_secs")]
@@ -58,8 +56,11 @@ pub struct WorkersSettings {
 }
 
 impl WorkersSettings {
+    // The ceiling is `max`, the most boxes this remote will have running at
+    // once. There is no floor: a box is spawned for a sandbox that needs one
+    // and destroyed when it ends, so an idle remote runs none.
     pub fn ceiling(&self) -> usize {
-        self.max.max(self.min)
+        self.max
     }
 }
 
@@ -103,7 +104,6 @@ fn template() -> String {
          # [workers]\n\
          # provision = \"/etc/altitude/provision-worker.sh\"\n\
          # deprovision = \"/etc/altitude/deprovision-worker.sh\"\n\
-         # min = 0\n\
          # max = 8\n\
          # provision_timeout_secs = 600\n\
          # deprovision_timeout_secs = 300\n\

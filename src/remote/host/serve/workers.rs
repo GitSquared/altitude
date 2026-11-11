@@ -48,6 +48,9 @@ struct FleetState {
     connected: HashMap<String, ConnectedWorker>,
     provisioned: HashSet<String>,
     provisioning: HashSet<String>,
+    // Boxes the isolation provider is waiting for. It is raised when a sandbox
+    // needs compute and lowered when one ends; nothing raises it yet.
+    demand: usize,
     retry_after: Option<Instant>,
     stopping: bool,
 }
@@ -178,7 +181,7 @@ impl WorkerFleet {
         {
             return;
         }
-        let desired = self.settings.min.min(self.settings.ceiling());
+        let desired = state.demand.min(self.settings.ceiling());
         let mut current = state.connected.len() + state.provisioning.len();
         while current < desired {
             let name = worker_name();
