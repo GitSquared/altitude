@@ -1,6 +1,6 @@
 use tokio::sync::mpsc;
 
-use crate::{credentials::host, isolation::IsolationEngine, task::TaskService, tui::screens};
+use crate::{isolation::IsolationEngine, task::TaskService, tui::screens};
 
 use screens::get_started::{RemoteOffer, SetupState};
 
@@ -45,7 +45,6 @@ impl App {
             tracker: self.tracker_state,
             commits: self.git_identity.clone(),
             has_key: self.signing_key_path().is_some(),
-            host_logins: host::logins(&self.config, &self.settings_credentials()),
         }
     }
 

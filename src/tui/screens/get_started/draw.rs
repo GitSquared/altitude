@@ -339,21 +339,6 @@ pub(super) fn checklist(
     ));
     focuses.push(Focus::Remote);
 
-    // A login the machine already has is an offer on the checklist, the way a
-    // machine found on the network is: it waits at the end, and nothing happens
-    // until it is asked for.
-    for login in &setup.host_logins {
-        lines.push(row(
-            Marker::Question,
-            &format!("{} login", login.service.label()),
-            "found on this machine",
-            "↩ import",
-            focused == Focus::Import(login.service),
-            width,
-        ));
-        focuses.push(Focus::Import(login.service));
-    }
-
     (lines, focuses)
 }
 

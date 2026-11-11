@@ -135,10 +135,10 @@ pub(in crate::tui) fn import_question(login: &HostLogin) -> String {
 }
 
 impl PendingConfirm {
-    pub(in crate::tui) fn importing_host_login(login: HostLogin, from_setup: bool) -> Self {
+    pub(in crate::tui) fn importing_host_login(login: HostLogin) -> Self {
         Self {
             dialog: Confirm::new(import_question(&login), "import"),
-            action: ConfirmAction::ImportHostLogin { login, from_setup },
+            action: ConfirmAction::ImportHostLogin(login),
         }
     }
 
@@ -240,7 +240,7 @@ enum ConfirmAction {
     DeleteCommitIdentity(ProjectCommits),
     ForgetCredentials(String),
     ConfirmSignal { task_id: String, signal_id: String },
-    ImportHostLogin { login: HostLogin, from_setup: bool },
+    ImportHostLogin(HostLogin),
 }
 
 pub(in crate::tui) async fn handle_confirm_key<E>(
@@ -322,14 +322,10 @@ pub(in crate::tui) async fn handle_confirm_key<E>(
                     }
                 }
             }
-            ConfirmAction::ImportHostLogin { login, from_setup } => {
-                app.import_host_login(login, event_loop.service(), from_setup)
+            ConfirmAction::ImportHostLogin(login) => {
+                app.import_host_login(login, event_loop.service(), false)
                     .await;
-                app.foreground = if from_setup {
-                    Foreground::GetStarted(app.started_panel())
-                } else {
-                    Foreground::Panel
-                };
+                app.foreground = Foreground::Panel;
             }
         },
     }

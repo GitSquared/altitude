@@ -40,6 +40,7 @@ use popups::confirm::PendingConfirm;
 use popups::identity::{
     GitIdentityDecision, GitIdentitySetup, IdentityChoice, IdentitySetup, RenameIdentity,
 };
+use popups::import_logins::ImportLogins;
 use popups::message::MessagePrompt;
 use popups::new_task::{Hit as NewTaskHit, NewTask, SearchToken};
 use popups::send_task::SendTask;
@@ -65,6 +66,7 @@ pub(in crate::tui) enum Foreground {
     GitIdentity(Box<GitIdentitySetup>),
     SignIn(Box<SignIn>),
     GetStarted(Box<GetStarted>),
+    ImportLogins(Box<ImportLogins>),
     Signals,
     Shell(ShellId),
     #[default]
@@ -100,6 +102,7 @@ impl Foreground {
     pub(in crate::tui) fn shows_get_started(&self) -> bool {
         match self {
             Self::GetStarted(_) => true,
+            Self::ImportLogins(_) => true,
             Self::Keys(behind) => behind.shows_get_started(),
             _ => false,
         }

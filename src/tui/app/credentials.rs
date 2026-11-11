@@ -1,5 +1,6 @@
 use std::time::Instant;
 
+use crossterm::event::KeyEvent;
 use tokio::sync::mpsc;
 
 use crate::{
@@ -13,6 +14,7 @@ use crate::{
 };
 
 use popups::confirm::PendingConfirm;
+use popups::import_logins::{Decision, ImportLogins};
 use screens::settings::{Depth, RowKind, Section};
 
 use super::*;
@@ -327,7 +329,8 @@ impl App {
         login: host::HostLogin,
         task_service: &TaskService<E>,
         may_choose_agent: bool,
-    ) where
+    ) -> bool
+    where
         E: IsolationEngine + Clone + 'static,
     {
         let service = login.service;
@@ -342,28 +345,28 @@ impl App {
             .map(|file| file.settings().clone())
         else {
             self.problem("Settings are unavailable; fix the file and reopen");
-            return;
+            return false;
         };
         if proposed.credential(&id).is_none()
             && let Err(error) = proposed.add_credential(Credential::new(id.clone(), label.clone()))
         {
             self.problem(error.to_string());
-            return;
+            return false;
         }
         // The login is copied before the file records it, so a copy that fails
         // leaves no identity behind; a save that fails leaves an unrecorded
         // profile the next attempt fills in place.
         if let Err(error) = host::import(&self.config, &login, &id) {
             self.problem(format!("Could not import the login: {error}"));
-            return;
+            return false;
         }
         let Some(file) = self.settings_file.as_mut() else {
             self.problem("Settings are unavailable; fix the file and reopen");
-            return;
+            return false;
         };
         if let Err(error) = file.save(proposed) {
             self.problem(error.to_string());
-            return;
+            return false;
         }
         if may_choose_agent
             && self.agent().is_none()
@@ -380,6 +383,66 @@ impl App {
         self.credential_checking.remove(&id);
         self.credentials_visible_since = None;
         self.say(format!("Imported the {label} login"));
+        true
+    }
+
+    // The sheet shown before a service picker opens on the card: the logins
+    // already on this machine for that slot, offered to adopt. Nothing is taken
+    // without a key on a row, so the sheet itself is the consent.
+    pub(in crate::tui) fn open_import_logins(&mut self, slot: Slot) -> bool {
+        let logins: Vec<host::HostLogin> = host::logins(&self.config, &self.settings_credentials())
+            .into_iter()
+            .filter(|login| login.service.slot() == slot)
+            .collect();
+        if logins.is_empty() {
+            return false;
+        }
+        self.foreground = Foreground::ImportLogins(Box::new(ImportLogins::new(logins, slot)));
+        true
+    }
+
+    pub(in crate::tui) async fn import_logins_key<E>(
+        &mut self,
+        key: KeyEvent,
+        task_service: &TaskService<E>,
+    ) where
+        E: IsolationEngine + Clone + 'static,
+    {
+        let Foreground::ImportLogins(mut modal) = mem::take(&mut self.foreground) else {
+            return;
+        };
+        match modal.handle_key(key) {
+            Decision::Still => self.foreground = Foreground::ImportLogins(modal),
+            Decision::Import(login) => {
+                let service = login.service;
+                if self.import_host_login(login, task_service, true).await {
+                    // The row turning into "imported" is the answer; the notice
+                    // that would cover the sheet is not.
+                    self.alert = None;
+                    modal.mark_imported(service);
+                    self.foreground = Foreground::ImportLogins(modal);
+                } else {
+                    // A refusal is a message, and a message is read on the card
+                    // rather than under the sheet that asked.
+                    self.foreground = Foreground::GetStarted(self.started_panel());
+                }
+            }
+            Decision::Close => {
+                // Skip sends the operator to the picker they were going to see;
+                // Done leaves them on the card, because the steps they came to
+                // fill are already filled.
+                let imported = modal.imported() > 0;
+                let then = modal.then();
+                self.foreground = Foreground::GetStarted(self.started_panel());
+                if !imported && let Foreground::GetStarted(panel) = &mut self.foreground {
+                    match then {
+                        Slot::Agent => panel.agent.open(),
+                        Slot::VersionControl => panel.vcs.open(),
+                        Slot::Tracker => panel.tracker.open(),
+                    }
+                }
+            }
+        }
     }
 
     pub(in crate::tui) fn ask_credential_checks<E>(

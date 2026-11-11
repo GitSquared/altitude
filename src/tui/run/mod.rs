@@ -310,7 +310,11 @@ where
         // too, or a prompt that asks for shift-enter only ever sees enter.
         let wants_enhanced = matches!(
             app.foreground,
-            Foreground::NewTask(_) | Foreground::Tasks | Foreground::Signals | Foreground::Shell(_)
+            Foreground::NewTask(_)
+                | Foreground::Tasks
+                | Foreground::Signals
+                | Foreground::Shell(_)
+                | Foreground::ImportLogins(_)
         ) || app.signal_composer.is_some()
             || app.panel.form.is_some();
         if keys_enhanced != wants_enhanced {
@@ -434,7 +438,9 @@ where
                 let tick = app.animation_tick();
                 if let Foreground::GetStarted(panel) = &mut app.foreground {
                     screens::get_started::draw(frame, content, panel, &setup, tick);
-                } else if app.git_identity_over_card() {
+                } else if app.git_identity_over_card()
+                    || matches!(app.foreground, Foreground::ImportLogins(_))
+                {
                     let mut panel = app.started_panel();
                     screens::get_started::draw(frame, content, &mut panel, &setup, tick);
                 }
@@ -495,6 +501,10 @@ where
             if let Foreground::Message(message) = &app.foreground {
                 widgets::chrome::dim(frame, content);
                 modal = Some(popups::message::draw(frame, content, message));
+            }
+            if let Foreground::ImportLogins(import) = &app.foreground {
+                widgets::chrome::dim(frame, content);
+                modal = Some(import.draw(frame, content));
             }
             if matches!(app.foreground, Foreground::Keys(_)) {
                 widgets::chrome::dim(frame, content);
