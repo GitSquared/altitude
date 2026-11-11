@@ -150,20 +150,13 @@ SELECT tasks.id, tasks.agent_kind, tasks.host,
      FROM task_event_logs
      WHERE task_id = tasks.id AND event_type = 'task_arrived_from'
      ORDER BY sequence DESC LIMIT 1) AS arrived_from,
-    -- The ask a task is in the middle of, and which side spoke last in it, read once:
-    -- the row, the pause notice and the agent's own guard all ask this line whether it
-    -- waits on a person, rather than deciding again for themselves.
+    -- The ask a task is in the middle of, and whether it still wants a person, read
+    -- once: the row, the pause notice and the agent's own guard all ask this line
+    -- whether it waits on a person, rather than deciding again for themselves.
     (SELECT json_object(
          'kind', kind,
          'title', title,
-         'last_author', COALESCE(
-             (SELECT json_extract(spoken.payload, '$.data.author')
-              FROM task_event_logs AS spoken
-              WHERE spoken.task_id = tasks.id
-                AND spoken.event_type = 'operator_signal_message'
-                AND json_extract(spoken.payload, '$.data.signal_id') = task_operator_signals.id
-              ORDER BY spoken.sequence DESC LIMIT 1),
-             'agent'))
+         'wants_a_person', wants_a_person)
      FROM task_operator_signals
      WHERE task_id = tasks.id AND resolved = 0
      ORDER BY raised_at_ms DESC LIMIT 1) AS leading_ask,

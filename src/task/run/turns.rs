@@ -373,6 +373,10 @@ where
                 {
                     continue;
                 }
+                // A message is not a step: what an agent says in a thread it already
+                // asked in leaves the task where it was, so a run of them is still a run
+                // of nothing.
+                TaskHistoryEvent::OperatorSignalMessage { .. } => continue,
                 // The bookkeeping a turn leaves whether or not it did anything is
                 // skipped; anything else is the task changing, which is what makes
                 // the next turn a step rather than a repeat.

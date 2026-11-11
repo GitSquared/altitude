@@ -226,15 +226,16 @@ impl TaskAsk {
             .find(|message| message.author == TaskAskAuthor::Agent)
     }
 
-    pub fn last_author(&self) -> Option<TaskAskAuthor> {
-        self.messages.last().map(|message| message.author)
-    }
-
-    // An open thread whose last word is the agent's is one the task is waiting on a
-    // person for. A thread the operator spoke in last is not: they have spoken, and
-    // the work owes them the next thing.
+    // An open thread wants a person until someone speaks in it after it was asked. What
+    // a thread says after that is conversation, and an agent that keeps talking in one the
+    // operator is already answering has not handed the work back by doing so: asking again
+    // is raising it again, which moves the question to the end of the thread.
     pub fn waits_on_operator(&self) -> bool {
-        self.is_unresolved() && self.last_author() == Some(TaskAskAuthor::Agent)
+        self.is_unresolved()
+            && self
+                .messages
+                .iter()
+                .all(|message| message.at_ms <= self.last_raised_at_ms)
     }
 }
 
@@ -245,12 +246,12 @@ pub struct LeadingAsk {
     pub kind: TaskAskKind,
     pub title: String,
     #[serde(default)]
-    pub last_author: TaskAskAuthor,
+    pub wants_a_person: bool,
 }
 
 impl LeadingAsk {
     pub fn waits_on_operator(&self) -> bool {
-        self.last_author == TaskAskAuthor::Agent
+        self.wants_a_person
     }
 }
 
