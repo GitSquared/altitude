@@ -99,6 +99,7 @@ impl App {
                         if began.elapsed() > WATCH_SETTLED {
                             wait = WATCH_RETRY;
                         }
+                        tracing::debug!(remote = %watching, wait = ?wait, "watching a remote again");
                         sleep(wait).await;
                         wait = (wait * 2).min(WATCH_RETRY_MAX);
                     }
@@ -133,6 +134,9 @@ impl App {
         let sighting = match meet(address, DEFAULT_PORT, remembered.as_deref()).await {
             Ok(sighting) => sighting,
             Err(error) => {
+                // A machine that does not answer is usually only off, and a retry
+                // every few seconds would fill the log with the same line.
+                tracing::debug!(address, %error, "a remote did not answer a watch");
                 let _ = events.send(WatchedTasks::Ended {
                     address: address.to_owned(),
                     reason: error.to_string(),
@@ -164,6 +168,7 @@ impl App {
                 ended = &mut watching => match ended {
                     Ok(()) => return WatchEnd::Closed,
                     Err(error) => {
+                        tracing::warn!(address, %error, "a watch on a remote was lost");
                         let _ = events.send(WatchedTasks::Ended {
                             address: address.to_owned(),
                             reason: error.to_string(),
@@ -172,7 +177,10 @@ impl App {
                     }
                 },
                 said = receiving.recv() => {
-                    let Some(said) = said else { return WatchEnd::Lost };
+                    let Some(said) = said else {
+                        tracing::warn!(address, "a watch on a remote ended without a reason");
+                        return WatchEnd::Lost;
+                    };
                     let address = address.to_owned();
                     let event = match said {
                         WatchEvent::Snapshot(summaries) => WatchedTasks::Snapshot { address, summaries },
