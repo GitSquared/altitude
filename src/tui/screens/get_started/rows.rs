@@ -283,6 +283,25 @@ pub(super) fn detail_text(focus: Focus, setup: &SetupState) -> String {
              setting up a remote for your team in Settings."
                 .to_owned()
         }
+        Focus::Import(service) => {
+            let source = setup
+                .host_logins
+                .iter()
+                .find(|login| login.service == service)
+                .map(|login| tilde(&login.source.display().to_string()));
+            match source {
+                Some(path) => format!(
+                    "A {} login was found at {path}. Importing copies it into altitude's own \
+                     profile, where every task mounts it and configured Remotes receive it; the \
+                     file it came from stays where it is.",
+                    service.label()
+                ),
+                None => format!(
+                    "A {} login found on this machine can be imported.",
+                    service.label()
+                ),
+            }
+        }
         Focus::Ready | Focus::Settings => String::new(),
     }
 }

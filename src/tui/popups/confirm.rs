@@ -10,6 +10,7 @@ use ratatui::{
 };
 
 use crate::{
+    credentials::host::HostLogin,
     isolation::IsolationEngine,
     project::ProjectCommits,
     task::TaskEventLoop,
@@ -17,7 +18,7 @@ use crate::{
         App,
         app::{Foreground, RemoteSignalAction, RemoteSignalsReply, RemoveTaskReply},
         keys,
-        screens::settings::Target,
+        screens::settings::{Target, hostname},
         widgets::{button, chrome},
     },
 };
@@ -121,7 +122,26 @@ pub(in crate::tui) struct PendingConfirm {
     action: ConfirmAction,
 }
 
+// The consent that has to come before a host login is copied: what is taken, the
+// machine it is taken from, and that a task and every configured remote will
+// receive it.
+pub(in crate::tui) fn import_question(login: &HostLogin) -> String {
+    format!(
+        "Import the credential for {} found on {} into altitude?\n\nIt will be used to run tasks \
+         and shared with configured Remotes.",
+        login.service.label(),
+        hostname()
+    )
+}
+
 impl PendingConfirm {
+    pub(in crate::tui) fn importing_host_login(login: HostLogin, from_setup: bool) -> Self {
+        Self {
+            dialog: Confirm::new(import_question(&login), "import"),
+            action: ConfirmAction::ImportHostLogin { login, from_setup },
+        }
+    }
+
     pub(in crate::tui) fn forgetting_credentials(id: String, question: String) -> Self {
         Self {
             dialog: Confirm::new(question, "delete"),
@@ -220,6 +240,7 @@ enum ConfirmAction {
     DeleteCommitIdentity(ProjectCommits),
     ForgetCredentials(String),
     ConfirmSignal { task_id: String, signal_id: String },
+    ImportHostLogin { login: HostLogin, from_setup: bool },
 }
 
 pub(in crate::tui) async fn handle_confirm_key<E>(
@@ -300,6 +321,15 @@ pub(in crate::tui) async fn handle_confirm_key<E>(
                         app.problem(error.to_string());
                     }
                 }
+            }
+            ConfirmAction::ImportHostLogin { login, from_setup } => {
+                app.import_host_login(login, event_loop.service(), from_setup)
+                    .await;
+                app.foreground = if from_setup {
+                    Foreground::GetStarted(app.started_panel())
+                } else {
+                    Foreground::Panel
+                };
             }
         },
     }

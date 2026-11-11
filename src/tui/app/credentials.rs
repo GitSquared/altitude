@@ -3,7 +3,7 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 
 use crate::{
-    credentials::{Credential, Service, Slot, describe, host, new_id},
+    credentials::{Credential, Service, Slot, describe, host},
     isolation::IsolationEngine,
     remote::Announcement,
     task::TaskService,
@@ -319,55 +319,65 @@ impl App {
             .collect();
     }
 
-    // Adopting a login the operator already has: the profile is copied, the
-    // identity is recorded, and the row that offered it is replaced by the one it
-    // became, whose own check says whether the copy signs in.
+    // Adopting a login the operator already has: the identity is recorded and its
+    // profile is copied into, and the row that offered it is replaced by the one
+    // it became, whose own check says whether the copy signs in.
     pub(in crate::tui) async fn import_host_login<E>(
         &mut self,
         login: host::HostLogin,
         task_service: &TaskService<E>,
+        may_choose_agent: bool,
     ) where
         E: IsolationEngine + Clone + 'static,
     {
         let service = login.service;
-        let existing = self.settings_credentials();
-        let count = existing
-            .iter()
-            .filter(|credential| credential.service() == Some(service))
-            .count();
-        let label = if count == 0 {
-            service.label().to_owned()
-        } else {
-            format!("{} {}", service.label(), count + 1)
+        // The service's own profile, so an imported login is the one the setup
+        // steps and the default identity read rather than a second identity
+        // beside them.
+        let id = service.id().to_owned();
+        let label = service.label().to_owned();
+        let Some(mut proposed) = self
+            .settings_file
+            .as_ref()
+            .map(|file| file.settings().clone())
+        else {
+            self.problem("Settings are unavailable; fix the file and reopen");
+            return;
         };
-        let id = new_id(service, &label, |candidate| {
-            existing.iter().any(|credential| credential.id == candidate)
-                || self.config.profile_dir(candidate).is_dir()
-        });
+        if proposed.credential(&id).is_none()
+            && let Err(error) = proposed.add_credential(Credential::new(id.clone(), label.clone()))
+        {
+            self.problem(error.to_string());
+            return;
+        }
+        // The login is copied before the file records it, so a copy that fails
+        // leaves no identity behind; a save that fails leaves an unrecorded
+        // profile the next attempt fills in place.
         if let Err(error) = host::import(&self.config, &login, &id) {
             self.problem(format!("Could not import the login: {error}"));
             return;
         }
         let Some(file) = self.settings_file.as_mut() else {
-            let _ = self.config.remove_profile(&id);
             self.problem("Settings are unavailable; fix the file and reopen");
             return;
         };
-        let mut proposed = file.settings().clone();
-        if let Err(error) = proposed.add_credential(Credential::new(id.clone(), label.clone())) {
-            let _ = self.config.remove_profile(&id);
+        if let Err(error) = file.save(proposed) {
             self.problem(error.to_string());
             return;
         }
-        if let Err(error) = file.save(proposed) {
-            let _ = self.config.remove_profile(&id);
-            self.problem(error.to_string());
-            return;
+        if may_choose_agent
+            && self.agent().is_none()
+            && let Service::Agent(kind) = service
+        {
+            self.choose_active_agent(kind);
         }
         self.panel.section = Section::for_service(service);
         self.reload_profiles(task_service);
-        // The imported login has not been asked about here yet, so the row is
-        // checked again rather than left on the answer the offer carried.
+        // The imported login has not been asked about here yet, so it is checked
+        // again rather than left on the answer the offer carried.
+        self.credential_status.remove(&id);
+        self.credential_checked_at.remove(&id);
+        self.credential_checking.remove(&id);
         self.credentials_visible_since = None;
         self.say(format!("Imported the {label} login"));
     }

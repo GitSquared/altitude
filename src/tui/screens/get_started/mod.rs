@@ -2,6 +2,7 @@ use std::slice;
 
 use crate::{
     agent::AgentKind,
+    credentials::{Service, host::HostLogin},
     tracker::TrackerKind,
     tui::{
         app::{CredentialStatus, TrackerState},
@@ -16,7 +17,7 @@ use crate::{
     vcs::{Repository, VcsProviderKind},
 };
 
-use super::settings::GitIdentity;
+use super::settings::{GitIdentity, tilde};
 
 const CARD_WIDTH: u16 = 80;
 
@@ -59,6 +60,7 @@ pub enum Focus {
     Commits,
     Tracker,
     Remote,
+    Import(Service),
     Ready,
     Settings,
 }
@@ -82,6 +84,7 @@ pub struct SetupState {
     pub tracker: TrackerState,
     pub commits: GitIdentity,
     pub has_key: bool,
+    pub host_logins: Vec<HostLogin>,
 }
 
 pub struct Commits {
@@ -320,6 +323,7 @@ impl GetStarted {
                     hints.insert(0, Hint::new("↩", "add it"));
                 }
             }
+            Focus::Import(_) => hints.insert(0, Hint::new("↩", "import")),
             Focus::Ready => hints.insert(
                 0,
                 Hint::new(

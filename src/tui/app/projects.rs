@@ -16,6 +16,7 @@ use crate::{
     vcs::VcsProviderKind,
 };
 
+use popups::confirm::PendingConfirm;
 use popups::new_task::NewTask;
 use popups::repositories::{Key as RepositoriesKey, Repositories};
 use popups::scopes::Scopes;
@@ -559,6 +560,19 @@ impl App {
                         return false;
                     }
                 },
+                SetupFocus::Import(service) => {
+                    self.foreground = Foreground::GetStarted(panel);
+                    if let Some(login) = self
+                        .setup()
+                        .host_logins
+                        .into_iter()
+                        .find(|login| login.service == service)
+                    {
+                        self.foreground =
+                            Foreground::Confirm(PendingConfirm::importing_host_login(login, true));
+                    }
+                    return false;
+                }
                 SetupFocus::Ready => {
                     self.commit_name(&panel);
                     let setup = self.setup();

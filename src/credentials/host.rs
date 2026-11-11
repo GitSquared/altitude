@@ -10,6 +10,7 @@ use super::{Credential, Service, files};
 
 // A login the operator already has on this machine, at the place its tool keeps
 // it, which altitude can copy into a profile of its own.
+#[derive(Clone)]
 pub struct HostLogin {
     pub service: Service,
     pub source: PathBuf,
