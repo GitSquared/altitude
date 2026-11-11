@@ -9,6 +9,9 @@ use tokio::sync::mpsc;
 use crate::task::TaskAsk;
 use crate::task::picture;
 
+use crate::isolation::worker_protocol::{CommandFrame, WorkerReply, WorkerRequest};
+use crate::isolation::{CommandEvent, CommandSession};
+
 use crate::remote::protocol::SignalCommand;
 use crate::remote::protocol::{
     BlobHash, CHUNK_BYTES, ConfigPush, Handover, LINK_ALPN, LinkRequest, LinkResponse,
@@ -85,6 +88,70 @@ impl LinkClient {
 
     pub async fn scan_remotes(&self) -> LinkResult<Scan> {
         discovery::scan(&self.endpoint).await
+    }
+
+    // One sandbox call to a worker the master provisioned.
+    pub(crate) async fn worker_call(
+        &self,
+        peer: impl Into<EndpointAddr>,
+        request: &WorkerRequest,
+    ) -> LinkResult<WorkerReply> {
+        let dial = self.dial(peer).await?;
+        let (mut send, mut recv) = dial.0.open_bi().await?;
+        write_frame(&mut send, request).await?;
+        send.finish()?;
+        read_frame(&mut recv).await
+    }
+
+    // A command on a worker keeps its stream open: input goes one way and events
+    // the other until the command exits.
+    pub(crate) async fn worker_command(
+        &self,
+        peer: impl Into<EndpointAddr>,
+        request: &WorkerRequest,
+    ) -> LinkResult<CommandSession> {
+        let dial = self.dial(peer).await?;
+        let (mut send, mut recv) = dial.0.open_bi().await?;
+        write_frame(&mut send, request).await?;
+        match read_frame::<_, WorkerReply>(&mut recv).await? {
+            WorkerReply::Ready => {}
+            WorkerReply::Failed(reason) => return Err(reason.into()),
+            other => return Err(format!("unexpected answer: {other:?}").into()),
+        }
+        let (commands, mut wanted) = mpsc::unbounded_channel();
+        let (producing, events) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            // The connection lives as long as the command does.
+            let _dial = dial;
+            loop {
+                tokio::select! {
+                    command = wanted.recv() => {
+                        let Some(command) = command else {
+                            break;
+                        };
+                        if write_frame(&mut send, &CommandFrame::Drive(command)).await.is_err() {
+                            break;
+                        }
+                    }
+                    frame = read_frame::<_, CommandFrame>(&mut recv) => {
+                        match frame {
+                            Ok(CommandFrame::Report(event)) => {
+                                let done = matches!(event, CommandEvent::Exited(_) | CommandEvent::Failed(_));
+                                if producing.send(event).is_err() {
+                                    break;
+                                }
+                                if done {
+                                    break;
+                                }
+                            }
+                            _ => break,
+                        }
+                    }
+                }
+            }
+            let _ = send.finish();
+        });
+        Ok(CommandSession { commands, events })
     }
 
     // A provisioned worker tying itself to the master it was made for. The token

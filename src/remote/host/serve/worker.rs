@@ -18,11 +18,14 @@ use tokio::{
 };
 
 use crate::{
+    agent::AgentEngines,
     brand,
     cli::{WORKER_GUIDE, WorkerArgs},
     config::Config,
+    credentials::profile_recipe,
     isolation::{
-        CommandEvent, IsolationEngine, IsolationStatus, TestbedIsolation, prepare,
+        CommandEvent, IsolationEngine, IsolationStatus, TestbedIsolation, Unwatched, mounts,
+        prepare,
         worker_protocol::{CommandFrame, WORKER_ALPN, WorkerCall, WorkerReply, WorkerRequest},
     },
     logging,
@@ -97,6 +100,7 @@ pub(crate) async fn run(args: &WorkerArgs, base: Config) -> Result<(), Box<dyn E
     let client = LinkClient::from_endpoint(endpoint.clone());
     let service = WorkerService {
         engine,
+        agents: AgentEngines::new(),
         token: args.token.clone(),
         snapshots_dir: base.task_snapshots_dir(),
         readiness,
@@ -149,6 +153,9 @@ pub(crate) async fn run(args: &WorkerArgs, base: Config) -> Result<(), Box<dyn E
 
 struct WorkerService {
     engine: TestbedIsolation,
+    // The same provider definitions the master builds recipes from, so a profile
+    // id is enough to rebuild a recipe here.
+    agents: AgentEngines,
     token: String,
     snapshots_dir: PathBuf,
     readiness: Arc<Mutex<Readiness>>,
@@ -214,6 +221,44 @@ impl WorkerService {
                     Readiness::Failed(error) => WorkerReply::Failed(format!(
                         "this box cannot prepare its sandbox runtime: {error}"
                     )),
+                }
+            }
+            WorkerCall::EnsureProject { project, agent } => {
+                let recipes = mounts::task(&self.agents, agent);
+                match self
+                    .engine
+                    .ensure_project(project, recipes, &Unwatched)
+                    .await
+                {
+                    Ok(snapshot) => WorkerReply::Snapshot(snapshot),
+                    Err(error) => WorkerReply::Failed(error.to_string()),
+                }
+            }
+            WorkerCall::Provision {
+                id,
+                snapshot,
+                project,
+                agent_profile,
+                vcs_profile,
+                vsock,
+            } => {
+                let recipes = match (
+                    profile_recipe(&agent_profile, &self.agents),
+                    profile_recipe(&vcs_profile, &self.agents),
+                ) {
+                    (Ok(agent), Ok(vcs)) => Ok(vec![agent, vcs]),
+                    (Err(error), _) | (_, Err(error)) => Err(error),
+                };
+                match recipes {
+                    Ok(recipes) => match self
+                        .engine
+                        .provision(id, snapshot, project, recipes, vsock, &Unwatched)
+                        .await
+                    {
+                        Ok(()) => WorkerReply::Ok,
+                        Err(error) => WorkerReply::Failed(error.to_string()),
+                    },
+                    Err(error) => WorkerReply::Failed(error.to_string()),
                 }
             }
             WorkerCall::Create {

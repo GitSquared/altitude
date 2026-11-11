@@ -34,7 +34,7 @@ use crate::{
     project::Project,
     remote::protocol::TaskSummary,
     remote::{
-        ClientRecord, InstallationKey, LinkServer, TrackerConnection,
+        ClientRecord, InstallationKey, LinkClient, LinkServer, TrackerConnection,
         announce::{Phase, TrackerReadiness},
         server::{ServerParts, WorkerHost},
     },
@@ -46,6 +46,7 @@ use crate::{
 use super::settings::ServeSettings;
 use super::tracker_host::PushedTrackers;
 use super::{OwnTasks, Transfers, Watchers, publish_change, publish_queue, summary_of};
+use super::{serve_isolation::ServeIsolation, workers_isolation::WorkersIsolation};
 use super::{worker, workers::WorkerFleet};
 use crate::remote::host::{admin, install};
 
@@ -113,9 +114,11 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
     let credentials_path = linear_host::credentials_path(&config);
     logging::init_service();
     tracing::info!("{}  altitude {VERSION} · remote", brand::MOUNTAIN);
-    tracing::debug!("Checking sandbox host requirements");
-    MicrosandboxIsolation::check_host()?;
-    tracing::debug!("Sandbox host requirements passed");
+    if fleet.is_none() {
+        tracing::debug!("Checking sandbox host requirements");
+        MicrosandboxIsolation::check_host()?;
+        tracing::debug!("Sandbox host requirements passed");
+    }
     // Where it read its settings from, because a secret that was rotated into a
     // file this process is not reading looks exactly like a secret that is wrong.
     tracing::info!(
@@ -192,7 +195,17 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
     let clients =
         ClientRecord::open(config.data_dir().join("clients.json")).map_err(io::Error::other)?;
     let label = config.identity().map_err(io::Error::other)?.label;
-    let isolation = MicrosandboxIsolation::new(&config);
+    let isolation = match &fleet {
+        Some(fleet) => {
+            // A remote that has boxes speaks to them on a link of its own; it
+            // needs no sandbox runtime here.
+            let client = LinkClient::bind(&identity)
+                .await
+                .map_err(io::Error::other)?;
+            ServeIsolation::Workers(WorkersIsolation::new(Arc::clone(fleet), client, &config))
+        }
+        None => ServeIsolation::Microsandbox(MicrosandboxIsolation::new(&config)),
+    };
     let prepared = isolation::prepare(isolation.clone());
     // This machine's own answer to "can you be given work", which is not the same
     // question as "is the runtime up": it is ready once its runtime can make
@@ -367,10 +380,7 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
                 .as_ref()
                 .map(|workers| workers.max)
                 .unwrap_or(0),
-            "Isolation workers configured",
-        );
-        tracing::warn!(
-            "isolation workers are connected but not yet given sandboxes; work still runs on this host"
+            "Isolation workers configured · a box is spawned as each sandbox starts",
         );
     }
     let connect_address = if listen.ip().is_unspecified() {
@@ -532,7 +542,7 @@ pub(super) async fn wait_until_ready(
 /// push builds them from nothing, so each one is what the machine says it is doing
 /// while it lasts.
 pub(super) async fn prepare_projects(
-    tasks: &TaskEventLoop<MicrosandboxIsolation>,
+    tasks: &TaskEventLoop<ServeIsolation>,
     owner: &str,
     projects: &[Project],
     agent: AgentKind,

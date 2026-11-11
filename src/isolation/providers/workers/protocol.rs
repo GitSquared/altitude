@@ -2,10 +2,12 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::agent::AgentKind;
 use crate::isolation::{
-    Command, CommandEvent, EnvironmentDescription, Pressure, SandboxOptions, SandboxPurpose,
-    SandboxRoom,
+    BaseSandboxSnapshot, Command, CommandEvent, EnvironmentDescription, Pressure, SandboxOptions,
+    SandboxPurpose, SandboxRoom, VsockRoute,
 };
+use crate::project::Project;
 
 // The ALPN a master dials a worker on. It is not the link's: the link is clients
 // talking about their tasks, and this is a master asking an empty box for compute.
@@ -27,6 +29,23 @@ pub(crate) struct WorkerRequest {
 pub(crate) enum WorkerCall {
     // Say whether this box can make sandboxes at all.
     Probe,
+    // Build a project's environment here and return the snapshot the box made.
+    // The recipes are rebuilt from the agent kind, so the wire carries no
+    // `ProfileRecipe`.
+    EnsureProject {
+        project: Project,
+        agent: AgentKind,
+    },
+    // Make the one task sandbox this box was spawned for. The two profile ids
+    // name the credentials to mount; the box rebuilds their recipes itself.
+    Provision {
+        id: String,
+        snapshot: Option<String>,
+        project: Project,
+        agent_profile: String,
+        vcs_profile: String,
+        vsock: Vec<VsockRoute>,
+    },
     Create {
         id: String,
         options: SandboxOptions,
@@ -67,6 +86,7 @@ pub(crate) enum WorkerReply {
     // The box started a command and what follows on the stream is its output.
     Ready,
     Ok,
+    Snapshot(BaseSandboxSnapshot),
     Bool(bool),
     Path(PathBuf),
     Text(String),

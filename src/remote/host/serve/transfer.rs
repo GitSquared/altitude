@@ -21,10 +21,12 @@ use crate::remote::{Handover, HandoverDraft, RecordedEvent, TransferArchive};
 
 use crate::{
     config::Config,
-    isolation::{IsolationEngine, MicrosandboxIsolation},
+    isolation::IsolationEngine,
     task::TaskHistoryEvent,
     task::{Task, TaskEventLoop},
 };
+
+use super::ServeIsolation;
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(super) struct PreparedTransfer {
@@ -40,7 +42,7 @@ pub(super) struct WatchedCollect {
 }
 
 pub(super) async fn transfer_committed(
-    tasks: &TaskEventLoop<MicrosandboxIsolation>,
+    tasks: &TaskEventLoop<ServeIsolation>,
     prepared: &PreparedTransfer,
 ) -> Result<bool, String> {
     let history = tasks
