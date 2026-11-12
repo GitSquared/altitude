@@ -132,6 +132,9 @@ pub enum LinkRequest {
         token: String,
         name: String,
         capacity: WorkerReport,
+        // This machine's own ticket reached the host, but the host's ticket never reaches
+        // this machine, so the address it will dial is the one said here.
+        addr: EndpointAddr,
     },
     WorkerHeartbeat {
         name: String,

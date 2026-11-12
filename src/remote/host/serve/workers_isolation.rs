@@ -6,7 +6,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use iroh::EndpointId;
+use iroh::EndpointAddr;
 use tempfile::NamedTempFile;
 use tokio::fs::File as AsyncFile;
 use tokio::sync::watch;
@@ -139,7 +139,7 @@ impl WorkersIsolation {
     }
 
     // The host a sandbox lives on, for a call that must reach it directly.
-    fn peer_for(&self, id: &str) -> Result<EndpointId, IsolationError> {
+    fn peer_for(&self, id: &str) -> Result<EndpointAddr, IsolationError> {
         let worker = self.placement(id).ok_or_else(|| {
             IsolationError::missing_sandbox(format!("sandbox {id} is not on a worker"))
         })?;

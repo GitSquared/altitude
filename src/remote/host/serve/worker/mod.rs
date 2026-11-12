@@ -117,6 +117,7 @@ pub(crate) async fn run(args: &WorkerArgs, base: Config) -> Result<(), Box<dyn E
         #[cfg(target_os = "linux")]
         caches: Arc::new(Mutex::new(HashMap::new())),
     };
+    let worker_addr = endpoint.addr();
     let _router = Router::builder(endpoint)
         .accept(WORKER_ALPN, service)
         .spawn();
@@ -128,7 +129,13 @@ pub(crate) async fn run(args: &WorkerArgs, base: Config) -> Result<(), Box<dyn E
     'serving: loop {
         loop {
             match client
-                .register_worker(peer.clone(), &args.token, &args.name, capacity)
+                .register_worker(
+                    peer.clone(),
+                    worker_addr.clone(),
+                    &args.token,
+                    &args.name,
+                    capacity,
+                )
                 .await
             {
                 Ok(()) => break,

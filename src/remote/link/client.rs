@@ -317,6 +317,7 @@ impl LinkClient {
     pub async fn register_worker(
         &self,
         peer: impl Into<EndpointAddr>,
+        addr: EndpointAddr,
         token: &str,
         name: &str,
         capacity: WorkerReport,
@@ -328,6 +329,7 @@ impl LinkClient {
                     token: token.to_owned(),
                     name: name.to_owned(),
                     capacity,
+                    addr,
                 },
             )
             .await?

@@ -389,7 +389,7 @@ pub struct AgentChannelAccess {
 pub trait WorkerHost: Send + Sync + 'static {
     fn register_worker(
         &self,
-        peer: EndpointId,
+        peer: EndpointAddr,
         token: String,
         name: String,
         capacity: WorkerReport,
@@ -772,9 +772,10 @@ async fn answer(
             token,
             name,
             capacity,
+            addr,
         } => {
             let response = match &handler.workers {
-                Some(workers) => match workers.register_worker(peer, token, name, capacity).await {
+                Some(workers) => match workers.register_worker(addr, token, name, capacity).await {
                     Ok(()) => LinkResponse::Accepted,
                     Err(reason) => LinkResponse::Rejected { reason },
                 },

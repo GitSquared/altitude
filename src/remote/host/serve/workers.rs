@@ -7,7 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use iroh::EndpointId;
+use iroh::{EndpointAddr, EndpointId};
 use tokio::{process::Command, sync::Notify, time};
 
 use crate::remote::identity::write_private;
@@ -38,7 +38,7 @@ const PROVISION_ATTEMPTS: usize = 3;
 const AFTER_FAILURE: Duration = Duration::from_secs(60);
 
 struct ConnectedWorker {
-    peer: EndpointId,
+    peer: EndpointAddr,
     capacity: WorkerReport,
     last_seen: Instant,
 }
@@ -118,13 +118,13 @@ impl WorkerFleet {
         &self.token
     }
 
-    pub(crate) fn peer(&self, name: &str) -> Option<EndpointId> {
+    pub(crate) fn peer(&self, name: &str) -> Option<EndpointAddr> {
         self.state
             .lock()
             .expect("worker fleet lock poisoned")
             .connected
             .get(name)
-            .map(|worker| worker.peer)
+            .map(|worker| worker.peer.clone())
     }
 
     // How many hosts are joined, how many are given a sandbox, and how many this
@@ -386,7 +386,7 @@ impl WorkerFleet {
 impl WorkerHost for WorkerFleet {
     fn register_worker(
         &self,
-        peer: EndpointId,
+        peer: EndpointAddr,
         token: String,
         name: String,
         capacity: WorkerReport,
@@ -408,6 +408,7 @@ impl WorkerHost for WorkerFleet {
                         worker = %name,
                         cpus = capacity.cpus,
                         memory_mib = capacity.memory_mib,
+                        addrs = peer.addrs.len(),
                         "an isolation worker joined"
                     );
                 }
@@ -430,7 +431,7 @@ impl WorkerHost for WorkerFleet {
         let answer = {
             let mut state = self.state.lock().expect("worker fleet lock poisoned");
             match state.connected.get_mut(&name) {
-                Some(worker) if worker.peer == peer => {
+                Some(worker) if worker.peer.id == peer => {
                     worker.last_seen = Instant::now();
                     Ok(())
                 }
