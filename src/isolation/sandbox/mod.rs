@@ -19,7 +19,6 @@ use super::{
 mod guest;
 mod plan;
 mod profile;
-mod report;
 mod run;
 
 use guest::relative_path;
@@ -30,7 +29,6 @@ pub(crate) use plan::{
     ProvisionRequest, SandboxKind, SnapshotSource, environment_top_layer, provision,
 };
 pub use profile::{DefaultFile, GuestPath, PersistentDirectory, ProfileRecipe, SignInCommand};
-pub(crate) use report::environment_report;
 pub(crate) use run::{
     add_commits_env, create, credential_reports, credential_shell, ensure_project, watcher,
 };

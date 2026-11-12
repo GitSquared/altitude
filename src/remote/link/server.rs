@@ -357,18 +357,18 @@ pub struct ServerParts {
     pub listen: SocketAddr,
     pub label: String,
     pub data_dir: PathBuf,
-    /// What this machine is doing, from which the announced word is derived: one
-    /// fact, so the coarse word and the phase can never say different things.
+    // What this machine is doing, from which the announced word is derived: one
+    // fact, so the coarse word and the phase can never say different things.
     pub phase: watch::Receiver<Phase>,
     pub trackers: Vec<TrackerConnection>,
     pub tasks: Arc<dyn TaskHost>,
-    /// How isolation workers announce themselves, when this machine takes them.
-    /// A remote with none rejects the request rather than pretending to listen.
+    // How isolation workers announce themselves, when this machine takes them.
+    // A remote with none rejects the request rather than pretending to listen.
     pub workers: Option<Arc<dyn WorkerHost>>,
-    /// Where the agent channels live and the token that may reach them, when this
-    /// machine lets its workers carry an agent's channel through.
+    // Where the agent channels live and the token that may reach them, when this
+    // machine lets its workers carry an agent's channel through.
     pub agent_channels: Option<AgentChannelAccess>,
-    /// The projects' caches, when this machine serves them to workers over FUSE.
+    // The projects' caches, when this machine serves them to workers over FUSE.
     pub cache: Option<Arc<CacheService>>,
     // The installs layers its hosts built, when this machine keeps them for the next
     // host rather than making every host build its own.

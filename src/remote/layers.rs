@@ -116,18 +116,30 @@ impl LayerStore {
         Ok(len)
     }
 
+    // Oldest out first, once there are more than KEEP_COUNT. A receive that never
+    // finished leaves an `.incoming` file, which is nobody's layer and goes once it is
+    // old enough to be one that never will.
     fn prune(&self) {
         let Ok(entries) = fs::read_dir(&self.dir) else {
             return;
         };
-        let mut archives: Vec<(SystemTime, PathBuf)> = entries
-            .flatten()
-            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "tar"))
-            .filter_map(|entry| {
-                let written = entry.metadata().ok()?.modified().ok()?;
-                Some((written, entry.path()))
-            })
-            .collect();
+        let abandoned = SystemTime::now()
+            .checked_sub(Duration::from_secs(60 * 60))
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        let mut archives: Vec<(SystemTime, PathBuf)> = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(written) = entry.metadata().and_then(|meta| meta.modified()) else {
+                continue;
+            };
+            match path.extension().and_then(|ext| ext.to_str()) {
+                Some("tar") => archives.push((written, path)),
+                Some("incoming") if written < abandoned => {
+                    let _ = fs::remove_file(path);
+                }
+                _ => {}
+            }
+        }
         if archives.len() <= KEEP_COUNT {
             return;
         }
@@ -204,8 +216,8 @@ impl ProtocolHandler for LayerHandler {
                 }
             },
             LayerOp::Store { len } => {
-                let reply = if len > MAX_LAYER_BYTES {
-                    LayerReply::Failed(format!("{len} bytes is more than a layer may be"))
+                let reply = if len == 0 || len > MAX_LAYER_BYTES {
+                    LayerReply::Failed(format!("{len} bytes is not a layer"))
                 } else {
                     let destination = self.store.archive_path(&request.environment, &request.tag);
                     match receive(&mut recv, &destination, len).await {

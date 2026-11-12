@@ -2,12 +2,7 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
-use crate::{
-    agent::{AgentError, AgentKind},
-    tracker::TrackerKind,
-    vcs::VcsProviderKind,
-    version::VERSION,
-};
+use crate::{tracker::TrackerKind, version::VERSION};
 
 const SERVE_MODE: &str = "Run altitude serve on a headless server to let your team run agents beyond their own machines, and pilot them directly from your task tracker.";
 
@@ -89,7 +84,6 @@ pub struct ServeArgs {
 #[derive(Debug, Subcommand)]
 pub enum ServeCommand {
     Clients,
-    Environment(EnvironmentArgs),
     Evict {
         key: String,
     },
@@ -103,9 +97,6 @@ pub enum ServeCommand {
 
 const WORKER_MODE: &str =
     "Run altitude serve as a disposable host that runs one task's sandbox for a remote.";
-
-const ENVIRONMENT_MODE: &str =
-    "Print the layers a host builds to run a task's sandboxes, so an image can carry them.";
 
 // Shown as the worker subcommand's help, and printed by the worker itself when it
 // is launched from a terminal, so that a stray invocation reads this rather than
@@ -147,13 +138,11 @@ To set workers up on a remote:
     It also needs /dev/fuse and, unless it runs as root, the setuid fusermount3:
     each project's cache is mounted from the remote through them. The Dockerfile's
     worker target and compose.worker.example.yaml are a starting point.
- 6. Bake what a start would otherwise build. `altitude serve environment --agent
-    claude` prints a host's layers, with the commands and the marker file that says
-    they have run; a host that finds the marker starts from the built layer instead.
-    Set ALTITUDE_WORKER_ENVIRONMENT in the image to what the image is, and those
-    layers are tagged with it: rebuilding the image rebuilds them, rather than
-    trusting a marker a different image wrote. A host that sets nothing is tagged on
-    its commands alone, which is what a machine of its own can rely on.
+ 6. Say what the image is. Set ALTITUDE_WORKER_ENVIRONMENT to the image's own name.
+    A host builds the installs layer - the agent harness, git and gh - the first time
+    one runs it, and leaves it on its master; the next host of that image restores it
+    instead of building it. The name is part of what that layer is called, so a
+    rebuilt image builds its own rather than restore software from the one before.
 
 The remote spawns a host when a task needs one and destroys it when the task ends.
 Run this by hand only to debug a provision script.";
@@ -190,36 +179,6 @@ pub struct WorkerArgs {
         help = "Run even from a terminal, for debugging a provision script"
     )]
     pub yes: bool,
-}
-
-#[derive(Debug, Args)]
-#[command(long_about = ENVIRONMENT_MODE)]
-pub struct EnvironmentArgs {
-    #[arg(
-        long,
-        value_name = "AGENT",
-        display_order = 1,
-        value_parser = parse_agent,
-        help = "The agent harness a task of this project runs: claude or pi"
-    )]
-    pub agent: AgentKind,
-
-    #[arg(
-        long,
-        value_name = "PROVIDER",
-        display_order = 2,
-        value_parser = parse_vcs,
-        help = "The version-control profile its tasks use (default: the only one)"
-    )]
-    pub vcs: Option<VcsProviderKind>,
-}
-
-fn parse_agent(value: &str) -> Result<AgentKind, String> {
-    value.parse().map_err(|error: AgentError| error.to_string())
-}
-
-fn parse_vcs(value: &str) -> Result<VcsProviderKind, String> {
-    value.parse()
 }
 
 #[derive(Debug, Args)]
