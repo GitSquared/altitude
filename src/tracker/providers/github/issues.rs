@@ -1,8 +1,8 @@
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::tracker::{
-    IssueComment, IssueReference, IssueScope, IssueSnapshot, IssueSummary, TrackerError,
-    TrackerKind,
+    IssueComment, IssueDependency, IssueReference, IssueScope, IssueSnapshot, IssueSummary,
+    TrackerError, TrackerKind,
 };
 
 use super::api::GitHubApi;
@@ -122,7 +122,77 @@ pub(crate) async fn snapshot(
             .unwrap_or_default()
             .to_owned(),
         comments,
+        blocked_by: dependencies(api, token, address).await?,
     })
+}
+
+// An issue's blocked-by relations are GraphQL only: REST has no field for them, which
+// is why this second call is here at all. `first: 50` is GitHub's own ceiling for the
+// connection; a task waiting on more than that is not a dependency to read, it is a
+// project to plan.
+const BLOCKED_BY_QUERY: &str = "query ($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    issue(number: $number) {
+      blockedBy(first: 50) {
+        nodes {
+          number
+          title
+          state
+          repository { nameWithOwner }
+        }
+      }
+    }
+  }
+}";
+
+pub(crate) async fn dependencies(
+    api: &GitHubApi,
+    token: &str,
+    address: &IssueAddress,
+) -> Result<Vec<IssueDependency>, TrackerError> {
+    let (owner, name) = address
+        .repository
+        .split_once('/')
+        .ok_or_else(|| TrackerError::new("that is not a GitHub issue this connection can read"))?;
+    let data = api
+        .graphql(
+            token,
+            BLOCKED_BY_QUERY,
+            json!({ "owner": owner, "name": name, "number": address.number }),
+        )
+        .await?;
+    dependencies_of(&data)
+}
+
+// A repository the token cannot see answers with no issue rather than an error, and an
+// issue with no blockers answers with no nodes: both are "nothing blocks this".
+pub(crate) fn dependencies_of(data: &Value) -> Result<Vec<IssueDependency>, TrackerError> {
+    let Some(nodes) = data
+        .pointer("/repository/issue/blockedBy/nodes")
+        .and_then(Value::as_array)
+    else {
+        return Ok(Vec::new());
+    };
+    nodes
+        .iter()
+        .map(|node| {
+            let number = node
+                .get("number")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| TrackerError::new("GitHub returned a blocker without a number"))?;
+            let repository = node
+                .pointer("/repository/nameWithOwner")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    TrackerError::new("GitHub returned a blocker without a repository")
+                })?;
+            Ok(IssueDependency {
+                identifier: format!("{repository}#{number}"),
+                title: text(node, "title")?,
+                open: text(node, "state")?.eq_ignore_ascii_case("open"),
+            })
+        })
+        .collect()
 }
 
 pub(crate) fn author_login(value: &Value) -> String {

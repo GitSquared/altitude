@@ -323,6 +323,9 @@ impl Linear {
             issue: summary_of(&issue)?,
             description: issue_description(&issue),
             comments,
+            // Linear does have its own relations; reading them is a separate piece of
+            // work, and inventing blockers it never said would be worse than none.
+            blocked_by: Vec::new(),
         })
     }
 

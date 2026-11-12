@@ -12,6 +12,8 @@ pub(crate) mod issues;
 pub(crate) mod setup;
 mod sign_in;
 pub(crate) mod status;
+#[cfg(test)]
+mod tests;
 
 use crate::isolation::private_directory;
 use crate::tracker::{

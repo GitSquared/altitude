@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use reqwest::{Method, Response, StatusCode, header};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::tracker::TrackerError;
 
@@ -40,6 +40,32 @@ impl GitHubApi {
     ) -> Result<Value, TrackerError> {
         let response = self.request(token, method, &url_of(path), body).await?;
         read_json(response).await
+    }
+
+    // The one call REST cannot make: an issue's blocked-by relations are GraphQL only.
+    // GitHub answers a bad query with HTTP 200 and an `errors` array, so the errors are
+    // what decides whether there is an answer at all.
+    pub(crate) async fn graphql(
+        &self,
+        token: &str,
+        query: &str,
+        variables: Value,
+    ) -> Result<Value, TrackerError> {
+        let answer = self
+            .send(
+                token,
+                Method::POST,
+                "/graphql",
+                Some(json!({ "query": query, "variables": variables })),
+            )
+            .await?;
+        if let Some(errors) = answer.get("errors").filter(|errors| !is_empty(errors)) {
+            return Err(TrackerError::new(format!(
+                "GitHub refused the query: {}",
+                clipped(&errors.to_string())
+            )));
+        }
+        Ok(answer.get("data").cloned().unwrap_or(Value::Null))
     }
 
     // A call whose only answer is that it happened: a label that was never there
@@ -153,6 +179,10 @@ fn next_page(response: &Response) -> Option<String> {
                 .to_owned()
         })
     })
+}
+
+fn is_empty(errors: &Value) -> bool {
+    errors.as_array().is_none_or(|errors| errors.is_empty())
 }
 
 fn clipped(text: &str) -> String {

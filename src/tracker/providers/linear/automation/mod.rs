@@ -101,6 +101,7 @@ impl LinearAutomation {
         self.ensure_workspace(issue)?;
         let comments = self.comments(&reference.id).await?;
         Ok(IssueSnapshot {
+            blocked_by: Vec::new(),
             issue: summary_of(issue)?,
             description: issue
                 .get("description")
