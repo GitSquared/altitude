@@ -7,19 +7,24 @@ use crate::isolation::HostLayers;
 use crate::remote::LinkClient;
 use crate::remote::layers::{LayerOp, LayerRequest};
 
-// A host's end of the layer store: it asks its master for the machine layer another
+// What a host that declares no environment calls itself. Hosts that declare nothing
+// share one key, which the 72-hour window bounds: an image that changes without
+// saying so is restored the old software until that window passes.
+pub(super) const UNDECLARED: &str = "undeclared";
+
+// A host's end of the layer store: it asks its master for an installs layer another
 // host built, and leaves its own there when it had to build it. Nothing here decides
-// what a layer is — the engine says which layer and whether it already has one.
-pub(super) struct LayerCache {
+// what a layer is: the engine says which one, and whether it already has it.
+pub(super) struct LinkLayers {
     client: LinkClient,
     master: EndpointAddr,
     token: String,
     // What this host is, as the image declares it. A layer built on one image is not
-    // the software another image's boxes expect, so the master keys on this.
+    // the software another image's hosts expect, so the store keys on this.
     environment: String,
 }
 
-impl LayerCache {
+impl LinkLayers {
     pub(super) fn new(
         client: LinkClient,
         master: EndpointAddr,
@@ -44,7 +49,7 @@ impl LayerCache {
     }
 }
 
-impl HostLayers for LayerCache {
+impl HostLayers for LinkLayers {
     fn fetch<'a>(
         &'a self,
         tag: &'a str,

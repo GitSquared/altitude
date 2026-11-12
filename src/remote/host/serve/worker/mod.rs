@@ -40,7 +40,7 @@ use crate::{
 
 use super::workers::HEARTBEAT_INTERVAL;
 
-use layers::LayerCache;
+use layers::LinkLayers;
 
 // The other end of the fleet contract: an empty host that knows nothing but who
 // made it. It registers, says it is still there, and answers the master's calls
@@ -75,14 +75,13 @@ pub(crate) async fn run(args: &WorkerArgs, base: Config) -> Result<(), Box<dyn E
     // closest thing we have — a chroot over the machine, not a microVM.
     //
     // It is given the link too, because the software a task's sandbox expects is the
-    // one thing worth fetching rather than building: a machine layer this master's
-    // other hosts have built is restored here, and this host leaves its own for the
-    // next one.
-    let engine = TestbedIsolation::new(&base).sharing_layers(Arc::new(LayerCache::new(
+    // one thing worth fetching rather than building: an installs layer another of this
+    // master's hosts built is restored here, and this host leaves its own for the next.
+    let engine = TestbedIsolation::new(&base).with_host_layers(Arc::new(LinkLayers::new(
         client.clone(),
         peer.clone(),
         args.token.clone(),
-        environment_identity().unwrap_or_else(|| "undeclared".to_owned()),
+        environment_identity().unwrap_or_else(|| layers::UNDECLARED.to_owned()),
     )));
     // Preparing is quick for a host engine, but it can still fail (no unprivileged
     // user namespaces, say). A host that cannot make sandboxes must not register and

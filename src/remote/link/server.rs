@@ -370,8 +370,8 @@ pub struct ServerParts {
     pub agent_channels: Option<AgentChannelAccess>,
     /// The projects' caches, when this machine serves them to workers over FUSE.
     pub cache: Option<Arc<CacheService>>,
-    /// The machine layers its hosts built, when this machine keeps them for the next
-    /// host rather than making every host build its own.
+    // The installs layers its hosts built, when this machine keeps them for the next
+    // host rather than making every host build its own.
     pub layers: Option<Arc<LayerStore>>,
 }
 

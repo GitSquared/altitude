@@ -51,8 +51,7 @@ pub struct TestbedIsolation {
     // A layer's steps run in a sandbox directory of their own, so two layers
     // building at once would share one view and each see the other's work.
     layer_build: Arc<LayerBuild<()>>,
-    // Where a built machine layer goes, when this host's master keeps one for the
-    // next host. A host with nowhere to put it builds every layer itself.
+    // Where a built installs layer goes, when this host has somewhere to leave it.
     layers: Option<Arc<dyn HostLayers>>,
 }
 
@@ -82,8 +81,8 @@ impl TestbedIsolation {
         }
     }
 
-    // A host that can share what it builds, and restore what another host built.
-    pub fn sharing_layers(mut self, layers: Arc<dyn HostLayers>) -> Self {
+    // A host that can leave what it builds, and restore what another host left.
+    pub fn with_host_layers(mut self, layers: Arc<dyn HostLayers>) -> Self {
         self.layers = Some(layers);
         self
     }
@@ -183,20 +182,13 @@ impl TestbedIsolation {
     ) -> Result<BaseSandboxSnapshot, IsolationError> {
         let marker = layer.snapshots_dir.join(LAYER_MARKER);
         if marker.is_file() {
-            return Ok(BaseSandboxSnapshot {
-                path: marker,
-                created_at_ms: now_ms(),
-                os_release: os_release(),
-                packages: String::new(),
-                setup_command: layer.setup_command(),
-            });
+            return Ok(Self::layer_snapshot(marker, &layer));
         }
-        // A machine layer is the host's own software, and the shape of it is a home
+        // An installs layer is the host's own software, and what it writes is a home
         // directory: every profile installs into $HOME and nowhere else. So a host
-        // that finds this layer already built on its master restores it instead of
-        // running the commands, and the build is handed on for the next host.
-        let shared = self.shared_layer(&layer);
-        if let (Some(layers), Some(tag)) = (&self.layers, shared.as_deref())
+        // that finds it already built restores it instead of running the commands.
+        let installs_tag = self.installs_layer_tag(&layer);
+        if let (Some(layers), Some(tag)) = (&self.layers, installs_tag.as_deref())
             && let Some(archive) = layers.fetch(tag).await
         {
             match self.restore_home(&archive) {
@@ -204,19 +196,15 @@ impl TestbedIsolation {
                     private_directory(&layer.snapshots_dir)?;
                     fs::write(&marker, b"built\n")
                         .map_err(|error| IsolationError::new(error.to_string()))?;
-                    tracing::info!(tag, "restored a machine layer another host built");
-                    return Ok(BaseSandboxSnapshot {
-                        path: marker,
-                        created_at_ms: now_ms(),
-                        os_release: os_release(),
-                        packages: String::new(),
-                        setup_command: layer.setup_command(),
-                    });
+                    tracing::info!(tag, "restored an installs layer another host built");
+                    let _ = fs::remove_file(&archive);
+                    return Ok(Self::layer_snapshot(marker, &layer));
                 }
                 // A layer that will not unpack is not a reason to fail the task: build
                 // it, as this host would have without the store.
                 Err(error) => {
-                    tracing::warn!(%error, tag, "a stored machine layer would not restore");
+                    tracing::warn!(%error, tag, "a stored installs layer would not restore");
+                    let _ = fs::remove_file(&archive);
                 }
             }
         }
@@ -226,7 +214,32 @@ impl TestbedIsolation {
             .iter()
             .filter(|step| !step.command.trim().is_empty())
             .collect();
-        let _build = self.layer_build.lock().await;
+        // One build at a time: the steps of two layers would share the sandbox
+        // directory they run in and each see the other's work.
+        {
+            let _build = self.layer_build.lock().await;
+            self.run_layer(view, &steps, progress).await?;
+        }
+        fs::write(&marker, b"built\n").map_err(|error| IsolationError::new(error.to_string()))?;
+        if let (Some(layers), Some(tag)) = (&self.layers, installs_tag.as_deref())
+            && let Err(error) = self.store_home(layers, tag).await
+        {
+            // The layer is built and this host is ready; the next host simply builds
+            // its own, which is what every host did before any of this existed.
+            tracing::warn!(%error, tag, "could not leave this installs layer for the next host");
+        }
+        Ok(Self::layer_snapshot(marker, &layer))
+    }
+
+    // A layer's steps, in a sandbox directory of their own and in the view the
+    // sandbox's own commands will have: a step that writes its config into $HOME has
+    // to write it where the task will read it.
+    async fn run_layer(
+        &self,
+        view: &LayerView,
+        steps: &[&SetupStep],
+        progress: &dyn EnvironmentProgressSink,
+    ) -> Result<(), IsolationError> {
         let root = self.sandboxes_dir().join(LAYER_SANDBOX);
         machine::prepare_root(&root)?;
         let record = SandboxRecord {
@@ -252,30 +265,31 @@ impl TestbedIsolation {
                 .map_err(|error| IsolationError::new(format!("{}: {error}", step.label)))?;
         }
         if let Err(error) = fs::remove_dir_all(&root) {
-            tracing::warn!(%error, path = %root.display(), "could not remove the layer build's sandbox directory");
+            tracing::warn!(
+                %error,
+                path = %root.display(),
+                "could not remove the layer build's sandbox directory"
+            );
         }
-        fs::write(&marker, b"built\n").map_err(|error| IsolationError::new(error.to_string()))?;
-        drop(_build);
-        if let (Some(layers), Some(tag)) = (&self.layers, shared.as_deref())
-            && let Err(error) = self.keep_home(layers, tag).await
-        {
-            // The layer is built and this host is ready; the next host simply builds
-            // its own, which is what every host did before any of this existed.
-            tracing::warn!(%error, tag, "could not leave this machine layer for the next host");
-        }
-        Ok(BaseSandboxSnapshot {
+        Ok(())
+    }
+
+    // The machine is the base, so a layer's snapshot is the note that its steps ran:
+    // there is no image altitude built, only a marker in the layer's own directory.
+    fn layer_snapshot(marker: PathBuf, layer: &BaseSandboxRecipe) -> BaseSandboxSnapshot {
+        BaseSandboxSnapshot {
             path: marker,
             created_at_ms: now_ms(),
             os_release: os_release(),
             packages: String::new(),
             setup_command: layer.setup_command(),
-        })
+        }
     }
 
-    // The layers worth handing on are the machine's own: the agent and version-control
-    // installs, which are the same whatever project runs. A project's layer builds its
+    // What is worth handing on is the installs layer: the agent and version-control
+    // software, the same whatever project runs. A project's own layer builds its
     // environment inside the task's checkout, which belongs to that task.
-    fn shared_layer(&self, layer: &BaseSandboxRecipe) -> Option<String> {
+    fn installs_layer_tag(&self, layer: &BaseSandboxRecipe) -> Option<String> {
         let machine = self.config.installs_snapshots_dir();
         if layer.snapshots_dir.parent() != Some(machine.as_path()) {
             return None;
@@ -286,54 +300,50 @@ impl TestbedIsolation {
             .map(|name| name.to_string_lossy().into_owned())
     }
 
-    // The home as this host holds it, which is the whole of a machine layer: the
-    // profile directories and project caches are mounted from the master, so they are
-    // not in it, and a task has not run here yet.
-    async fn keep_home(
+    // The home as this host holds it, which is the whole of an installs layer: the
+    // profile directories and project caches are mounted into the layer's view from
+    // the master, so taking the home from outside that view leaves them out.
+    async fn store_home(
         &self,
         layers: &Arc<dyn HostLayers>,
         tag: &str,
     ) -> Result<(), IsolationError> {
-        let (root, parent) = self.home_parts()?;
+        let entry = self.home_name()?;
         let archive = NamedTempFile::new().map_err(io_error)?;
         let file = fs::File::create(archive.path()).map_err(io_error)?;
         let mut builder = Builder::new(file);
         builder
-            .append_dir_all(&root, &self.home)
+            .append_dir_all(&entry, &self.home)
             .map_err(io_error)?;
         builder.finish().map_err(io_error)?;
-        let _ = parent;
         layers.store(tag, archive.path().to_path_buf()).await;
         Ok(())
     }
 
     fn restore_home(&self, archive: &Path) -> Result<(), IsolationError> {
-        let (root, parent) = self.home_parts()?;
-        let _ = root;
+        let parent = self.home_parent()?;
         let file = fs::File::open(archive).map_err(io_error)?;
         let mut tar = Archive::new(file);
-        tar.unpack(parent.as_path())
-            .map_err(io_error)
+        tar.unpack(&parent)
             .map_err(|error| IsolationError::new(error.to_string()))
     }
 
-    // The account's home as an entry name and the directory it sits in: an archive of
-    // it has one top-level directory, and unpacking it into the parent puts the home
-    // back exactly where it was.
-    fn home_parts(&self) -> Result<(String, PathBuf), IsolationError> {
-        let root = self
-            .home
+    // An archive of the home holds one top-level directory, named after the home
+    // itself, so unpacking it into the home's parent puts it back where it was.
+    fn home_name(&self) -> Result<String, IsolationError> {
+        self.home
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .filter(|name| !name.is_empty())
-            .ok_or_else(|| IsolationError::new("this host's home has no name to archive"))?;
-        let parent = self
-            .home
+            .ok_or_else(|| IsolationError::new("this host's home has no name to archive"))
+    }
+
+    fn home_parent(&self) -> Result<PathBuf, IsolationError> {
+        self.home
             .parent()
             .map(Path::to_path_buf)
             .filter(|path| !path.as_os_str().is_empty())
-            .ok_or_else(|| IsolationError::new("this host's home has no parent"))?;
-        Ok((root, parent))
+            .ok_or_else(|| IsolationError::new("this host's home has no parent"))
     }
 
     // A host that is about to be destroyed has no machine to come back to, so a

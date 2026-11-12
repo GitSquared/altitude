@@ -12,32 +12,36 @@ use iroh::{
 use serde::{Deserialize, Serialize};
 use tokio::{
     fs::File as AsyncFile,
-    io::{AsyncReadExt, copy as copy_stream},
+    io::{AsyncReadExt, copy},
 };
 
 use crate::config::Config;
-use crate::remote::protocol::{MAX_BLOB_BYTES, read_frame, write_frame};
+use crate::remote::protocol::{read_frame, write_frame};
 
-// A host dials this to hand over the machine layer it built, or to ask for one that
+// A host dials this to hand over the installs layer it built, or to ask for one that
 // another host built. It is neither the link (clients and their tasks) nor the worker
-// ALPN (the master asking a host for compute): it is a host and its master trading
-// the software a task's sandbox expects to find already installed.
+// ALPN (the master asking a host for compute), for the same reason the cache has one
+// of its own: it is a different conversation.
 pub(crate) const LAYER_ALPN: &[u8] = b"altitude/layers/1";
 
-// How long a stored layer is worth trusting, which is the window altitude refreshes
-// its own base snapshots on: past it a host builds again rather than restore software
-// nobody has looked at since.
+// Long enough for a toolchain the agent's own profile installs, and no longer: this
+// bounds what a host can put on its master's disk, not what a layer realistically is.
+const MAX_LAYER_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+
+// The window a stored layer is trusted for, which is the one base snapshots refresh
+// on. Past it a host builds again rather than restore software nobody has looked at
+// since.
 const KEEP_FOR: Duration = Duration::from_secs(72 * 60 * 60);
 
-// The most layers kept at once, oldest dropped first. A remote at one image has one
-// per agent profile; this is room for a few generations of that.
+// The most layers kept at once, oldest dropped first. An image has one per agent
+// profile; this is room for a few generations of that.
 const KEEP_COUNT: usize = 8;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct LayerRequest {
     pub token: String,
     // What the host is: the image's own name, as the host declares it. A layer built
-    // on one image is not the software another image's boxes expect to find.
+    // on one image is not the software another image's hosts expect to find.
     pub environment: String,
     // The layer's name for itself, which is the digest of the commands that build it.
     pub tag: String,
@@ -60,9 +64,11 @@ pub(crate) enum LayerReply {
     Failed(String),
 }
 
-// What a master keeps of what its hosts built. Nothing here knows what a layer is:
-// it is an archive per (environment, tag), aged out like the base snapshots it stands
-// in for.
+// What a master keeps of the layers its hosts built. Nothing here knows what a layer
+// is: an archive per environment and tag, aged out like a base snapshot. A host is
+// trusted to say which environment it is, because the token is the boundary on this
+// link and everywhere else: a host that lies about itself only corrupts its own
+// fleet's layers.
 pub(crate) struct LayerStore {
     dir: PathBuf,
     token: String,
@@ -79,40 +85,37 @@ impl LayerStore {
         &self.token
     }
 
-    // Named by a digest of both halves rather than by the halves themselves: an
-    // environment is an image's name and a tag is a digest, and neither may be a path.
-    fn path(&self, environment: &str, tag: &str) -> PathBuf {
+    // Both halves are hashed rather than trusted: an environment is an image's name
+    // and a tag is a digest, and neither may become a path.
+    fn archive_path(&self, environment: &str, tag: &str) -> PathBuf {
         let key = blake3::hash(format!("{environment}\u{0}{tag}").as_bytes()).to_hex();
         self.dir.join(format!("{}.tar", &key[..32]))
     }
 
-    // The archive, if there is one and it is young enough to trust.
-    fn stored(&self, environment: &str, tag: &str) -> Option<(PathBuf, u64)> {
-        let path = self.path(environment, tag);
+    fn fresh_archive(&self, environment: &str, tag: &str) -> Option<(PathBuf, u64)> {
+        let path = self.archive_path(environment, tag);
         let metadata = fs::metadata(&path).ok()?;
-        let fresh = metadata
+        let age = metadata
             .modified()
             .ok()
-            .and_then(|written| SystemTime::now().duration_since(written).ok())
-            .is_none_or(|age| age < KEEP_FOR);
-        if !fresh {
-            // Aged out: drop it rather than leave the disk to fill with software
-            // nobody would restore.
+            .and_then(|written| SystemTime::now().duration_since(written).ok());
+        if age.is_some_and(|age| age >= KEEP_FOR) {
+            // A layer this old would be rebuilt by its host anyway, so it is dropped
+            // rather than left to fill the disk.
             let _ = fs::remove_file(&path);
             return None;
         }
         Some((path, metadata.len()))
     }
 
-    fn keep(&self, environment: &str, tag: &str, incoming: PathBuf) -> io::Result<u64> {
-        let path = self.path(environment, tag);
-        fs::rename(&incoming, &path)?;
+    fn adopt(&self, environment: &str, tag: &str, received: PathBuf) -> io::Result<u64> {
+        let path = self.archive_path(environment, tag);
+        fs::rename(&received, &path)?;
         let len = fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
         self.prune();
         Ok(len)
     }
 
-    // Oldest out first, once there are more than KEEP_COUNT.
     fn prune(&self) {
         let Ok(entries) = fs::read_dir(&self.dir) else {
             return;
@@ -172,41 +175,44 @@ impl ProtocolHandler for LayerHandler {
             .await;
             return Ok(());
         }
-        let destination = self.store.path(&request.environment, &request.tag);
-        let reply = match request.op {
-            LayerOp::Fetch => match self.store.stored(&request.environment, &request.tag) {
-                Some((path, len)) => match AsyncFile::open(&path).await {
-                    Ok(mut archive) => {
-                        if write_frame(&mut send, &LayerReply::Blob { len })
-                            .await
-                            .is_err()
-                        {
-                            return Ok(());
-                        }
-                        if let Err(error) = copy_stream(&mut archive, &mut send).await {
-                            tracing::warn!(%error, "a layer archive did not reach its host");
-                            return Ok(());
-                        }
-                        let _ = send.finish();
+        match request.op {
+            LayerOp::Fetch => match self.store.fresh_archive(&request.environment, &request.tag) {
+                Some((path, len)) => {
+                    let Ok(mut archive) = AsyncFile::open(&path).await else {
+                        let _ = write_frame(
+                            &mut send,
+                            &LayerReply::Failed("a stored layer could not be read".into()),
+                        )
+                        .await;
+                        return Ok(());
+                    };
+                    if write_frame(&mut send, &LayerReply::Blob { len })
+                        .await
+                        .is_err()
+                    {
                         return Ok(());
                     }
-                    Err(error) => LayerReply::Failed(error.to_string()),
-                },
-                None => LayerReply::Missing,
+                    if let Err(error) = copy(&mut archive, &mut send).await {
+                        tracing::warn!(%error, "a layer archive did not reach its host");
+                        return Ok(());
+                    }
+                    let _ = send.finish();
+                    return Ok(());
+                }
+                None => {
+                    let _ = write_frame(&mut send, &LayerReply::Missing).await;
+                }
             },
-            // The bytes arrive after the request, so they are kept beside the store and
-            // renamed into it only once they are all there: a half-received archive
-            // would be a layer a host restores and cannot run.
             LayerOp::Store { len } => {
-                if len > MAX_BLOB_BYTES {
+                let reply = if len > MAX_LAYER_BYTES {
                     LayerReply::Failed(format!("{len} bytes is more than a layer may be"))
                 } else {
+                    let destination = self.store.archive_path(&request.environment, &request.tag);
                     match receive(&mut recv, &destination, len).await {
-                        Ok((incoming, identical)) => {
-                            let _ = identical;
+                        Ok(received) => {
                             match self
                                 .store
-                                .keep(&request.environment, &request.tag, incoming)
+                                .adopt(&request.environment, &request.tag, received)
                             {
                                 Ok(len) => {
                                     tracing::info!(
@@ -222,30 +228,24 @@ impl ProtocolHandler for LayerHandler {
                         }
                         Err(error) => LayerReply::Failed(error),
                     }
-                }
+                };
+                let _ = write_frame(&mut send, &reply).await;
             }
-        };
-        let _ = write_frame(&mut send, &reply).await;
+        }
         let _ = send.finish();
         Ok(())
     }
 }
 
-// The archive as it arrives, into a file beside where it will live so the rename that
-// finishes it is on one filesystem.
-async fn receive(
-    recv: &mut RecvStream,
-    destination: &Path,
-    len: u64,
-) -> Result<(PathBuf, bool), String> {
-    let parent = destination
-        .parent()
-        .ok_or_else(|| "the layer store has no directory".to_owned())?;
+// The archive as it arrives. Kept beside where it will live, so finishing it is a
+// rename on one filesystem: a half-received layer would be one a host restores and
+// cannot run.
+async fn receive(recv: &mut RecvStream, destination: &Path, len: u64) -> Result<PathBuf, String> {
     let incoming = destination.with_extension("incoming");
     let mut file = AsyncFile::create(&incoming)
         .await
         .map_err(|error| error.to_string())?;
-    let copied = copy_stream(&mut recv.take(len), &mut file)
+    let copied = copy(&mut recv.take(len), &mut file)
         .await
         .map_err(|error| error.to_string())?;
     if copied != len {
@@ -253,6 +253,5 @@ async fn receive(
         return Err(format!("{copied} of {len} bytes of a layer arrived"));
     }
     file.sync_all().await.map_err(|error| error.to_string())?;
-    let _ = parent;
-    Ok((incoming, false))
+    Ok(incoming)
 }

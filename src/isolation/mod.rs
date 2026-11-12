@@ -361,17 +361,16 @@ pub struct LayerView {
 // on it: a note rather than an image, in the layer's own snapshot directory.
 pub(crate) const LAYER_MARKER: &str = "testbed-built";
 
-// Where a host keeps the machine layer it built, so that the next host need not build
-// it: one archive per what-the-host-is and what-the-layer-is, kept by the master. A
-// host with nowhere to put one builds every layer itself, as it always did.
+// The installs layer a host built, kept somewhere the next host can find it. A host
+// with nowhere to put one builds every layer itself, as it always did.
 pub trait HostLayers: Send + Sync {
-    // The archive for this host's own environment, if the master holds one.
+    // The archive for this host's own environment, if one is held.
     fn fetch<'a>(
         &'a self,
         tag: &'a str,
     ) -> Pin<Box<dyn Future<Output = Option<PathBuf>> + Send + 'a>>;
-    // This host's copy, for whoever comes next. A failure here leaves the layer built
-    // and the next host to build it too, so it is logged rather than fatal.
+    // This host's copy, for whoever comes next. A failure leaves the layer built and
+    // the next host to build its own, so it is logged rather than fatal.
     fn store<'a>(
         &'a self,
         tag: &'a str,
