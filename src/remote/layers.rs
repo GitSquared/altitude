@@ -28,14 +28,15 @@ pub(crate) const LAYER_ALPN: &[u8] = b"altitude/layers/1";
 // bounds what a host can put on its master's disk, not what a layer realistically is.
 const MAX_LAYER_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
-// The window a stored layer is trusted for, which is the one base snapshots refresh
-// on. Past it a host builds again rather than restore software nobody has looked at
-// since.
+// The window a stored layer is served for, which is the one base snapshots refresh
+// on. It is a freshness rule and not a sweep: a layer's commands install the newest
+// release they name, so an old archive is older *software*, and a host that cannot be
+// served builds instead. Evaluated when a host asks, never on a timer.
 const KEEP_FOR: Duration = Duration::from_secs(72 * 60 * 60);
 
-// The most layers kept at once, oldest dropped first. An image has one per agent
-// profile; this is room for a few generations of that.
-const KEEP_COUNT: usize = 8;
+// What the store may occupy. Eviction is a bucket, not a count of files: what costs
+// is bytes, and the number of layers an image has says nothing about what they weigh.
+const LAYER_BUDGET: u64 = 8 * 1024 * 1024 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct LayerRequest {
@@ -71,14 +72,36 @@ pub(crate) enum LayerReply {
 // fleet's layers.
 pub(crate) struct LayerStore {
     dir: PathBuf,
+    // Where a receive writes before it is a layer. Emptied when the store opens: a
+    // file here is a receive that did not finish, and nothing can be receiving while
+    // this process is starting.
+    staging: PathBuf,
     token: String,
 }
 
 impl LayerStore {
     pub(crate) fn open(config: &Config, token: String) -> io::Result<Self> {
         let dir = config.data_dir().join("hosts").join("layers");
-        fs::create_dir_all(&dir)?;
-        Ok(Self { dir, token })
+        let staging = dir.join("staging");
+        fs::create_dir_all(&staging)?;
+        for leftover in fs::read_dir(&staging)?.flatten() {
+            let _ = fs::remove_file(leftover.path());
+        }
+        Ok(Self {
+            dir,
+            staging,
+            token,
+        })
+    }
+
+    fn staging_path(&self, environment: &str, tag: &str) -> PathBuf {
+        self.staging
+            .join(format!("{}.incoming", self.key(environment, tag)))
+    }
+
+    fn key(&self, environment: &str, tag: &str) -> String {
+        let key = blake3::hash(format!("{environment}\u{0}{tag}").as_bytes()).to_hex();
+        key[..32].to_owned()
     }
 
     pub(crate) fn token(&self) -> &str {
@@ -88,8 +111,7 @@ impl LayerStore {
     // Both halves are hashed rather than trusted: an environment is an image's name
     // and a tag is a digest, and neither may become a path.
     fn archive_path(&self, environment: &str, tag: &str) -> PathBuf {
-        let key = blake3::hash(format!("{environment}\u{0}{tag}").as_bytes()).to_hex();
-        self.dir.join(format!("{}.tar", &key[..32]))
+        self.dir.join(format!("{}.tar", self.key(environment, tag)))
     }
 
     fn fresh_archive(&self, environment: &str, tag: &str) -> Option<(PathBuf, u64)> {
@@ -112,41 +134,45 @@ impl LayerStore {
         let path = self.archive_path(environment, tag);
         fs::rename(&received, &path)?;
         let len = fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
-        self.prune();
+        self.enforce_budget(&path);
         Ok(len)
     }
 
-    // Oldest out first, once there are more than KEEP_COUNT. A receive that never
-    // finished leaves an `.incoming` file, which is nobody's layer and goes once it is
-    // old enough to be one that never will.
-    fn prune(&self) {
+    // The one guard on what the store costs, checked where it can change and nowhere
+    // else: after a write, while the store is over its budget, drop the archive nobody
+    // has written since.
+    fn enforce_budget(&self, keep: &Path) {
         let Ok(entries) = fs::read_dir(&self.dir) else {
             return;
         };
-        let abandoned = SystemTime::now()
-            .checked_sub(Duration::from_secs(60 * 60))
-            .unwrap_or(SystemTime::UNIX_EPOCH);
-        let mut archives: Vec<(SystemTime, PathBuf)> = Vec::new();
+        let mut archives: Vec<(SystemTime, u64, PathBuf)> = Vec::new();
+        let mut total = 0;
         for entry in entries.flatten() {
             let path = entry.path();
-            let Ok(written) = entry.metadata().and_then(|meta| meta.modified()) else {
+            if path.extension().and_then(|ext| ext.to_str()) != Some("tar") {
+                continue;
+            }
+            let Ok(metadata) = entry.metadata() else {
                 continue;
             };
-            match path.extension().and_then(|ext| ext.to_str()) {
-                Some("tar") => archives.push((written, path)),
-                Some("incoming") if written < abandoned => {
-                    let _ = fs::remove_file(path);
-                }
-                _ => {}
-            }
+            let written = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+            total += metadata.len();
+            archives.push((written, metadata.len(), path));
         }
-        if archives.len() <= KEEP_COUNT {
+        if total <= LAYER_BUDGET {
             return;
         }
         archives.sort();
-        let excess = archives.len() - KEEP_COUNT;
-        for (_, path) in archives.into_iter().take(excess) {
-            let _ = fs::remove_file(path);
+        for (_, len, path) in archives {
+            if total <= LAYER_BUDGET {
+                break;
+            }
+            if path == keep {
+                continue;
+            }
+            if fs::remove_file(&path).is_ok() {
+                total = total.saturating_sub(len);
+            }
         }
     }
 }
@@ -219,8 +245,8 @@ impl ProtocolHandler for LayerHandler {
                 let reply = if len == 0 || len > MAX_LAYER_BYTES {
                     LayerReply::Failed(format!("{len} bytes is not a layer"))
                 } else {
-                    let destination = self.store.archive_path(&request.environment, &request.tag);
-                    match receive(&mut recv, &destination, len).await {
+                    let staging = self.store.staging_path(&request.environment, &request.tag);
+                    match receive(&mut recv, &staging, len).await {
                         Ok(received) => {
                             match self
                                 .store
