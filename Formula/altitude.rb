@@ -1,10 +1,10 @@
 class Altitude < Formula
   desc "Terminal control plane for delegated coding agents"
   homepage "https://github.com/GitSquared/altitude"
-  url "https://github.com/GitSquared/altitude/releases/download/v0.9.0/altitude-0.9.0-aarch64-apple-darwin.tar.gz"
-  sha256 "c6296574b6d9b3ec294ba82177e3e26e8aacc45e799b54496d32c55438dcfb99"
+  url "https://github.com/GitSquared/altitude/releases/download/v0.9.1/altitude-0.9.1-aarch64-apple-darwin.tar.gz"
+  sha256 "a3ee8f46e0e54953de00afc0b2a89e31fb4e431a1cda6063095ca99762ac15a7"
   license "BUSL-1.1"
-  version "0.9.0"
+  version "0.9.1"
 
   depends_on :macos
   depends_on arch: :arm64
