@@ -37,6 +37,7 @@ use crate::{
         ClientRecord, InstallationKey, LinkClient, LinkServer, TrackerConnection,
         announce::{Phase, TrackerReadiness},
         cache::CacheService,
+        layers::LayerStore,
         server::{AgentChannelAccess, ServerParts, WorkerHost},
     },
     task::{TaskEventLoop, TaskExecutionUpdate, TaskService, TaskStore},
@@ -388,6 +389,14 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
         cache: fleet
             .as_ref()
             .map(|fleet| Arc::new(CacheService::new(&config, fleet.token().to_owned()))),
+        layers: match &fleet {
+            // A layer store is only worth keeping where hosts exist to share it with:
+            // a remote that runs its own sandboxes builds them once anyway.
+            Some(fleet) => Some(Arc::new(
+                LayerStore::open(&config, fleet.token().to_owned()).map_err(io::Error::other)?,
+            )),
+            None => None,
+        },
     })
     .await
     .map_err(io::Error::other)?;

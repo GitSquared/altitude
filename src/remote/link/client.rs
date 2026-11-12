@@ -9,8 +9,10 @@ use tokio::io::copy;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
+use crate::isolation::worker_protocol::WORKER_ALPN;
 #[cfg(target_os = "linux")]
-use crate::remote::cache::protocol::{CacheReply, CacheRequest};
+use crate::remote::cache::protocol::{CACHE_ALPN, CacheReply, CacheRequest};
+use crate::remote::layers::{LAYER_ALPN, LayerReply, LayerRequest};
 #[cfg(target_os = "linux")]
 use crate::remote::protocol::MAX_BLOB_BYTES;
 use crate::task::TaskAsk;
@@ -106,7 +108,10 @@ impl LinkClient {
         request: &CacheRequest,
         body: &[u8],
     ) -> LinkResult<(CacheReply, Vec<u8>)> {
-        let dial = self.dial(peer).await?;
+        // The cache answers on its own ALPN, not the link's: a master serves three
+        // conversations, and a host that dials the wrong one is refused at the
+        // handshake rather than told to try again.
+        let dial = self.dial_alpn(peer, CACHE_ALPN).await?;
         let (mut send, mut recv) = dial.0.open_bi().await?;
         write_frame(&mut send, request).await?;
         if !body.is_empty() {
@@ -123,13 +128,57 @@ impl LinkClient {
         Ok((reply, bytes))
     }
 
+    // What another host built, fetched by this one: the archive is copied into the
+    // sink, and `false` says the master has nothing for this environment and tag.
+    pub(crate) async fn layer_fetch(
+        &self,
+        peer: impl Into<EndpointAddr>,
+        request: &LayerRequest,
+        mut sink: AsyncFile,
+    ) -> LinkResult<bool> {
+        let dial = self.dial_alpn(peer, LAYER_ALPN).await?;
+        let (mut send, mut recv) = dial.0.open_bi().await?;
+        write_frame(&mut send, request).await?;
+        send.finish()?;
+        match read_frame::<_, LayerReply>(&mut recv).await? {
+            LayerReply::Blob { .. } => {
+                copy(&mut recv, &mut sink).await?;
+                sink.sync_all().await?;
+                Ok(true)
+            }
+            LayerReply::Missing => Ok(false),
+            LayerReply::Failed(reason) => Err(reason.into()),
+            other => Err(format!("unexpected answer: {other:?}").into()),
+        }
+    }
+
+    // This host's copy, left for the next one. A failure is the caller's to log and
+    // forget: a layer that cannot be shared is a layer the next host builds itself.
+    pub(crate) async fn layer_store(
+        &self,
+        peer: impl Into<EndpointAddr>,
+        request: &LayerRequest,
+        mut archive: AsyncFile,
+    ) -> LinkResult<()> {
+        let dial = self.dial_alpn(peer, LAYER_ALPN).await?;
+        let (mut send, mut recv) = dial.0.open_bi().await?;
+        write_frame(&mut send, request).await?;
+        copy(&mut archive, &mut send).await?;
+        send.finish()?;
+        match read_frame::<_, LayerReply>(&mut recv).await? {
+            LayerReply::Stored => Ok(()),
+            LayerReply::Failed(reason) => Err(reason.into()),
+            other => Err(format!("unexpected answer: {other:?}").into()),
+        }
+    }
+
     // One sandbox call to a worker the master provisioned.
     pub(crate) async fn worker_call(
         &self,
         peer: impl Into<EndpointAddr>,
         request: &WorkerRequest,
     ) -> LinkResult<WorkerReply> {
-        let dial = self.dial(peer).await?;
+        let dial = self.dial_alpn(peer, WORKER_ALPN).await?;
         let (mut send, mut recv) = dial.0.open_bi().await?;
         write_frame(&mut send, request).await?;
         send.finish()?;
@@ -179,7 +228,7 @@ impl LinkClient {
         request: &WorkerRequest,
         mut file: AsyncFile,
     ) -> LinkResult<()> {
-        let dial = self.dial(peer).await?;
+        let dial = self.dial_alpn(peer, WORKER_ALPN).await?;
         let (mut send, mut recv) = dial.0.open_bi().await?;
         write_frame(&mut send, request).await?;
         copy(&mut file, &mut send).await?;
@@ -198,7 +247,7 @@ impl LinkClient {
         request: &WorkerRequest,
         mut sink: AsyncFile,
     ) -> LinkResult<(u64, u64)> {
-        let dial = self.dial(peer).await?;
+        let dial = self.dial_alpn(peer, WORKER_ALPN).await?;
         let (mut send, mut recv) = dial.0.open_bi().await?;
         write_frame(&mut send, request).await?;
         send.finish()?;
@@ -314,7 +363,13 @@ impl LinkClient {
     }
 
     async fn dial(&self, peer: impl Into<EndpointAddr>) -> LinkResult<Dial> {
-        Ok(Dial(self.endpoint.connect(peer, LINK_ALPN).await?))
+        self.dial_alpn(peer, LINK_ALPN).await
+    }
+
+    // Which conversation a dial starts is the ALPN, and the three of them are
+    // different conversations: a client's tasks, a host's sandboxes, a host's layers.
+    async fn dial_alpn(&self, peer: impl Into<EndpointAddr>, alpn: &[u8]) -> LinkResult<Dial> {
+        Ok(Dial(self.endpoint.connect(peer, alpn).await?))
     }
 
     async fn say(

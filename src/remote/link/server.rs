@@ -33,6 +33,7 @@ use crate::task::picture;
 
 use crate::remote::cache::{CACHE_ALPN, CacheHandler, CacheService};
 use crate::remote::host::clients::{ClientLog, ClientRecord};
+use crate::remote::layers::{LAYER_ALPN, LayerHandler, LayerStore};
 use crate::task::TaskAsk;
 
 use crate::remote::{
@@ -369,6 +370,9 @@ pub struct ServerParts {
     pub agent_channels: Option<AgentChannelAccess>,
     /// The projects' caches, when this machine serves them to workers over FUSE.
     pub cache: Option<Arc<CacheService>>,
+    /// The machine layers its hosts built, when this machine keeps them for the next
+    /// host rather than making every host build its own.
+    pub layers: Option<Arc<LayerStore>>,
 }
 
 // A worker is trusted to carry the connections an agent inside its sandbox makes,
@@ -861,6 +865,7 @@ impl LinkServer {
             workers,
             agent_channels,
             cache,
+            layers,
         } = parts;
         let handler = LinkHandler {
             id: identity.id(),
@@ -873,10 +878,14 @@ impl LinkServer {
         let log = ClientLog {
             record: clients.clone(),
         };
+        let mut alpns = vec![LINK_ALPN.to_vec(), CACHE_ALPN.to_vec()];
+        if layers.is_some() {
+            alpns.push(LAYER_ALPN.to_vec());
+        }
         let endpoint = bind(
             builder()
                 .secret_key(identity.secret_key().clone())
-                .alpns(vec![LINK_ALPN.to_vec(), CACHE_ALPN.to_vec()])
+                .alpns(alpns)
                 .hooks(log),
             listen,
         )?
@@ -886,6 +895,9 @@ impl LinkServer {
         let mut router = Router::builder(endpoint).accept(LINK_ALPN, handler);
         if let Some(cache) = cache {
             router = router.accept(CACHE_ALPN, CacheHandler::new(cache));
+        }
+        if let Some(layers) = layers {
+            router = router.accept(LAYER_ALPN, LayerHandler::new(layers));
         }
         let router = router.spawn();
         // Announced on the same address, over TCP, so that a client which has

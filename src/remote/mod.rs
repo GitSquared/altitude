@@ -4,6 +4,7 @@ mod bundle;
 pub(crate) mod cache;
 pub(crate) mod host;
 pub(crate) mod identity;
+pub(crate) mod layers;
 mod link;
 pub(crate) mod transfer;
 

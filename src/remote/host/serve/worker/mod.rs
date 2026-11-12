@@ -27,7 +27,7 @@ use crate::{
     cli::{WORKER_GUIDE, WorkerArgs},
     config::Config,
     isolation::{
-        IsolationStatus, TestbedIsolation, prepare,
+        IsolationStatus, TestbedIsolation, environment_identity, prepare,
         worker_protocol::{WORKER_ALPN, WorkerCall, WorkerReply, WorkerRequest},
     },
     logging,
@@ -39,6 +39,8 @@ use crate::{
 };
 
 use super::workers::HEARTBEAT_INTERVAL;
+
+use layers::LayerCache;
 
 // The other end of the fleet contract: an empty host that knows nothing but who
 // made it. It registers, says it is still there, and answers the master's calls
@@ -59,10 +61,29 @@ pub(crate) async fn run(args: &WorkerArgs, base: Config) -> Result<(), Box<dyn E
     );
     let key = InstallationKey::load_or_create(base.data_dir().join("worker.key"))
         .map_err(io::Error::other)?;
+    let endpoint = builder()
+        .secret_key(key.secret_key().clone())
+        .alpns(vec![WORKER_ALPN.to_vec()])
+        .bind()
+        .await
+        .map_err(io::Error::other)?;
+    let client = LinkClient::from_endpoint(endpoint.clone());
+    let master: RemoteTicket = args.master.parse().map_err(io::Error::other)?;
+    let peer: EndpointAddr = master.into();
     // A host is spawned for one task and its whole host is the sandbox, so it
     // needs no nested microVM: the host is the boundary. The host engine is the
     // closest thing we have — a chroot over the machine, not a microVM.
-    let engine = TestbedIsolation::new(&base);
+    //
+    // It is given the link too, because the software a task's sandbox expects is the
+    // one thing worth fetching rather than building: a machine layer this master's
+    // other hosts have built is restored here, and this host leaves its own for the
+    // next one.
+    let engine = TestbedIsolation::new(&base).sharing_layers(Arc::new(LayerCache::new(
+        client.clone(),
+        peer.clone(),
+        args.token.clone(),
+        environment_identity().unwrap_or_else(|| "undeclared".to_owned()),
+    )));
     // Preparing is quick for a host engine, but it can still fail (no unprivileged
     // user namespaces, say). A host that cannot make sandboxes must not register and
     // take work it will fail, so it prepares before it dials the master.
@@ -86,15 +107,6 @@ pub(crate) async fn run(args: &WorkerArgs, base: Config) -> Result<(), Box<dyn E
         }
     }
 
-    let endpoint = builder()
-        .secret_key(key.secret_key().clone())
-        .alpns(vec![WORKER_ALPN.to_vec()])
-        .bind()
-        .await
-        .map_err(io::Error::other)?;
-    let client = LinkClient::from_endpoint(endpoint.clone());
-    let master: RemoteTicket = args.master.parse().map_err(io::Error::other)?;
-    let peer: EndpointAddr = master.into();
     let service = WorkerService {
         engine,
         config: base.clone(),
@@ -235,6 +247,7 @@ impl ProtocolHandler for WorkerService {
 }
 
 mod files;
+mod layers;
 mod service;
 
 fn local_capacity() -> WorkerReport {
