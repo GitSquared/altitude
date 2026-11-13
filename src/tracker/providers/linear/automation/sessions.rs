@@ -11,6 +11,10 @@ use super::*;
 pub struct SessionStanding {
     pub can_receive: bool,
     pub never_answered: bool,
+    // When the operator made the session. A tracker retries a delivery its endpoint
+    // could not take, and the retry arrives looking new, so this is the only thing
+    // that tells a delegation from a replay of one.
+    pub made_at_ms: Option<i64>,
 }
 
 impl LinearAutomation {
@@ -106,6 +110,14 @@ impl LinearAutomation {
         Ok(SessionStanding {
             can_receive: !dismissed && !matches!(status, "stopping" | "error" | "stale"),
             never_answered: session.get("lastAgentReplyAt").is_none_or(Value::is_null),
+            made_at_ms: session
+                .get("createdAt")
+                .and_then(Value::as_str)
+                .and_then(|created| {
+                    chrono::DateTime::parse_from_rfc3339(created)
+                        .ok()
+                        .map(|at| at.timestamp_millis())
+                }),
         })
     }
 

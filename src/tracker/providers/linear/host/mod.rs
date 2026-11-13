@@ -33,6 +33,14 @@ mod webhook;
 // issue delegated weeks ago stays a record rather than becoming work again.
 const STALE_DELEGATION_MS: i64 = 48 * 60 * 60 * 1000;
 
+// How late a delegation may arrive and still be the operator's news. A tracker
+// retries a delivery its endpoint could not take, and the retry carries the moment it
+// was retried rather than the moment the operator asked — one such replay stopped a
+// task that was working and started a second one from nothing, three times in a row.
+// Past this the delegation belongs to the sweep, which has its own patience for work
+// the webhook never brought.
+const FRESH_DELEGATION_MS: i64 = 5 * 60 * 1000;
+
 const WEBHOOK_ROUTE: &str = "/altitude/linear/webhook";
 
 const MAX_WEBHOOK_BYTES: usize = 1024 * 1024;

@@ -247,6 +247,47 @@ impl RemoteTracker {
         {
             return Ok(());
         }
+        // A delegation is news while it is new. A tracker retries a delivery its
+        // endpoint could not take, and the retry carries the moment it was retried:
+        // three delegations made while this machine had no public address arrived
+        // hours later, looking new, and each one stopped the task that was working on
+        // the issue. What is older than that is the sweep's to pick up, and a session
+        // the operator closed is one they said nothing more belongs in.
+        let standing = match self
+            .config
+            .automation
+            .session_standing(&event.session_id)
+            .await
+        {
+            Ok(standing) => standing,
+            // A tracker that cannot be asked is not a delegation to act on, because
+            // acting on a guess here stops work that is running.
+            Err(error) => {
+                tracing::debug!(
+                    session = %event.session_id,
+                    %error,
+                    "could not ask what a delegated session is like"
+                );
+                return Ok(());
+            }
+        };
+        if !standing.can_receive {
+            tracing::info!(
+                session = %event.session_id,
+                "a session the operator closed takes no delegation"
+            );
+            return Ok(());
+        }
+        if !standing
+            .made_at_ms
+            .is_some_and(|made| now_ms() - made <= FRESH_DELEGATION_MS)
+        {
+            tracing::info!(
+                session = %event.session_id,
+                "a delegation the tracker delivered again is not news"
+            );
+            return Ok(());
+        }
         self.delegate(issue_id, &event.session_id, author, label, host)
             .await
     }
@@ -388,6 +429,16 @@ impl RemoteTracker {
                 "a delegation arrived for work already on this machine"
             );
             return Ok(());
+        }
+
+        // A session the operator closed takes nothing more: Linear accepts an
+        // activity for one and then shows it nowhere, so work started here is work
+        // nobody is told about. This is also what tells the sweep that the session it
+        // adopted is closed, because it answers a refusal by opening one of its own.
+        if let Ok(standing) = self.config.automation.session_standing(session_id).await
+            && !standing.can_receive
+        {
+            return Err(format!("the session {session_id} takes no new work"));
         }
 
         // A different session on an issue that already has work is a
