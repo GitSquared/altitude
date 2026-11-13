@@ -150,7 +150,7 @@ impl App {
         }
         if matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
             if self.signal_plan_tabs {
-                self.signal_plan_open = !self.signal_plan_open;
+                self.signal_plan_open.toggle();
             }
             return;
         }
@@ -218,7 +218,7 @@ impl App {
             KeyCode::Char('y') if self.signal_focus == SignalFocus::Detail => {
                 self.copy_signal_message();
             }
-            KeyCode::Char('p') => self.signal_plan_open = !self.signal_plan_open,
+            KeyCode::Char('p') => self.signal_plan_open.toggle(),
             KeyCode::Char('n') if self.remote_signals.is_none() => {
                 if let Some(task_id) = self.signal_task_id.clone() {
                     let agent = self.signal_agent_label();

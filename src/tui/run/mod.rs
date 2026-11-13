@@ -318,7 +318,7 @@ where
         ) || app.signal_composer.is_some()
             || app.panel.form.is_some();
         if keys_enhanced != wants_enhanced {
-            keys_enhanced = !keys_enhanced;
+            keys_enhanced.toggle();
             if keys_enhanced {
                 execute!(
                     io::stdout(),
