@@ -35,6 +35,8 @@ pub(crate) struct CacheFs {
     owner: String,
     project: String,
     handle: Handle,
+    // The filesystem's own runtime, kept alive as long as the session is.
+    runtime: Option<tokio::runtime::Runtime>,
     paths: HashMap<u64, String>,
     inos: HashMap<String, u64>,
     next: u64,
@@ -57,6 +59,7 @@ impl CacheFs {
             client,
             peer,
             token,
+            runtime: None,
             owner,
             project,
             handle,
@@ -510,7 +513,18 @@ impl CacheFs {
 
 // Mount the cache at a path the sandbox already mounts. The session unmounts when
 // the returned handle drops.
-pub(crate) fn mount(fs: CacheFs, mountpoint: &Path) -> Result<BackgroundSession, String> {
+//
+// The filesystem runs itself: its calls to the master happen on a runtime of its own,
+// created here and moved into the session. Borrowing this process's runtime would mean
+// that whichever thread is waiting on a cache read — the one that has to answer the FUSE
+// request — is the same thread the request needs, which is a deadlock with no timeout.
+pub(crate) fn mount(mut fs: CacheFs, mountpoint: &Path) -> Result<BackgroundSession, String> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| error.to_string())?;
+    fs.handle = runtime.handle().clone();
+    fs.runtime = Some(runtime);
     let options = [
         MountOption::FSName("altitude-cache".to_owned()),
         MountOption::DefaultPermissions,
