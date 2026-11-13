@@ -363,16 +363,7 @@ impl SandboxPlan {
         // The directories first: a managed file is written into one, and a file
         // mount's source is written below before it is resolved.
         //
-        // Except the project cache, which on a host is a filesystem this machine answers
-        // for over the link: every syscall on it becomes a network call that this one
-        // thread has to drive, so making its directories here waits on itself. The mount
-        // creates what the sandbox reaches, and the sandbox's own processes do their
-        // filesystem work on another thread.
-        let cache = config.project_cache_dir(&self.project.id);
         for mount in &self.options.mounts {
-            if mount.host_path.starts_with(&cache) {
-                continue;
-            }
             tracing::info!(
                 path = %mount.host_path.display(),
                 guest = %mount.guest_path,

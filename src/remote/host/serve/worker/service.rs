@@ -89,45 +89,20 @@ impl WorkerService {
     // Mount the master's cache for this project where the sandbox will look for it.
     // A host whose owner is not named, or whose master serves no cache, simply
     // builds without one.
-    #[cfg(target_os = "linux")]
-    fn mount_cache(&self, id: &str, owner: &str, project: &str) -> Result<(), String> {
-        if owner.is_empty() {
-            return Ok(());
-        }
-        let mountpoint = self.config.project_cache_dir(project);
-        fs::create_dir_all(&mountpoint).map_err(|error| error.to_string())?;
-        let cache = CacheFs::new(
-            self.client.clone(),
-            self.master.clone(),
-            self.token.clone(),
-            owner.to_owned(),
-            project.to_owned(),
-            Handle::current(),
-        );
-        tracing::info!(project, mountpoint = %mountpoint.display(), "mounting the project cache");
-        let session = cache::mount(cache, &mountpoint)?;
-        tracing::info!(project, "the project cache is mounted");
-        if let Ok(mut caches) = self.caches.lock() {
-            caches.insert(id.to_owned(), session);
-        }
+    // The project cache is a directory on this host, empty until an export fills it: a
+    // task that finds it cold is slower, which is all a cache can cost. The network
+    // filesystem this used to mount is gone — it made every read a call, and a call that
+    // could be answered only by the thread waiting on it.
+    // The project cache is a directory on this host, empty until an export fills it: a task
+    // that finds it cold is slower, which is all a cache can cost. The network filesystem
+    // that used to be mounted here made every read a call to the master — and a call only
+    // the thread waiting on it could answer.
+    fn mount_cache(&self, _id: &str, _owner: &str, _project: &str) -> Result<(), String> {
         Ok(())
     }
 
-    // A host that is not Linux cannot make sandboxes, so it never gets here.
-    #[cfg(not(target_os = "linux"))]
-    fn mount_cache(&self, _id: &str, _owner: &str, _project: &str) -> Result<(), String> {
-        Err("the network cache is only available on Linux hosts".to_owned())
-    }
-
-    #[cfg(target_os = "linux")]
-    fn unmount_cache(&self, id: &str) {
-        if let Ok(mut caches) = self.caches.lock() {
-            caches.remove(id);
-        }
-    }
-
-    #[cfg(not(target_os = "linux"))]
     fn unmount_cache(&self, _id: &str) {}
+
     pub(super) async fn dispatch(&self, call: WorkerCall) -> WorkerReply {
         match call {
             WorkerCall::Create {
