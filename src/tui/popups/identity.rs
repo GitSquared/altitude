@@ -142,7 +142,7 @@ impl GitIdentitySetup {
                 GitIdentityDecision::Still
             }
             KeyCode::Char(' ') if self.focus == GitIdentityField::Sign => {
-                self.signs = !self.signs;
+                self.signs.toggle();
                 GitIdentityDecision::Still
             }
             KeyCode::Enter => GitIdentityDecision::Save {

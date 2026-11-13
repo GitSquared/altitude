@@ -229,7 +229,7 @@ impl VcsProvider for GitHub {
             .or_else(|| repository.strip_prefix("http://github.com/"))
             .or_else(|| repository.strip_prefix("git@github.com:"))
             .unwrap_or(repository);
-        let short = short.strip_suffix(".git").unwrap_or(short);
+        let short = short.trim_suffix(".git");
         (!short.trim().is_empty()).then(|| short.trim().to_owned())
     }
 

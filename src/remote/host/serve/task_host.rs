@@ -9,12 +9,13 @@ use std::{
     collections::HashSet,
     fs, io,
     io::{Read, Seek, SeekFrom},
+    mem::DropGuard,
     sync::Arc,
 };
 
 use crate::task::TaskExecutionPauseReason;
 use iroh::EndpointId;
-use tokio::{sync::watch, task::spawn_blocking};
+use tokio::task::spawn_blocking;
 
 use crate::remote::Handover;
 
@@ -32,17 +33,6 @@ use super::OwnTasks;
 use super::run::{prepare_projects, wait_until_ready};
 use super::transfer::{PreparedTransfer, WatchedCollect, export_task, transfer_committed};
 use crate::remote::transfer::TransferUpdate;
-
-// Says the machine can be given work again, however the build it was announcing
-// ended. A build is announced through a value that outlives it, so the reset has
-// to be something the announcement cannot outlive.
-struct PhaseWhileBuilding<'a>(&'a watch::Sender<Phase>);
-
-impl Drop for PhaseWhileBuilding<'_> {
-    fn drop(&mut self) {
-        self.0.send_replace(Phase::Ready);
-    }
-}
 
 impl TaskHost for OwnTasks {
     fn signal_threads(
@@ -444,7 +434,12 @@ impl TaskHost for OwnTasks {
             // a word that never moves again, and "installing tools" with no end
             // reads as a hang as long as the machine stays up.
             let built = {
-                let _building = PhaseWhileBuilding(&phase);
+                // Says the machine can be given work again, however the build it was
+                // announcing ended. A build is announced through a value that outlives
+                // it, so the reset has to be something the announcement cannot outlive.
+                let _building = DropGuard::new(&phase, |phase| {
+                    phase.send_replace(Phase::Ready);
+                });
                 prepare_projects(
                     &tasks,
                     &owner,

@@ -167,7 +167,7 @@ impl App {
                 }
                 KeyCode::Enter | KeyCode::Char(' ') if form.focus == Focus::Accept => {
                     if form.has_tracker() {
-                        form.accepts_delegated_work = !form.accepts_delegated_work;
+                        form.accepts_delegated_work.toggle();
                     }
                 }
                 // A pill opens its list, the way a pill does everywhere else.

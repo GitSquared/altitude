@@ -35,7 +35,7 @@ struct Version {
 
 impl Version {
     fn parse(text: &str) -> Option<Self> {
-        let text = text.trim().strip_prefix('v').unwrap_or(text.trim());
+        let text = text.trim().trim_prefix('v');
         // Prerelease and build suffixes do not change the wire protocol.
         let release_version = text.split(['-', '+']).next()?;
         let mut components = release_version.split('.');

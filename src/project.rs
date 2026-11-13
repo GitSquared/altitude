@@ -290,7 +290,7 @@ pub fn repository_display(provider: VcsProviderKind, repository: &str) -> Option
 
 pub fn normalize_repository(value: &str) -> Result<String, ProjectError> {
     let trimmed = value.trim().trim_end_matches('/');
-    let trimmed = trimmed.strip_suffix(".git").unwrap_or(trimmed);
+    let trimmed = trimmed.trim_suffix(".git");
     let invalid = |why: &str| Err(ProjectError(format!("repository {value:?} {why}")));
     if trimmed.is_empty() {
         return invalid("is empty");
