@@ -355,6 +355,10 @@ impl SandboxPlan {
     }
 
     fn initialize(&mut self, config: &Config) -> Result<(), IsolationError> {
+        tracing::info!(
+            mounts = self.options.mounts.len(),
+            "preparing the sandbox's directories"
+        );
         private_directory(config.data_dir())?;
         // The directories first: a managed file is written into one, and a file
         // mount's source is written below before it is resolved.

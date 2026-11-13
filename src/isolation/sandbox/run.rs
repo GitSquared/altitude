@@ -143,17 +143,16 @@ pub(crate) async fn create(
     progress: &dyn EnvironmentProgressSink,
 ) -> Result<(), IsolationError> {
     plan.initialize(config)?;
+    tracing::info!(sandbox = %id, "the sandbox's directories are prepared");
     let path = match snapshot {
         Some(SnapshotSource::Capsule(path)) => path,
         Some(SnapshotSource::Environment(path)) => path,
         None => {
             let view = plan.layer_view();
-            engine
-                .ensure_base(plan.layers, view, progress)
-                .await?
-                .path
-                .to_string_lossy()
-                .into_owned()
+            tracing::info!(sandbox = %id, "ensuring the installs layer");
+            let base = engine.ensure_base(plan.layers, view, progress).await?;
+            tracing::info!(sandbox = %id, "the installs layer is there");
+            base.path.to_string_lossy().into_owned()
         }
     };
     let relay = plan
@@ -162,9 +161,11 @@ pub(crate) async fn create(
         .iter()
         .any(|route| route.guest_port == PORT_RELAY_GUEST_PORT);
     plan.options.snapshot_path = Some(path);
+    tracing::info!(sandbox = %id, "opening the sandbox");
     engine
         .create(id.clone(), plan.options, kind.purpose())
         .await?;
+    tracing::info!(sandbox = %id, "the sandbox is open");
     let mut command = String::from("set -eu\n");
     command.push_str(&opener_script());
     if relay {
@@ -181,6 +182,7 @@ pub(crate) async fn create(
     if kind == SandboxKind::Task {
         command.push_str(&project_scripts(&plan.project)?);
     }
+    tracing::info!(sandbox = %id, "setting up the sandbox's mounts and project");
     if let Err(error) = run_setup(engine, id.clone(), command).await {
         if let Err(cleanup_error) = engine.remove(id).await {
             tracing::warn!(%cleanup_error, "could not remove sandbox after its directory setup failed");

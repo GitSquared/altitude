@@ -104,7 +104,9 @@ impl WorkerService {
             project.to_owned(),
             Handle::current(),
         );
+        tracing::info!(project, mountpoint = %mountpoint.display(), "mounting the project cache");
         let session = cache::mount(cache, &mountpoint)?;
+        tracing::info!(project, "the project cache is mounted");
         if let Ok(mut caches) = self.caches.lock() {
             caches.insert(id.to_owned(), session);
         }
@@ -280,6 +282,7 @@ impl WorkerService {
         else {
             return WorkerReply::Failed("not a provision".into());
         };
+        tracing::info!("a provision arrived; writing its profiles");
         let began = Instant::now();
         match write_profiles_off_thread(self.config.clone(), profiles).await {
             Ok((files, bytes)) => tracing::info!(
@@ -305,11 +308,17 @@ impl WorkerService {
             Err(error) => return WorkerReply::Failed(error.to_string()),
         };
         let channels = vsock.clone();
-        match self
+        tracing::info!(sandbox = %id, "composing and creating the sandbox");
+        let outcome = self
             .engine
             .provision(id.clone(), snapshot, project, recipes, vsock, &Unwatched)
-            .await
-        {
+            .await;
+        tracing::info!(
+            sandbox = %id,
+            ok = outcome.is_ok(),
+            "the sandbox is made"
+        );
+        match outcome {
             Ok(()) => {
                 self.start_channels(&id, &channels);
                 WorkerReply::Ok
