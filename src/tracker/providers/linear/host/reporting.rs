@@ -997,8 +997,8 @@ impl RemoteTracker {
 // age is what tells a slow wait apart from one nothing is going to end.
 fn queue_notice_line(state: &str, since: Instant) -> String {
     match waited_words(since.elapsed()) {
-        Some(waited) => format!("{state} · {waited}."),
-        None => format!("{state}."),
+        Some(waited) => format!("{state} · {waited}"),
+        None => state.to_owned(),
     }
 }
 

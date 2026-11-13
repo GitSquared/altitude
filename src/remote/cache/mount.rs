@@ -519,7 +519,11 @@ impl CacheFs {
 // that whichever thread is waiting on a cache read — the one that has to answer the FUSE
 // request — is the same thread the request needs, which is a deadlock with no timeout.
 pub(crate) fn mount(mut fs: CacheFs, mountpoint: &Path) -> Result<BackgroundSession, String> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    // Its own thread, not a runtime the FUSE thread would have to drive: the caller
+    // blocks in a syscall that only this filesystem can answer, so the answer has to be
+    // made somewhere the caller is not.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
         .enable_all()
         .build()
         .map_err(|error| error.to_string())?;
