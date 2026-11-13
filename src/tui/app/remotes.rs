@@ -469,8 +469,8 @@ impl App {
         self.transfer.as_ref().map(TransferView::progress)
     }
 
-    /// The take over that was under way finished, or it did not: either way it is no
-    /// longer pending, and a task that arrived stays hidden on the machine it left.
+    // The take over that was under way finished, or it did not: either way it is no
+    // longer pending, and a task that arrived stays hidden on the machine it left.
     pub(in crate::tui) fn settle_take(&mut self, arrived: bool) {
         let Some((address, id)) = self.pending_take.take() else {
             return;

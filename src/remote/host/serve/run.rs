@@ -555,9 +555,9 @@ pub(super) async fn wait_until_ready(
     }
 }
 
-/// Build the environment each project of a pushed configuration runs in. A first
-/// push builds them from nothing, so each one is what the machine says it is doing
-/// while it lasts.
+// Build the environment each project of a pushed configuration runs in. A first
+// push builds them from nothing, so each one is what the machine says it is doing
+// while it lasts.
 pub(super) async fn prepare_projects(
     tasks: &TaskEventLoop<ServeIsolation>,
     owner: &str,

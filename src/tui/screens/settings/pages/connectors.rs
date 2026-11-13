@@ -195,9 +195,9 @@ pub(crate) fn tracker_connector(state: TrackerState, profile_dir: &Path) -> Conn
     }
 }
 
-/// What a machine says it is doing while it starts itself up, in the words a
-/// client can act on: a download it can watch, a build it should not interrupt,
-/// or the one thing it should do next.
+// What a machine says it is doing while it starts itself up, in the words a
+// client can act on: a download it can watch, a build it should not interrupt,
+// or the one thing it should do next.
 pub(crate) fn starting_up(phase: Option<&Phase>) -> String {
     match phase {
         Some(Phase::BaseImage {

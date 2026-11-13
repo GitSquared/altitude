@@ -293,8 +293,8 @@ where
         });
     }
 
-    /// Hand a borrowed task back to the machine it came from. The interface asks for
-    /// this when the operator leaves; the run ending asks for it too.
+    // Hand a borrowed task back to the machine it came from. The interface asks for
+    // this when the operator leaves; the run ending asks for it too.
     pub fn hand_back(&self, task: Task) {
         let Some(home) = self.sends_home() else {
             return;
