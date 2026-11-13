@@ -104,9 +104,17 @@ impl CacheFs {
             project: self.project.clone(),
             op,
         };
-        self.handle
-            .block_on(self.client.cache_call(self.peer.clone(), &request, body))
-            .map_err(|_| EIO)
+        let answered =
+            self.handle
+                .block_on(self.client.cache_call(self.peer.clone(), &request, body));
+        match &answered {
+            Ok((CacheReply::Failed(reason), _)) => {
+                tracing::warn!(%reason, ?op, "the master refused a cache call")
+            }
+            Err(error) => tracing::warn!(%error, ?op, "a cache call did not reach the master"),
+            Ok(_) => {}
+        }
+        answered.map_err(|_| EIO)
     }
 
     fn attr(&mut self, path: &str, attr: &CacheAttr, uid: u32, gid: u32) -> FileAttr {
