@@ -229,6 +229,18 @@ pub(super) async fn run_step(
 // the guest paths mean the sandbox's files, and a namespace that outlived the
 // command would have to be kept alive by something. The mounts cost nothing to
 // repeat, and a sandbox that is swept leaves nothing mounted.
+// Where the machine's `/etc/resolv.conf` lands in a sandbox's view, when it is a symlink
+// to somewhere the view does not carry.
+fn resolver_guest_path() -> Option<PathBuf> {
+    let target = fs::read_link("/etc/resolv.conf").ok()?;
+    let absolute = if target.is_absolute() {
+        target
+    } else {
+        Path::new("/etc").join(target)
+    };
+    Some(absolute)
+}
+
 fn mount_script(root: &Path, record: &SandboxRecord, home: &Path) -> String {
     let mut script = String::from("set -eu\n");
     let quote = |path: &Path| shell_quote(&path.to_string_lossy());
@@ -241,6 +253,19 @@ fn mount_script(root: &Path, record: &SandboxRecord, home: &Path) -> String {
         "mount --rbind /usr {}\n",
         quote(&root.join("usr"))
     ));
+    // The machine's resolver, at the path the view's `/etc/resolv.conf` points to. That
+    // file is a symlink into `/run`, which a sandbox has its own of, so a view that only
+    // carries `/etc` carries a resolver that resolves nothing — and a layer's first step
+    // that downloads anything fails with `could not resolve host`.
+    if let Some(guest) = resolver_guest_path() {
+        let target = target(&guest.to_string_lossy());
+        script.push_str(&format!(
+            "mkdir -p {}\ntouch {}\nmount --bind /etc/resolv.conf {}\n",
+            quote(target.parent().unwrap_or(root)),
+            quote(&target),
+            quote(&target)
+        ));
+    }
     script.push_str(&format!(
         "mount --rbind /etc {}\n",
         quote(&root.join("etc"))
