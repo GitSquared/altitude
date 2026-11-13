@@ -1,6 +1,7 @@
 use std::{
     fmt,
     fs::{self, File, FileTimes, OpenOptions},
+    io,
     io::{ErrorKind, Read, Seek, SeekFrom, Write},
     os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt, symlink},
     path::{Component, Path, PathBuf},
@@ -37,46 +38,45 @@ impl CacheService {
         &self.token
     }
 
-    fn root(&self, owner: &str, project: &str) -> Result<PathBuf, String> {
-        let scoped = self
-            .config
-            .for_operator(owner)
-            .map_err(|error| error.to_string())?;
+    fn root(&self, owner: &str, project: &str) -> Result<PathBuf, io::Error> {
+        let scoped = self.config.for_operator(owner).map_err(io::Error::other)?;
         let root = scoped.project_cache_dir(project);
         // The root itself is created here, so every later confinement can canonicalize.
-        fs::create_dir_all(&root).map_err(|error| error.to_string())?;
-        root.canonicalize().map_err(|error| error.to_string())
+        fs::create_dir_all(&root).map_err(io::Error::other)?;
+        root.canonicalize().map_err(io::Error::other)
     }
 
     // Where a request's path lands, confined to `root`. `follow` canonically
     // resolves the leaf, so a symlink inside the cache cannot read or write outside
     // it; without it the parent is resolved and the leaf is only joined.
-    fn resolve(root: &Path, path: &str, follow: bool) -> Result<PathBuf, String> {
+    fn resolve(root: &Path, path: &str, follow: bool) -> Result<PathBuf, io::Error> {
         let relative = Path::new(path);
         if relative.is_absolute()
             || relative
                 .components()
                 .any(|part| !matches!(part, Component::Normal(_) | Component::CurDir))
         {
-            return Err(format!("{path:?} is not a path inside the cache"));
+            return Err(io::Error::other(format!(
+                "{path:?} is not a path inside the cache"
+            )));
         }
         let joined = root.join(relative);
         let candidate = if follow {
-            joined.canonicalize().map_err(|error| error.to_string())?
+            joined.canonicalize().map_err(io::Error::other)?
         } else {
             let parent = joined
                 .parent()
-                .ok_or_else(|| format!("{path:?} has no parent"))?
+                .ok_or_else(|| io::Error::other(format!("{path:?} has no parent")))?
                 .canonicalize()
-                .map_err(|error| error.to_string())?;
+                .map_err(io::Error::other)?;
             parent.join(
                 joined
                     .file_name()
-                    .ok_or_else(|| format!("{path:?} names nothing"))?,
+                    .ok_or_else(|| io::Error::other(format!("{path:?} names nothing")))?,
             )
         };
         if !candidate.starts_with(root) {
-            return Err(format!("{path:?} is outside the cache"));
+            return Err(io::Error::other(format!("{path:?} is outside the cache")));
         }
         Ok(candidate)
     }
@@ -84,7 +84,10 @@ impl CacheService {
     pub(crate) fn answer(&self, request: &CacheRequest, body: &[u8]) -> (CacheReply, Vec<u8>) {
         match self.perform(request, body) {
             Ok((reply, bytes)) => (reply, bytes),
-            Err(error) => (CacheReply::Failed(error), Vec::new()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                (CacheReply::Missing, Vec::new())
+            }
+            Err(error) => (CacheReply::Failed(error.to_string()), Vec::new()),
         }
     }
 
@@ -92,7 +95,7 @@ impl CacheService {
         &self,
         request: &CacheRequest,
         body: &[u8],
-    ) -> Result<(CacheReply, Vec<u8>), String> {
+    ) -> Result<(CacheReply, Vec<u8>), io::Error> {
         let root = self.root(&request.owner, &request.project)?;
         match &request.op {
             CacheOp::Getattr { path } => {
@@ -111,11 +114,11 @@ impl CacheService {
                         .write(true)
                         .open(&target)
                         .and_then(|file| file.set_len(*size))
-                        .map_err(|error| error.to_string())?;
+                        .map_err(io::Error::other)?;
                 }
                 if let Some(mode) = mode {
                     fs::set_permissions(&target, fs::Permissions::from_mode(*mode))
-                        .map_err(|error| error.to_string())?;
+                        .map_err(io::Error::other)?;
                 }
                 if let Some(mtime_ms) = mtime_ms {
                     set_mtime(&target, *mtime_ms)?;
@@ -133,11 +136,11 @@ impl CacheService {
                     Err(error) if error.kind() == ErrorKind::NotFound => {
                         return Ok((CacheReply::Missing, Vec::new()));
                     }
-                    Err(error) => return Err(error.to_string()),
+                    Err(error) => return Err(io::Error::other(error)),
                 };
                 let mut entries = Vec::new();
                 for entry in directory {
-                    let entry = entry.map_err(|error| error.to_string())?;
+                    let entry = entry.map_err(io::Error::other)?;
                     let name = entry.file_name().to_string_lossy().into_owned();
                     if let Ok(Some(attr)) = attr_of(&entry.path(), false) {
                         entries.push((name, attr));
@@ -148,11 +151,11 @@ impl CacheService {
             }
             CacheOp::Read { path, offset, size } => {
                 let target = Self::resolve(&root, path, true)?;
-                let mut file = File::open(&target).map_err(|error| error.to_string())?;
+                let mut file = File::open(&target).map_err(io::Error::other)?;
                 file.seek(SeekFrom::Start(*offset))
-                    .map_err(|error| error.to_string())?;
+                    .map_err(io::Error::other)?;
                 let mut bytes = vec![0u8; *size as usize];
-                let read = file.read(&mut bytes).map_err(|error| error.to_string())?;
+                let read = file.read(&mut bytes).map_err(io::Error::other)?;
                 bytes.truncate(read);
                 let len = bytes.len() as u32;
                 Ok((CacheReply::Data { len }, bytes))
@@ -162,10 +165,10 @@ impl CacheService {
                 let mut file = OpenOptions::new()
                     .write(true)
                     .open(&target)
-                    .map_err(|error| error.to_string())?;
+                    .map_err(io::Error::other)?;
                 file.seek(SeekFrom::Start(*offset))
-                    .map_err(|error| error.to_string())?;
-                file.write_all(body).map_err(|error| error.to_string())?;
+                    .map_err(io::Error::other)?;
+                file.write_all(body).map_err(io::Error::other)?;
                 Ok((
                     CacheReply::Written {
                         len: body.len() as u32,
@@ -180,9 +183,9 @@ impl CacheService {
             }
             CacheOp::Mkdir { path, mode } => {
                 let target = Self::resolve(&root, path, false)?;
-                fs::create_dir(&target).map_err(|error| error.to_string())?;
+                fs::create_dir(&target).map_err(io::Error::other)?;
                 fs::set_permissions(&target, fs::Permissions::from_mode(*mode))
-                    .map_err(|error| error.to_string())?;
+                    .map_err(io::Error::other)?;
                 Ok((CacheReply::Ok, Vec::new()))
             }
             CacheOp::Unlink { path } => {
@@ -192,7 +195,7 @@ impl CacheService {
                     Err(error) if error.kind() == ErrorKind::NotFound => {
                         Ok((CacheReply::Missing, Vec::new()))
                     }
-                    Err(error) => Err(error.to_string()),
+                    Err(error) => Err(io::Error::other(error)),
                 }
             }
             CacheOp::Rmdir { path } => {
@@ -202,23 +205,23 @@ impl CacheService {
                     Err(error) if error.kind() == ErrorKind::NotFound => {
                         Ok((CacheReply::Missing, Vec::new()))
                     }
-                    Err(error) => Err(error.to_string()),
+                    Err(error) => Err(io::Error::other(error)),
                 }
             }
             CacheOp::Rename { from, to } => {
                 let source = Self::resolve(&root, from, false)?;
                 let target = Self::resolve(&root, to, false)?;
-                fs::rename(&source, &target).map_err(|error| error.to_string())?;
+                fs::rename(&source, &target).map_err(io::Error::other)?;
                 Ok((CacheReply::Ok, Vec::new()))
             }
             CacheOp::Symlink { target, path } => {
                 let link = Self::resolve(&root, path, false)?;
-                symlink(target, &link).map_err(|error| error.to_string())?;
+                symlink(target, &link).map_err(io::Error::other)?;
                 Ok((CacheReply::Ok, Vec::new()))
             }
             CacheOp::ReadLink { path } => {
                 let target = Self::resolve(&root, path, true)?;
-                let link = fs::read_link(&target).map_err(|error| error.to_string())?;
+                let link = fs::read_link(&target).map_err(io::Error::other)?;
                 Ok((
                     CacheReply::Link(link.to_string_lossy().into_owned()),
                     Vec::new(),
@@ -228,14 +231,14 @@ impl CacheService {
                 let target = Self::resolve(&root, path, true)?;
                 File::open(&target)
                     .and_then(|file| file.sync_all())
-                    .map_err(|error| error.to_string())?;
+                    .map_err(io::Error::other)?;
                 Ok((CacheReply::Ok, Vec::new()))
             }
         }
     }
 }
 
-fn create_file(path: &Path, mode: u32) -> Result<(), String> {
+fn create_file(path: &Path, mode: u32) -> Result<(), io::Error> {
     OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -249,22 +252,22 @@ fn create_file(path: &Path, mode: u32) -> Result<(), String> {
                 Err(error)
             }
         })
-        .map_err(|error| error.to_string())
+        .map_err(io::Error::other)
 }
 
-fn set_mtime(path: &Path, mtime_ms: i64) -> Result<(), String> {
+fn set_mtime(path: &Path, mtime_ms: i64) -> Result<(), io::Error> {
     let times =
         FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_millis(mtime_ms.max(0) as u64));
     OpenOptions::new()
         .write(true)
         .open(path)
         .and_then(|file| file.set_times(times))
-        .map_err(|error| error.to_string())
+        .map_err(io::Error::other)
 }
 
 // A path's attributes, or `None` when nothing is there: the mount turns the second
 // into ENOENT rather than an I/O error.
-fn attr_of(path: &Path, follow: bool) -> Result<Option<CacheAttr>, String> {
+fn attr_of(path: &Path, follow: bool) -> Result<Option<CacheAttr>, io::Error> {
     let metadata = match if follow {
         fs::metadata(path)
     } else {
@@ -272,7 +275,7 @@ fn attr_of(path: &Path, follow: bool) -> Result<Option<CacheAttr>, String> {
     } {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error.to_string()),
+        Err(error) => return Err(io::Error::other(error)),
     };
     let kind = if metadata.is_dir() {
         CacheKind::Dir
@@ -293,7 +296,7 @@ fn attr_of(path: &Path, follow: bool) -> Result<Option<CacheAttr>, String> {
     }))
 }
 
-fn attrs_or_missing(path: &Path, follow: bool) -> Result<CacheReply, String> {
+fn attrs_or_missing(path: &Path, follow: bool) -> Result<CacheReply, io::Error> {
     Ok(match attr_of(path, follow)? {
         Some(attr) => CacheReply::Attr(attr),
         None => CacheReply::Missing,

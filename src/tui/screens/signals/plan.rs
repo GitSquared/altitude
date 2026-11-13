@@ -34,7 +34,9 @@ pub(super) fn draw_plan(frame: &mut Frame, area: Rect, app: &mut App) {
         },
     );
     if plan.is_empty() {
-        empty::draw(frame, body, "No plan yet");
+        // The pane kept a row of padding under this one, so the line goes on the
+        // body's first row rather than being centred across both.
+        empty::draw(frame, Rect { height: 1, ..body }, "No plan yet");
         app.signal_plan_scroll_max = 0;
         app.signal_plan_scroll = u16::MAX;
         return;

@@ -52,8 +52,11 @@ pub(super) fn split_plan_and_activity(frame: &mut Frame, area: Rect, app: &mut A
     // What is happening takes the room and how far along it is takes what it needs:
     // the activity is the part that keeps growing, and the plan is a list that fits
     // in as many rows as it has steps. Small steps stay visible below this, and the
-    // plan keeps a floor so a single step is not a sliver.
-    let steps = app.signal_plan().len().max(1) + PANE_TITLE_ROWS as usize;
+    // plan keeps a floor so a single step is not a sliver. An empty plan keeps a row
+    // of padding past its line as well, because a line with nothing under it is
+    // written on the frame's border and reads as cut off.
+    let nothing_planned = usize::from(app.signal_plan().is_empty());
+    let steps = app.signal_plan().len().max(1) + PANE_TITLE_ROWS as usize + nothing_planned;
     let plan_height = u16::try_from(steps)
         .unwrap_or(u16::MAX)
         .min(PLAN_MAX_HEIGHT);
