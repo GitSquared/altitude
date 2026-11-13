@@ -21,6 +21,9 @@ use crate::{
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
+use crate::isolation::worker_protocol::WORKER_ALPN;
+use crate::remote::cache::protocol::CACHE_ALPN;
+use crate::remote::layers::LAYER_ALPN;
 use crate::remote::{
     LinkError, LinkResult,
     announce::{self, Announcement},
@@ -46,9 +49,9 @@ impl Conversation {
     pub(crate) fn alpn(self) -> &'static [u8] {
         match self {
             Self::Link => LINK_ALPN,
-            Self::Worker => crate::isolation::worker_protocol::WORKER_ALPN,
-            Self::Layers => crate::remote::layers::LAYER_ALPN,
-            Self::Cache => crate::remote::cache::protocol::CACHE_ALPN,
+            Self::Worker => WORKER_ALPN,
+            Self::Layers => LAYER_ALPN,
+            Self::Cache => CACHE_ALPN,
         }
     }
 }
