@@ -1,4 +1,4 @@
-use std::{fmt, fs, io::Write, path::Path};
+use std::{collections::HashMap, fmt, fs, io::Write, path::Path, sync::Arc, sync::Mutex};
 
 use crate::remote::InstallationKey;
 use crate::remote::Transfer;
@@ -75,9 +75,17 @@ impl fmt::Display for LinkPath {
     }
 }
 
+// A peer and the conversation being held with it.
+type Conversation = (EndpointId, Vec<u8>);
+
 #[derive(Clone)]
 pub struct LinkClient {
     endpoint: Endpoint,
+    // One connection per peer and conversation, kept for as long as it holds. A dial per
+    // message is a handshake per message, and two handshakes to one peer at the same
+    // moment — a heartbeat and a host's own layer fetch — is what starved a provision:
+    // the second never got a usable path, so its stream was never sent.
+    peers: Arc<Mutex<HashMap<Conversation, Connection>>>,
 }
 
 impl LinkClient {
@@ -86,13 +94,19 @@ impl LinkClient {
             .secret_key(identity.secret_key().clone())
             .bind()
             .await?;
-        Ok(Self { endpoint })
+        Ok(Self {
+            endpoint,
+            peers: Arc::new(Mutex::new(HashMap::new())),
+        })
     }
 
     // An endpoint that also serves: the worker answers the master's calls on the
     // same endpoint it registers over.
     pub(crate) fn from_endpoint(endpoint: Endpoint) -> Self {
-        Self { endpoint }
+        Self {
+            endpoint,
+            peers: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
     pub async fn scan_remotes(&self) -> LinkResult<Scan> {
@@ -387,7 +401,24 @@ impl LinkClient {
     // Which conversation a dial starts is the ALPN, and the three of them are
     // different conversations: a client's tasks, a host's sandboxes, a host's layers.
     async fn dial_alpn(&self, peer: impl Into<EndpointAddr>, alpn: &[u8]) -> LinkResult<Dial> {
-        Ok(Dial(self.endpoint.connect(peer, alpn).await?))
+        let peer = peer.into();
+        let key = (peer.id, alpn.to_vec());
+        if let Some(held) = self
+            .peers
+            .lock()
+            .expect("the link's peer map")
+            .get(&key)
+            .cloned()
+            && held.close_reason().is_none()
+        {
+            return Ok(Dial(held));
+        }
+        let connection = self.endpoint.connect(peer, alpn).await?;
+        self.peers
+            .lock()
+            .expect("the link's peer map")
+            .insert(key, connection.clone());
+        Ok(Dial(connection))
     }
 
     async fn say(
@@ -888,8 +919,5 @@ impl Dial {
     }
 }
 
-impl Drop for Dial {
-    fn drop(&mut self) {
-        self.0.close(0u32.into(), b"done");
-    }
-}
+// The connection outlives this exchange: it is the peer's connection, kept until the
+// peer goes or the endpoint does, and closed with it.

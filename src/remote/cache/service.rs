@@ -9,7 +9,7 @@ use std::{
 };
 
 use iroh::{
-    endpoint::Connection,
+    endpoint::{Connection, RecvStream, SendStream},
     protocol::{AcceptError, ProtocolHandler},
 };
 
@@ -323,14 +323,24 @@ impl fmt::Debug for CacheHandler {
 
 impl ProtocolHandler for CacheHandler {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
-        let Ok((mut send, mut recv)) = connection.accept_bi().await else {
-            return Ok(());
-        };
+        // A mount keeps this connection for its whole life and sends every read, stat
+        // and write on it, so each stream is answered as it arrives.
+        loop {
+            let Ok((send, recv)) = connection.accept_bi().await else {
+                return Ok(());
+            };
+            self.answer_cache(send, recv).await;
+        }
+    }
+}
+
+impl CacheHandler {
+    async fn answer_cache(&self, mut send: SendStream, mut recv: RecvStream) {
         let request: CacheRequest = match read_frame(&mut recv).await {
             Ok(request) => request,
             Err(error) => {
                 tracing::warn!(%error, "an unreadable cache call arrived");
-                return Ok(());
+                return;
             }
         };
         if request.token != self.service.token() {
@@ -339,7 +349,7 @@ impl ProtocolHandler for CacheHandler {
                 &CacheReply::Failed("this host does not hold the master's token".into()),
             )
             .await;
-            return Ok(());
+            return;
         }
         let body = match &request.op {
             CacheOp::Write { len, .. } => {
@@ -348,7 +358,7 @@ impl ProtocolHandler for CacheHandler {
                     Err(error) => {
                         let _ =
                             write_frame(&mut send, &CacheReply::Failed(error.to_string())).await;
-                        return Ok(());
+                        return;
                     }
                 }
             }
@@ -356,12 +366,11 @@ impl ProtocolHandler for CacheHandler {
         };
         let (reply, bytes) = self.service.answer(&request, &body);
         if write_frame(&mut send, &reply).await.is_err() {
-            return Ok(());
+            return;
         }
         if !bytes.is_empty() && send.write_all(&bytes).await.is_err() {
-            return Ok(());
+            return;
         }
         let _ = send.finish();
-        Ok(())
     }
 }

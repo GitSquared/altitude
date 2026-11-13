@@ -12,7 +12,7 @@ use fuser::BackgroundSession;
 
 use iroh::{
     EndpointAddr,
-    endpoint::Connection,
+    endpoint::{Connection, RecvStream, SendStream},
     protocol::{AcceptError, ProtocolHandler, Router},
 };
 use tokio::{
@@ -193,11 +193,28 @@ impl fmt::Debug for WorkerService {
 
 impl ProtocolHandler for WorkerService {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
-        let Ok((send, recv)) = connection.accept_bi().await else {
-            return Ok(());
-        };
-        let mut send = send;
-        let mut recv = recv;
+        // The master keeps one connection to this host and sends its calls on it, so a
+        // host answers each stream that arrives until the connection goes.
+        loop {
+            let Ok((send, recv)) = connection.accept_bi().await else {
+                return Ok(());
+            };
+            if let Err(error) = self.answer_call(send, recv).await {
+                tracing::warn!(%error, "a worker call went wrong");
+            }
+        }
+    }
+}
+
+// A call that went wrong in a way worth saying and then carrying on with.
+type WorkerCallError = dyn Error + Send + Sync;
+
+impl WorkerService {
+    async fn answer_call(
+        &self,
+        mut send: SendStream,
+        mut recv: RecvStream,
+    ) -> Result<(), Box<WorkerCallError>> {
         let request: WorkerRequest = match read_frame(&mut recv).await {
             Ok(request) => request,
             Err(error) => {

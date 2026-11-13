@@ -136,16 +136,18 @@ impl fmt::Debug for LinkHandler {
 
 impl ProtocolHandler for LinkHandler {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
-        // One request per connection. Reuse is a later concern; keeping the
-        // exchange bounded makes the spike easy to reason about.
-        let Ok((send, recv)) = connection.accept_bi().await else {
-            return Ok(());
-        };
-        if let Err(err) = answer(self, connection.remote_id(), send, recv).await {
-            tracing::warn!(%err, "link stream failed");
+        // A connection carries a conversation, and a conversation is any number of
+        // messages: a host's heartbeats, a client's tasks, a cache's reads. They are
+        // taken one at a time, in the order they arrive, and the connection is the
+        // client's to keep.
+        loop {
+            let Ok((send, recv)) = connection.accept_bi().await else {
+                return Ok(());
+            };
+            if let Err(err) = answer(self, connection.remote_id(), send, recv).await {
+                tracing::warn!(%err, "link stream failed");
+            }
         }
-        connection.closed().await;
-        Ok(())
     }
 }
 

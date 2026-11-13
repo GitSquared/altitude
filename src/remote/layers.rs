@@ -6,7 +6,7 @@ use std::{
 };
 
 use iroh::{
-    endpoint::{Connection, RecvStream},
+    endpoint::{Connection, RecvStream, SendStream},
     protocol::{AcceptError, ProtocolHandler},
 };
 use serde::{Deserialize, Serialize};
@@ -195,14 +195,24 @@ impl fmt::Debug for LayerHandler {
 
 impl ProtocolHandler for LayerHandler {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
-        let Ok((mut send, mut recv)) = connection.accept_bi().await else {
-            return Ok(());
-        };
+        // A host asks for one layer per sandbox and leaves another on the way out, all on
+        // the connection it holds, so each stream is answered as it arrives.
+        loop {
+            let Ok((send, recv)) = connection.accept_bi().await else {
+                return Ok(());
+            };
+            self.answer_layer(send, recv).await;
+        }
+    }
+}
+
+impl LayerHandler {
+    async fn answer_layer(&self, mut send: SendStream, mut recv: RecvStream) {
         let request: LayerRequest = match read_frame(&mut recv).await {
             Ok(request) => request,
             Err(error) => {
                 tracing::warn!(%error, "an unreadable layer call arrived");
-                return Ok(());
+                return;
             }
         };
         if request.token != self.store.token() {
@@ -211,7 +221,7 @@ impl ProtocolHandler for LayerHandler {
                 &LayerReply::Failed("this host does not hold the master's token".into()),
             )
             .await;
-            return Ok(());
+            return;
         }
         match request.op {
             LayerOp::Fetch => match self.store.fresh_archive(&request.environment, &request.tag) {
@@ -222,20 +232,20 @@ impl ProtocolHandler for LayerHandler {
                             &LayerReply::Failed("a stored layer could not be read".into()),
                         )
                         .await;
-                        return Ok(());
+                        return;
                     };
                     if write_frame(&mut send, &LayerReply::Blob { len })
                         .await
                         .is_err()
                     {
-                        return Ok(());
+                        return;
                     }
                     if let Err(error) = copy(&mut archive, &mut send).await {
                         tracing::warn!(%error, "a layer archive did not reach its host");
-                        return Ok(());
+                        return;
                     }
                     let _ = send.finish();
-                    return Ok(());
+                    return;
                 }
                 None => {
                     let _ = write_frame(&mut send, &LayerReply::Missing).await;
@@ -271,7 +281,6 @@ impl ProtocolHandler for LayerHandler {
             }
         }
         let _ = send.finish();
-        Ok(())
     }
 }
 
