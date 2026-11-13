@@ -1,6 +1,6 @@
 use super::ledger::{Cursor, SessionEvent, TerminatedSession};
 use crate::{
-    task::{TaskAsk, TaskAskKind, TaskExecutionPauseReason, TaskHistoryEvent},
+    task::{TaskAsk, TaskAskKind, TaskExecutionPauseReason, TaskExecutionStatus, TaskHistoryEvent},
     tracker::providers::linear::automation::AgentActivityContent,
 };
 use iroh::EndpointId;
@@ -228,17 +228,6 @@ impl RemoteTracker {
         if self.is_terminated(&event.session_id) {
             return Ok(());
         }
-        // A delegation nobody acted on is the hardest thing to see from outside this
-        // machine, so the ones it declines to act on say so where an operator reads.
-        if let Some(report) = self.report_in_play_for_session(&event.session_id) {
-            tracing::info!(
-                issue = %issue_id,
-                session = %event.session_id,
-                task = %report.task_id,
-                "a delegation arrived for a session this machine is already working in"
-            );
-            return Ok(());
-        }
         // The session's creator is the delegation author. A session this app opens is
         // one it opened to report into, and a session another app opens has an app to
         // answer for it: neither has a person to report through, and saying anything
@@ -383,10 +372,14 @@ impl RemoteTracker {
             return Ok(());
         }
         // The same session delivered again is the work already running here; it
-        // must not be stopped and restarted.
+        // must not be stopped and restarted. A task that failed is not running: it
+        // stopped before it could work on the issue, so delegating again is the only
+        // way to ask for it, and treating it as work in progress would leave an issue
+        // nobody could delegate to twice.
         if let Some(work) = host
             .work_for_issue(issue_id.to_owned(), vec![session_id.to_owned()])
             .await?
+            && work.status != TaskExecutionStatus::Failed
         {
             tracing::info!(
                 issue = %issue_id,
