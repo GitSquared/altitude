@@ -1010,19 +1010,10 @@ fn queue_notice_state(standing: &QueueStanding) -> String {
         Some(Start::Provisioning) => {
             return "Starting on the remote · launching an isolated sandbox".to_owned();
         }
-        // A count only where there is a sequence to count: a layer's steps are numbered,
-        // and the stages of starting a worker are not — a machine that makes its own
-        // sandboxes has no worker to number.
-        Some(Start::Building(progress)) if progress.total == 0 => {
-            return format!("Starting on the remote · {}", progress.label);
-        }
+        // No count: what an operator wants is what is being done now, and a number out
+        // of a total that the machine doing its own work would not have is noise.
         Some(Start::Building(progress)) => {
-            return format!(
-                "Starting on the remote · {} · step {} of {}",
-                progress.label,
-                progress.completed + 1,
-                progress.total
-            );
+            return format!("Starting on the remote · {}", progress.label);
         }
         None => {}
     }
