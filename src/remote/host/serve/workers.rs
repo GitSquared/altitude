@@ -37,6 +37,11 @@ const SUPERVISE_INTERVAL: Duration = Duration::from_secs(10);
 const PROVISION_ATTEMPTS: usize = 3;
 const AFTER_FAILURE: Duration = Duration::from_secs(60);
 
+// How long a provisioned host has to join once its script has returned. The script
+// is what starts the host, so by then it is up and dialling; this only bounds a
+// process that came up and died.
+const JOIN_GRACE: Duration = Duration::from_secs(60);
+
 struct ConnectedWorker {
     peer: EndpointAddr,
     capacity: WorkerReport,
@@ -148,7 +153,12 @@ impl WorkerFleet {
             state.demand += 1;
         }
         self.wake.notify_waiters();
-        let deadline = Instant::now() + Duration::from_secs(self.settings.provision_timeout_secs);
+        let began = Instant::now();
+        // Every attempt this machine is entitled to, because a host is minutes: an
+        // image built, a container started, a join. Waiting out one attempt would
+        // fail a sandbox for a build that was going to finish, which is what a
+        // delegation arriving while a remote rebuilds its hosts looks like.
+        let budget = self.host_budget();
         loop {
             {
                 let mut state = self.state.lock().expect("worker fleet lock poisoned");
@@ -159,19 +169,49 @@ impl WorkerFleet {
                     .cloned()
                 {
                     state.assigned.insert(name.clone());
+                    tracing::info!(
+                        worker = %name,
+                        waited_ms = began.elapsed().as_millis() as u64,
+                        "a host took this sandbox"
+                    );
                     return Ok(name);
                 }
+                if state.stopping {
+                    state.demand = state.demand.saturating_sub(1);
+                    return Err("this machine is stopping".to_owned());
+                }
             }
-            if Instant::now() >= deadline {
+            if began.elapsed() >= budget {
                 let mut state = self.state.lock().expect("worker fleet lock poisoned");
                 state.demand = state.demand.saturating_sub(1);
-                return Err("no isolation worker joined in time".to_owned());
+                return Err(format!(
+                    "no isolation worker joined in {} minutes; the provision script ran and \
+                     its attempts are spent",
+                    budget.as_secs() / 60
+                ));
             }
             tokio::select! {
                 _ = time::sleep(Duration::from_millis(250)) => {}
                 _ = self.wake.notified() => {}
             }
         }
+    }
+
+    // The longest this machine can take to make a host and give up on it, which is
+    // what a sandbox waiting for one is waiting for.
+    fn host_budget(&self) -> Duration {
+        let attempts = PROVISION_ATTEMPTS as u32;
+        let scripts = Duration::from_secs(self.settings.provision_timeout_secs) * attempts;
+        let joins = JOIN_GRACE * attempts;
+        let backoffs: Duration = (1..PROVISION_ATTEMPTS).map(provision_backoff).sum();
+        scripts + joins + backoffs
+    }
+
+    // How many sandboxes this machine owes a host to: the ones that want compute and
+    // have not been given it yet.
+    pub(crate) fn sandboxes_waiting_for_a_host(&self) -> usize {
+        let state = self.state.lock().expect("worker fleet lock poisoned");
+        state.demand.saturating_sub(state.assigned.len())
     }
 
     // A sandbox is over, so its host is destroyed rather than reused.
@@ -351,7 +391,7 @@ impl WorkerFleet {
     }
 
     async fn wait_until_joined(&self, name: &str) -> bool {
-        let deadline = Instant::now() + Duration::from_secs(60);
+        let deadline = Instant::now() + JOIN_GRACE;
         loop {
             if self
                 .state

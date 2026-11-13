@@ -301,6 +301,10 @@ impl IsolationEngine for WorkersIsolation {
         self.fleet.capacity().ceiling
     }
 
+    fn is_provisioning(&self) -> bool {
+        self.fleet.sandboxes_waiting_for_a_host() > 0
+    }
+
     fn project_memory_dir(&self, project_id: &str) -> PathBuf {
         // Memory belongs to the master, which owns the task's history; a host is
         // handed it and returns it.
@@ -337,6 +341,7 @@ impl IsolationEngine for WorkersIsolation {
         let profiles = self.profile_bundles(&recipes)?;
         let checkout = checkout_guest(&project);
         self.remember_checkout(&id, checkout.clone());
+        tracing::info!(sandbox = %id, "waiting for a host to carry this sandbox");
         let worker = self.provision_host(&id).await?;
         let call = WorkerCall::Provision {
             id: id.clone(),

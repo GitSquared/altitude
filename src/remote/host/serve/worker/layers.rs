@@ -2,6 +2,8 @@ use std::{env, fs, future::Future, path::PathBuf, pin::Pin};
 
 use iroh::EndpointAddr;
 use tokio::fs::File as AsyncFile;
+use tokio::runtime::Builder;
+use tokio::task::spawn_blocking;
 
 use crate::isolation::HostLayers;
 use crate::remote::LinkClient;
@@ -58,11 +60,25 @@ impl HostLayers for LinkLayers {
             let path = env::temp_dir().join(format!("altitude-layer-{tag}.tar"));
             let sink = AsyncFile::create(&path).await.ok()?;
             let request = self.request(tag, LayerOp::Fetch);
-            match self
-                .client
-                .layer_fetch(self.master.clone(), &request, sink)
-                .await
-            {
+            // This runs inside the call that asked for the sandbox, and the master is
+            // waiting on that call's answer: a dial from here to the machine that is
+            // waiting on us never completes, and both calls die of the silence. A thread
+            // of its own is what takes the dial off the task being awaited.
+            let client = self.client.clone();
+            let master = self.master.clone();
+            let answer = spawn_blocking(move || {
+                let runtime = Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|error| error.to_string())?;
+                runtime.block_on(client.layer_fetch(master, &request, sink))
+            })
+            .await;
+            let answer = match answer {
+                Ok(answer) => answer,
+                Err(error) => Err(error.to_string().into()),
+            };
+            match answer {
                 Ok(true) => Some(path),
                 Ok(false) => {
                     let _ = fs::remove_file(&path);

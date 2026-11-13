@@ -65,6 +65,14 @@ const MAX_TERMINATED: usize = 1024;
 
 const WEBHOOK_MAX_AGE: Duration = Duration::from_secs(300);
 
+// How often the sweep asks the tracker which issues are delegated to this app. The
+// webhook is the fast path, and the only news that can fail to arrive without leaving
+// anything behind to notice: a delivery nobody received is a delegation this machine
+// never hears about, and the thread it was made in sits unanswered until the operator
+// happens to restart the remote. Asking is cheap and the tracker is where a delegation
+// is written down, so the webhook is a shortcut and this is the record.
+const DELEGATION_SWEEP: Duration = Duration::from_secs(5 * 60);
+
 pub struct RemoteTrackerConfig {
     pub automation: Arc<LinearAutomation>,
     pub webhook_secret: Vec<u8>,
@@ -88,6 +96,8 @@ pub struct RemoteTracker {
     started_at_ms: i64,
     refusals: Mutex<HashMap<String, String>>,
     delivered: AtomicBool,
+    // When the delegation sweep is due again. See `sweep_delegations`.
+    delegation_sweep: Mutex<Instant>,
 }
 
 // An error activity ends the session's "working" state, so it says what stopped the
@@ -263,6 +273,7 @@ impl RemoteTracker {
             notify: Notify::new(),
             started_at_ms: now_ms(),
             delivered: AtomicBool::new(false),
+            delegation_sweep: Mutex::new(Instant::now() + DELEGATION_SWEEP),
         }))
     }
 
@@ -279,14 +290,15 @@ impl RemoteTracker {
         self.notify.notify_one();
     }
 
-    // Nothing here runs on a clock. A webhook, a task's history moving, or a moment
-    // something already knows it has to happen at — a delivery that is being retried,
-    // a queue notice that is worth repeating — are the only reasons to do anything,
-    // and until one of them arrives this loop waits.
+    // Nothing here runs on a clock but the delegation sweep. A webhook, a task's
+    // history moving, or a moment something already knows it has to happen at — a
+    // delivery that is being retried, a queue notice that is worth repeating — are the
+    // reasons to do anything, and until one of them arrives this loop waits.
     pub async fn run(self: Arc<Self>, host: Arc<dyn DelegatedWork>) {
-        // The two things that are not events, both of them once: a delegation made
-        // while this machine was not listening left no webhook to find, and a session a
-        // previous run was talking into may have been finished with since.
+        // The two things that are not events, both of them once, before anything else:
+        // a delegation made while this machine was not listening left no webhook to
+        // find, and a session a previous run was talking into may have been finished
+        // with since. The first of the two is also swept on a clock below.
         self.recover_delegations(host.as_ref()).await;
         self.verify_sessions(host.as_ref()).await;
         loop {
@@ -317,6 +329,25 @@ impl RemoteTracker {
         let notice = self.report_queue_standing(host).await;
         self.report_activity(host).await;
         self.poll_reports(host).await;
-        [retry, notice].into_iter().flatten().min()
+        let sweep = self.sweep_delegations(host).await;
+        [retry, notice, sweep].into_iter().flatten().min()
+    }
+
+    // The same recovery this machine does on the way up, on a clock: a delegation the
+    // webhook did not bring is still a delegation, and the issue is where it says so.
+    async fn sweep_delegations(&self, host: &dyn DelegatedWork) -> Option<Instant> {
+        let due = {
+            let mut next = self
+                .delegation_sweep
+                .lock()
+                .expect("delegation sweep lock poisoned");
+            if Instant::now() < *next {
+                return Some(*next);
+            }
+            *next = Instant::now() + DELEGATION_SWEEP;
+            *next
+        };
+        self.recover_delegations(host).await;
+        Some(due)
     }
 }

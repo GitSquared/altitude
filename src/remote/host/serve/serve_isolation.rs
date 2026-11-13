@@ -56,6 +56,13 @@ impl IsolationEngine for ServeIsolation {
         }
     }
 
+    fn is_provisioning(&self) -> bool {
+        match self {
+            Self::Microsandbox(engine) => engine.is_provisioning(),
+            Self::Workers(engine) => engine.is_provisioning(),
+        }
+    }
+
     fn project_memory_dir(&self, project_id: &str) -> PathBuf {
         match self {
             Self::Microsandbox(engine) => engine.project_memory_dir(project_id),
