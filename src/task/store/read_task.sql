@@ -153,10 +153,11 @@ SELECT tasks.id, tasks.agent_kind, tasks.host,
     -- The ask a task is in the middle of, and whether it still wants a person, read
     -- once: the row, the pause notice and the agent's own guard all ask this line
     -- whether it waits on a person, rather than deciding again for themselves.
+    -- The flag leaves as JSON true or false for the reason the usage total gives.
     (SELECT json_object(
          'kind', kind,
          'title', title,
-         'wants_a_person', wants_a_person)
+         'wants_a_person', CASE WHEN wants_a_person THEN json('true') ELSE json('false') END)
      FROM task_operator_signals
      WHERE task_id = tasks.id AND resolved = 0
      ORDER BY raised_at_ms DESC LIMIT 1) AS leading_ask,
