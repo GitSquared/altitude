@@ -211,9 +211,8 @@ impl Terrain {
         heights.resize(stride * (pixel_height + 1), 0.0);
         let field = Field { xs: &self.xs, z };
         let runs = &self.runs[..height];
-        for pixel_row in 0..=pixel_height {
+        for (pixel_row, y) in self.ys.iter().copied().enumerate() {
             let row = (pixel_row / 4).min(height - 1);
-            let y = self.ys[pixel_row];
             fill_run_heights(heights, pixel_row * stride, &runs[row], y, &field);
             // This pixel row is the bottom of one row of cells and the top of the
             // next, so it has to cover both rows' open columns. When both rows are

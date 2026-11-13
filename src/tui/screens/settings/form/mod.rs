@@ -250,7 +250,6 @@ impl Form {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
     pub fn for_project(
         target: Target,
         project: &Project,

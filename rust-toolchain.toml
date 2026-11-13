@@ -1,0 +1,6 @@
+[toolchain]
+# Pinned, because a lint that arrives in a new stable is a red build on whichever
+# runner picked it up first, and the drift is invisible until it is someone's pull
+# request. Bump this deliberately, with the lints it brings.
+channel = "1.100.0"
+components = ["clippy", "rustfmt"]
