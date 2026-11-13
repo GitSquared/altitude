@@ -4,6 +4,7 @@ use std::{
     io::ErrorKind,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
+    time::Instant,
 };
 
 use iroh::EndpointAddr;
@@ -105,10 +106,24 @@ impl WorkersIsolation {
         };
         let body =
             serde_json::to_vec(profiles).map_err(|error| IsolationError::new(error.to_string()))?;
-        self.client
+        tracing::info!(
+            worker,
+            profile_bytes = body.len(),
+            "asking a host for a sandbox"
+        );
+        let began = Instant::now();
+        let answer = self
+            .client
             .worker_provision(peer, &request, &body)
             .await
-            .map_err(|error| IsolationError::new(error.to_string()))
+            .map_err(|error| IsolationError::new(error.to_string()));
+        tracing::info!(
+            worker,
+            elapsed_ms = began.elapsed().as_millis() as u64,
+            ok = answer.is_ok(),
+            "a host answered"
+        );
+        answer
     }
 
     async fn call(&self, id: &str, call: WorkerCall) -> Result<WorkerReply, IsolationError> {

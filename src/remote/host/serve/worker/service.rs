@@ -1,10 +1,11 @@
-use std::{fs, net::Ipv4Addr};
+use std::{fs, net::Ipv4Addr, time::Instant};
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 
 use iroh::endpoint::{RecvStream, SendStream};
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
+use tokio::task::spawn_blocking;
 
 #[cfg(target_os = "linux")]
 use tokio::runtime::Handle;
@@ -279,8 +280,15 @@ impl WorkerService {
         else {
             return WorkerReply::Failed("not a provision".into());
         };
-        if let Err(error) = write_profiles(&self.config, &profiles) {
-            return WorkerReply::Failed(error);
+        let began = Instant::now();
+        match write_profiles_off_thread(self.config.clone(), profiles).await {
+            Ok((files, bytes)) => tracing::info!(
+                files,
+                bytes,
+                elapsed_ms = began.elapsed().as_millis() as u64,
+                "wrote this sandbox's profile files"
+            ),
+            Err(error) => return WorkerReply::Failed(error),
         }
         if let Err(error) = self.mount_cache(&id, &owner, &project.id) {
             return WorkerReply::Failed(error);
@@ -370,6 +378,26 @@ fn rebuild_recipes(
 // The profile files the master pushed with this sandbox, written where the plan
 // will mount the profile. A file's path is relative to the profile's directory and
 // may not climb out of it.
+// A profile is thousands of small files, and this process has one thread to answer the
+// master with: writing them there is a silence the master reads as a dead host.
+async fn write_profiles_off_thread(
+    config: Config,
+    profiles: Vec<WorkerProfile>,
+) -> Result<(usize, u64), String> {
+    spawn_blocking(move || {
+        let files = profiles.iter().map(|profile| profile.files.len()).sum();
+        let bytes = profiles
+            .iter()
+            .flat_map(|profile| profile.files.iter())
+            .map(|(_, contents)| contents.len() as u64)
+            .sum();
+        write_profiles(&config, &profiles)?;
+        Ok((files, bytes))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 fn write_profiles(config: &Config, profiles: &[WorkerProfile]) -> Result<(), String> {
     for profile in profiles {
         let root = config.profile_dir(&profile.profile);

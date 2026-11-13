@@ -242,6 +242,14 @@ impl WorkerFleet {
         let mut state = self.state.lock().expect("worker fleet lock poisoned");
         let mut gone = Vec::new();
         for (name, worker) in &state.connected {
+            // A host this machine has given work to is answering the call it was given,
+            // not going quiet: provisioning a sandbox is minutes of unpacking and
+            // installing, and a heartbeat is a second thing to do. Deleting a host in the
+            // middle of that is how every task failed to start, so the call decides how
+            // this host ends, and a call that cannot finish fails on its own link.
+            if state.assigned.contains(name) {
+                continue;
+            }
             if now.duration_since(worker.last_seen) > WORKER_SILENCE {
                 gone.push(name.clone());
             }

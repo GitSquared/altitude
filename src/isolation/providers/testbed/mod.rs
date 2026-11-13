@@ -3,11 +3,13 @@ use std::{
     path::{Component, Path, PathBuf},
     process::Command,
     sync::{Arc, Mutex},
+    time::Instant,
 };
 
 use serde::{Deserialize, Serialize};
 use tar::{Archive, Builder};
 use tempfile::NamedTempFile;
+use tokio::task::spawn_blocking;
 // `tokio`'s, not `std`'s, because it is held across running a step.
 use tokio::sync::Mutex as LayerBuild;
 
@@ -191,7 +193,7 @@ impl TestbedIsolation {
         if let (Some(layers), Some(tag)) = (&self.layers, installs_tag.as_deref())
             && let Some(archive) = layers.fetch(tag).await
         {
-            match self.restore_home(&archive) {
+            match self.restore_home(&archive).await {
                 Ok(()) => {
                     private_directory(&layer.snapshots_dir)?;
                     fs::write(&marker, b"built\n")
@@ -255,6 +257,12 @@ impl TestbedIsolation {
             environment: view.environment.clone(),
         };
         for (completed, step) in steps.iter().enumerate() {
+            tracing::info!(
+                step = %step.label,
+                completed,
+                total = steps.len(),
+                "building an installs layer"
+            );
             progress.report(EnvironmentProgress {
                 label: step.label.clone(),
                 completed,
@@ -310,22 +318,46 @@ impl TestbedIsolation {
     ) -> Result<(), IsolationError> {
         let entry = self.home_name()?;
         let archive = NamedTempFile::new().map_err(io_error)?;
-        let file = fs::File::create(archive.path()).map_err(io_error)?;
-        let mut builder = Builder::new(file);
-        builder
-            .append_dir_all(&entry, &self.home)
-            .map_err(io_error)?;
-        builder.finish().map_err(io_error)?;
+        let packing = archive.path().to_path_buf();
+        let home = self.home.clone();
+        let began = Instant::now();
+        spawn_blocking(move || -> Result<(), String> {
+            let file = fs::File::create(&packing).map_err(|error| error.to_string())?;
+            let mut builder = Builder::new(file);
+            builder
+                .append_dir_all(&entry, &home)
+                .map_err(|error| error.to_string())?;
+            builder.finish().map_err(|error| error.to_string())
+        })
+        .await
+        .map_err(|error| IsolationError::new(error.to_string()))?
+        .map_err(IsolationError::new)?;
+        tracing::info!(
+            tag,
+            elapsed_ms = began.elapsed().as_millis() as u64,
+            "packed this host's home into a layer"
+        );
         layers.store(tag, archive.path().to_path_buf()).await;
         Ok(())
     }
 
-    fn restore_home(&self, archive: &Path) -> Result<(), IsolationError> {
+    async fn restore_home(&self, archive: &Path) -> Result<(), IsolationError> {
         let parent = self.home_parent()?;
-        let file = fs::File::open(archive).map_err(io_error)?;
-        let mut tar = Archive::new(file);
-        tar.unpack(&parent)
-            .map_err(|error| IsolationError::new(error.to_string()))
+        let stored = archive.to_path_buf();
+        let began = Instant::now();
+        spawn_blocking(move || -> Result<(), String> {
+            let file = fs::File::open(&stored).map_err(|error| error.to_string())?;
+            let mut tar = Archive::new(file);
+            tar.unpack(&parent).map_err(|error| error.to_string())
+        })
+        .await
+        .map_err(|error| IsolationError::new(error.to_string()))?
+        .map_err(IsolationError::new)?;
+        tracing::info!(
+            elapsed_ms = began.elapsed().as_millis() as u64,
+            "unpacked an installs layer into this host's home"
+        );
+        Ok(())
     }
 
     // An archive of the home holds one top-level directory, named after the home
