@@ -251,3 +251,27 @@ where
     }
     Ok(false)
 }
+
+// The senders a loop hands an event handler: the ones an action answers on, so a
+// handler never reaches back into the loop to find them.
+pub(super) struct EventReplies<'a> {
+    pub(super) landings: &'a mpsc::UnboundedSender<Result<String, String>>,
+    pub(super) credentials: &'a mpsc::UnboundedSender<CredentialShellEvent>,
+    pub(super) issues: &'a mpsc::UnboundedSender<IssueReadReply>,
+    pub(super) tracker_connects: &'a mpsc::UnboundedSender<TrackerConnectReply>,
+    pub(super) remote_signals: &'a mpsc::Sender<RemoteSignalsReply>,
+    pub(super) delegations: &'a mpsc::Sender<TaskDelegationReply>,
+    pub(super) sends: &'a mpsc::Sender<SendTaskReply>,
+    pub(super) removals: &'a mpsc::Sender<RemoveTaskReply>,
+    pub(super) repositories: &'a mpsc::UnboundedSender<RepositoryListReply>,
+    pub(super) tracker_scopes: &'a mpsc::UnboundedSender<TrackerScopesReply>,
+}
+
+pub struct Feeds {
+    pub task_execution: mpsc::UnboundedReceiver<TaskExecutionUpdate>,
+    pub watched_tasks: mpsc::UnboundedReceiver<WatchedTasks>,
+    // A task's history moving is also what the tracker back here has to report, and
+    // this is where that is noticed: the queue is drained because something happened,
+    // not because a clock says so.
+    pub tracker_sync: Arc<Notify>,
+}

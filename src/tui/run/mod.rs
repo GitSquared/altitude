@@ -13,7 +13,7 @@ use crossterm::{
     execute,
 };
 use futures_util::StreamExt;
-use ratatui::{DefaultTerminal, buffer::Buffer, layout::Rect, widgets::Clear};
+use ratatui::{DefaultTerminal, buffer::Buffer};
 use tachyonfx::EffectManager;
 use tokio::{
     signal::unix::Signal,
@@ -35,39 +35,16 @@ use super::app::{
     TrackerConnectReply, TrackerScopesReply, WatchedTasks,
 };
 use super::background::terrain;
-use super::popups;
 use super::screens;
-use super::widgets;
 use super::widgets::shimmer::shimmer_clock;
 use crate::credentials::CredentialShellEvent;
 
 mod events;
 mod frame;
 
-use events::handle_event;
-use frame::{Leaving, draw_backdrop, draw_when, exit, place_pictures};
-
-struct EventReplies<'a> {
-    landings: &'a mpsc::UnboundedSender<Result<String, String>>,
-    credentials: &'a mpsc::UnboundedSender<CredentialShellEvent>,
-    issues: &'a mpsc::UnboundedSender<IssueReadReply>,
-    tracker_connects: &'a mpsc::UnboundedSender<TrackerConnectReply>,
-    remote_signals: &'a mpsc::Sender<RemoteSignalsReply>,
-    delegations: &'a mpsc::Sender<TaskDelegationReply>,
-    sends: &'a mpsc::Sender<SendTaskReply>,
-    removals: &'a mpsc::Sender<RemoveTaskReply>,
-    repositories: &'a mpsc::UnboundedSender<RepositoryListReply>,
-    tracker_scopes: &'a mpsc::UnboundedSender<TrackerScopesReply>,
-}
-
-pub struct Feeds {
-    pub task_execution: mpsc::UnboundedReceiver<TaskExecutionUpdate>,
-    pub watched_tasks: mpsc::UnboundedReceiver<WatchedTasks>,
-    // A task's history moving is also what the tracker back here has to report, and
-    // this is where that is noticed: the queue is drained because something happened,
-    // not because a clock says so.
-    pub tracker_sync: Arc<Notify>,
-}
+pub use events::Feeds;
+use events::{EventReplies, handle_event};
+use frame::{Drawing, Leaving, draw_backdrop, draw_when, exit, place_pictures};
 
 pub async fn run<E>(
     terminal: &mut DefaultTerminal,
@@ -368,210 +345,18 @@ where
         // A copied message flashes for a moment and then stops on its own, so the
         // frame is where it ends rather than anything remembering to end it.
         app.expire_message_flash();
-        let painted = draw_when(&mut redraw, terminal, |frame| {
-            let hints = app.hints();
-            let content = widgets::chrome::draw(frame, &hints, app.keyboard_hints());
-            // A screen replaces the grid rather than lying over it, so the grid is
-            // not drawn underneath one. The field is one layer under every screen,
-            // so moving between screens does not restart it or give it a new
-            // origin. Each screen marks the cells it has not covered, and the
-            // field is painted into what is left once everything above it is drawn.
-            // A credential terminal opened from the card sits on the card, not on
-            // the settings list: the card is what asked for it.
-            let first_run = app.foreground.shows_get_started()
-                || app.credentials_over_card()
-                || app.git_identity_over_card();
-            let settings = app.foreground.shows_settings() && !first_run;
-            let screen = settings || app.foreground.shows_signals() || first_run;
-            if screen {
-                frame.render_widget(Clear, content);
+        let painted = draw_when(&mut redraw, terminal, |target| {
+            Drawing {
+                app: &mut app,
+                scan_running: scan.is_some(),
+                keep_snapshot,
+                snapshot: &mut snapshot,
+                modal_cells: &mut modal_cells,
+                leaving: leaving.as_ref(),
+                effects: &mut effects,
+                elapsed,
             }
-            if app.backdrop_animates() {
-                app.terrain.mark(frame.buffer_mut(), content);
-            }
-            if !screen {
-                screens::tasks::draw(frame, content, &mut app);
-            }
-            // What the modal in front occupied, so the transition animates what
-            // was actually drawn rather than a size written down a second time.
-            let mut modal: Option<Rect> = None;
-            if settings {
-                // Fullscreen: it is the screen, not something over it.
-                let view = app.settings_view();
-                let tick = app.animation_tick();
-                modal = Some(screens::settings::draw(
-                    frame,
-                    content,
-                    &mut app.panel,
-                    &view,
-                    tick,
-                    scan.is_some(),
-                    &mut app.settings_targets,
-                ));
-                if let super::app::CredentialShellState::Opening {
-                    progress: Some(progress),
-                    ..
-                } = &app.credential_shell
-                {
-                    widgets::chrome::dim(frame, content);
-                    modal = Some(widgets::loading::draw(
-                        frame,
-                        content,
-                        progress,
-                        app.animation_tick(),
-                    ));
-                }
-                match &app.foreground {
-                    Foreground::IdentitySetup(setup) => setup.draw(frame, content),
-                    Foreground::RenameIdentity(rename) => rename.draw(frame, content, true),
-                    Foreground::GitIdentity(identity) => identity.draw(frame, content),
-                    _ => {}
-                }
-            } else if app.foreground.shows_signals() {
-                // Fullscreen too: it is the screen the operator is reading, not
-                // something laid over the work. A question about a signal is
-                // drawn over it, so the thread it is about stays in view.
-                screens::signals::draw(frame, content, &mut app);
-                modal = Some(content);
-            } else if first_run {
-                let setup = app.setup();
-                let tick = app.animation_tick();
-                if let Foreground::GetStarted(panel) = &mut app.foreground {
-                    screens::get_started::draw(frame, content, panel, &setup, tick);
-                } else if app.git_identity_over_card()
-                    || matches!(app.foreground, Foreground::ImportLogins(_))
-                {
-                    let mut panel = app.started_panel();
-                    screens::get_started::draw(frame, content, &mut panel, &setup, tick);
-                }
-                if let super::app::CredentialShellState::Opening {
-                    progress: Some(progress),
-                    ..
-                } = &app.credential_shell
-                {
-                    widgets::chrome::dim(frame, content);
-                    modal = Some(widgets::loading::draw(
-                        frame,
-                        content,
-                        progress,
-                        app.animation_tick(),
-                    ));
-                }
-                if let Foreground::GitIdentity(identity) = &app.foreground {
-                    identity.draw(frame, content);
-                }
-                modal = modal.or(Some(content));
-            }
-            // A terminal goes over the screen it was opened from, which is the
-            // settings panel for a sign-in and the task list for a task's run. It
-            // is drawn after that screen and before the popups above it.
-            if let Some(shell) = app.open_shell().and_then(|id| app.shells.get(id)) {
-                shell.draw(frame, content);
-            }
-            if let Foreground::Setup(setup) = &mut app.foreground {
-                widgets::chrome::dim(frame, content);
-                let report = setup
-                    .remote_address()
-                    .and_then(|address| app.remote_trackers.get(address))
-                    .map(Vec::as_slice);
-                modal = Some(setup.draw(frame, content, report));
-            }
-            if let Foreground::SignIn(sign_in) = &app.foreground {
-                widgets::chrome::dim(frame, content);
-                modal = Some(sign_in.draw(frame, content));
-            }
-            if let Foreground::Confirm(confirm) = &app.foreground {
-                widgets::chrome::dim(frame, content);
-                modal = Some(confirm.draw(frame, content));
-            }
-            if let Foreground::SendTask(sending) = &app.foreground {
-                widgets::chrome::dim(frame, content);
-                modal = Some(popups::send_task::draw(frame, content, sending));
-            }
-            if let Foreground::NewTask(new_task) = &app.foreground {
-                widgets::chrome::dim(frame, content);
-                modal = Some(popups::new_task::draw(
-                    frame,
-                    content,
-                    new_task,
-                    app.animation_tick(),
-                    &mut app.new_task_targets,
-                ));
-            }
-            if let Foreground::Message(message) = &app.foreground {
-                widgets::chrome::dim(frame, content);
-                modal = Some(popups::message::draw(frame, content, message));
-            }
-            if let Foreground::ImportLogins(import) = &app.foreground {
-                widgets::chrome::dim(frame, content);
-                modal = Some(import.draw(frame, content));
-            }
-            if matches!(app.foreground, Foreground::Keys(_)) {
-                widgets::chrome::dim(frame, content);
-                modal = Some(widgets::chrome::draw_help(
-                    frame,
-                    content,
-                    &super::keys::help_sections(),
-                    &mut app.help_scroll,
-                ));
-            }
-            // A transfer in flight is the one wait with something to count.
-            if let Some(progress) = app.transfer_progress() {
-                widgets::chrome::dim(frame, content);
-                modal = Some(widgets::progress::draw(
-                    frame,
-                    content,
-                    &progress,
-                    app.animation_tick(),
-                ));
-            }
-            // A message is read over whatever asked for it, including a wait.
-            if let Some(alert) = &app.alert {
-                widgets::chrome::dim(frame, content);
-                modal = Some(widgets::alert::draw(frame, content, alert));
-            }
-            // A question about an account holds the screen until it is answered.
-            if let Some((title, question, answers)) = app.tracker_conflict_question() {
-                widgets::chrome::dim(frame, content);
-                let answers: Vec<&str> = answers;
-                modal = Some(widgets::question::draw(
-                    frame,
-                    content,
-                    &title,
-                    &question,
-                    &answers,
-                    app.conflict_choice,
-                ));
-            }
-            // Keep what the interface looks like before the field goes in. That
-            // is the frame a later field-only tick starts from, so it never has to
-            // lay the interface out again just to move the contours.
-            if keep_snapshot {
-                snapshot = Some(frame.buffer_mut().clone());
-            }
-            // Paint the field into whatever every screen and modal left open.
-            // Nothing has to tell it where those cells are: a widget that means to
-            // be opaque writes them, and one that means to show the field does not.
-            if app.backdrop_animates() {
-                app.terrain.draw(frame.buffer_mut(), content);
-            }
-            // Keep the modal's last frame, ready to draw once more when it
-            // leaves. Modals arrive at once; only the panel is drawn in.
-            if app.animations()
-                && let Some(area) = modal
-            {
-                modal_cells = Some(Leaving::take(frame.buffer_mut(), area));
-            }
-            if let Some(cells) = &leaving {
-                cells.draw(frame.buffer_mut());
-            }
-            // Off, the manager is emptied rather than left holding effects that
-            // would resume mid-flight if it were turned back on.
-            if app.animations() {
-                effects.process_effects(elapsed.into(), frame.buffer_mut(), content);
-            } else {
-                effects = EffectManager::default();
-            }
+            .draw(target);
         })?;
         // A frame that was not painted decided nothing about where pictures go, so
         // its placements are left exactly as they were.
