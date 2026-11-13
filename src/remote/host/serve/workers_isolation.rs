@@ -271,10 +271,6 @@ fn expect_ok(reply: WorkerReply) -> Result<(), IsolationError> {
     }
 }
 
-// What a task waits for on a host: the host, the files and software it needs, and the
-// sandbox itself. The layer's own steps are reported on top of these.
-const PROVISION_STEPS: usize = 3;
-
 impl IsolationEngine for WorkersIsolation {
     // A worker's host has no host-pressure reading the master can lean on; the fleet
     // caps how many run, and the master's own valve is for its own machine.
@@ -342,7 +338,7 @@ impl IsolationEngine for WorkersIsolation {
         progress.report(EnvironmentProgress {
             label: "provisioning a worker".to_owned(),
             completed: 0,
-            total: PROVISION_STEPS,
+            total: 0,
         });
         // The host is fresh, so the operator's profile files travel with the spawn.
         let profiles = self.profile_bundles(&recipes)?;
@@ -351,8 +347,8 @@ impl IsolationEngine for WorkersIsolation {
         let worker = self.provision_host(&id).await?;
         progress.report(EnvironmentProgress {
             label: "getting the worker ready".to_owned(),
-            completed: 1,
-            total: PROVISION_STEPS,
+            completed: 0,
+            total: 0,
         });
         let call = WorkerCall::Provision {
             id: id.clone(),
@@ -373,8 +369,8 @@ impl IsolationEngine for WorkersIsolation {
         }
         progress.report(EnvironmentProgress {
             label: "launching the isolated sandbox".to_owned(),
-            completed: PROVISION_STEPS - 1,
-            total: PROVISION_STEPS,
+            completed: 0,
+            total: 0,
         });
         // A task that was parked gets its workspace back on the new host.
         if let Some(snapshot) = task_snapshot
