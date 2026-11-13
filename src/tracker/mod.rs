@@ -2,6 +2,8 @@ pub(crate) mod host;
 mod logins;
 pub(crate) mod providers;
 mod surface;
+#[cfg(test)]
+mod tests;
 
 pub(crate) use logins::{Login, claim_account, logins, logins_of, yield_account};
 
@@ -14,19 +16,27 @@ use std::{error::Error, fmt, future::Future, pin::Pin, time::SystemTime};
 
 use serde::{Deserialize, Serialize};
 
+use crate::credentials::Service;
+
 pub type TrackerFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, TrackerError>> + Send + 'a>>;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TrackerKind {
     Linear,
+    GitHub,
 }
 
 impl TrackerKind {
-    pub const ALL: [Self; 1] = [Self::Linear];
+    pub const ALL: [Self; 2] = [Self::Linear, Self::GitHub];
 
-    pub fn sole() -> Self {
-        Self::ALL[0]
+    // A tracker credential's id is its kind's profile, so the id is the whole of
+    // what says which tracker a login belongs to.
+    pub fn of_credential(credential: &str) -> Option<Self> {
+        match Service::from_id(credential)? {
+            Service::Tracker(kind) => Some(kind),
+            _ => None,
+        }
     }
 
     pub fn slug(self) -> &'static str {
@@ -121,6 +131,20 @@ pub struct IssueSnapshot {
     pub issue: IssueSummary,
     pub description: String,
     pub comments: Vec<IssueComment>,
+    // What the tracker itself says this issue waits on: a relation, not a line in the
+    // description, so an issue whose text no longer repeats its blockers still knows
+    // them. Empty when the tracker has no such relation or nobody set one.
+    #[serde(default)]
+    pub blocked_by: Vec<IssueDependency>,
+}
+
+// One issue another one waits on. `open` is the tracker's own state, because a closed
+// blocker is a satisfied one: the relation stays, the wait does not.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IssueDependency {
+    pub identifier: String,
+    pub title: String,
+    pub open: bool,
 }
 
 impl IssueSnapshot {
@@ -140,6 +164,23 @@ impl IssueSnapshot {
         }
         if let Some(project) = &self.issue.project {
             prompt.push_str(&format!("Project: {project}\n"));
+        }
+        if !self.blocked_by.is_empty() {
+            prompt.push_str("\nBlocked by:\n");
+            for dependency in &self.blocked_by {
+                let state = if dependency.open { "open" } else { "closed" };
+                prompt.push_str(&format!(
+                    "- {} ({state}): {}\n",
+                    dependency.identifier, dependency.title
+                ));
+            }
+            let open = self.blocked_by.iter().filter(|d| d.open).count();
+            if open > 0 {
+                prompt.push_str(
+                    "The tracker still shows a blocker open, so this issue is not ready to \
+                     start. Say so on the issue instead of working around it.\n",
+                );
+            }
         }
 
         prompt.push_str("\nDescription:\n");

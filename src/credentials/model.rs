@@ -16,11 +16,12 @@ pub enum Service {
 }
 
 impl Service {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::Agent(AgentKind::Claude),
         Self::Agent(AgentKind::Pi),
         Self::VersionControl(VcsProviderKind::GitHub),
         Self::Tracker(TrackerKind::Linear),
+        Self::Tracker(TrackerKind::GitHub),
     ];
 
     pub fn from_id(id: &str) -> Option<Self> {

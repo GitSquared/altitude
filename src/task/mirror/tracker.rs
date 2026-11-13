@@ -8,7 +8,10 @@ use crate::{
     credentials::{Service, Slot},
     isolation::IsolationEngine,
     project::Project,
-    tracker::{self, IssueSnapshot, TrackerError, TrackerKind, TrackerProvider, TrackerStatus},
+    tracker::{
+        self, IssueReader, IssueReference, IssueSnapshot, TrackerError, TrackerFuture, TrackerKind,
+        TrackerProvider, TrackerStatus,
+    },
 };
 
 use crate::task::{
@@ -81,6 +84,36 @@ impl TrackerHost for OwnTrackers {
             );
         }
         Some(tracker)
+    }
+}
+
+// An agent reading its task's issue reads it from the tracker the issue is in, through
+// this operator's own login for it.
+pub(crate) struct OwnIssues {
+    trackers: Arc<OwnTrackers>,
+    operator: String,
+}
+
+impl OwnIssues {
+    pub(crate) fn new(trackers: Arc<OwnTrackers>, operator: String) -> Self {
+        Self { trackers, operator }
+    }
+}
+
+impl IssueReader for OwnIssues {
+    fn read<'a>(&'a self, reference: &'a IssueReference) -> TrackerFuture<'a, IssueSnapshot> {
+        Box::pin(async move {
+            let tracker = self
+                .trackers
+                .for_credential(&self.operator, reference.provider.profile())
+                .ok_or_else(|| {
+                    TrackerError::new(format!(
+                        "sign in to {} to read this issue",
+                        reference.provider.label()
+                    ))
+                })?;
+            tracker.read(reference).await
+        })
     }
 }
 
@@ -163,7 +196,7 @@ where
             .project()
             .and_then(|project| project.tracker.as_ref())
             .and_then(|binding| binding.credential.as_deref())
-            .unwrap_or(TrackerKind::sole().profile());
+            .unwrap_or(reference.provider.profile());
         let Some(provider) = task
             .operator_id()
             .and_then(|owner| host.for_credential(owner, credential))
@@ -197,7 +230,12 @@ where
                 .project()
                 .and_then(|project| project.tracker.as_ref())
                 .and_then(|route| route.credential.as_deref())
-                .unwrap_or(TrackerKind::sole().profile());
+                .or(task
+                    .facts
+                    .tracker_issue
+                    .as_ref()
+                    .map(|issue| issue.provider.profile()))
+                .unwrap_or(TrackerKind::Linear.profile());
             let Some(provider) = task
                 .operator_id()
                 .and_then(|owner| host.for_credential(owner, credential))

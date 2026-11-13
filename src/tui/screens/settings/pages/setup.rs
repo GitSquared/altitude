@@ -119,9 +119,11 @@ pub(crate) fn project_lines(
             .as_deref()
             .or(defaults.tracker.as_deref());
         let mut value = label(id);
-        let kind = TrackerKind::sole();
+        let scope_noun = id
+            .and_then(TrackerKind::of_credential)
+            .map_or("scope", TrackerKind::scope_noun);
         match &binding.scope {
-            Some(scope) => value.push_str(&format!(" · {} {scope}", kind.scope_noun())),
+            Some(scope) => value.push_str(&format!(" · {scope_noun} {scope}")),
             None => value.push_str(" · whole account"),
         }
         let state = id

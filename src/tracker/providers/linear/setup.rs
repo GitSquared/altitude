@@ -1,14 +1,6 @@
-use crate::tracker::{Guide, Item, Step, TrackerKind};
+use crate::tracker::{Guide, Item, Step};
 
-impl TrackerKind {
-    pub(crate) fn guide(self) -> &'static Guide {
-        match self {
-            Self::Linear => &LINEAR,
-        }
-    }
-}
-
-static LINEAR: Guide = Guide {
+pub(crate) static LINEAR: Guide = Guide {
     title: "Set up Linear on a remote",
     intro: &[
         "A remote signs in as a shared Linear app, not as you. Its owner installs it once per \

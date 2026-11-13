@@ -96,7 +96,8 @@ pub(crate) fn credential_connector(credential: &Credential) -> Connector {
             directory,
             status,
         } => {
-            let mut connector = tracker_connector(*status, Path::new(directory));
+            let kind = TrackerKind::of_credential(profile).unwrap_or(TrackerKind::Linear);
+            let mut connector = tracker_connector(kind, *status, Path::new(directory));
             connector.title = credential.label.clone();
             let _ = profile;
             connector
@@ -165,8 +166,11 @@ pub(crate) fn git_connector(identity: &GitIdentity) -> Connector {
     }
 }
 
-pub(crate) fn tracker_connector(state: TrackerState, profile_dir: &Path) -> Connector {
-    let kind = TrackerKind::sole();
+pub(crate) fn tracker_connector(
+    kind: TrackerKind,
+    state: TrackerState,
+    profile_dir: &Path,
+) -> Connector {
     let (reach, note, action) = match state {
         TrackerState::Connected => (
             Reach::On,

@@ -214,6 +214,13 @@ impl GetStarted {
         }
     }
 
+    pub fn tracker_kind(&self) -> TrackerKind {
+        self.tracker
+            .chosen_value()
+            .copied()
+            .unwrap_or(TrackerKind::Linear)
+    }
+
     pub fn move_focus(&mut self, forward: bool) {
         self.focus = self.focus_ring.next(self.focus, forward);
     }
