@@ -373,8 +373,18 @@ impl SandboxPlan {
             if mount.host_path.starts_with(&cache) {
                 continue;
             }
+            tracing::info!(
+                path = %mount.host_path.display(),
+                guest = %mount.guest_path,
+                "preparing a mount's directory"
+            );
             private_directory(&mount.host_path)?;
+            tracing::info!(path = %mount.host_path.display(), "a mount's directory is there");
         }
+        tracing::info!(
+            files = self.managed_files.len(),
+            "writing the sandbox's files"
+        );
         for (path, contents) in &self.managed_files {
             if let Some(parent) = path.parent() {
                 private_directory(parent)?;
