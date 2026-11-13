@@ -9,10 +9,10 @@ use tokio::io::copy;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
-use crate::isolation::worker_protocol::WORKER_ALPN;
 #[cfg(target_os = "linux")]
-use crate::remote::cache::protocol::{CACHE_ALPN, CacheReply, CacheRequest};
-use crate::remote::layers::{LAYER_ALPN, LayerReply, LayerRequest};
+use crate::remote::cache::protocol::{CacheReply, CacheRequest};
+use crate::remote::layers::{LayerReply, LayerRequest};
+use crate::remote::protocol::Conversation;
 #[cfg(target_os = "linux")]
 use crate::remote::protocol::MAX_BLOB_BYTES;
 use crate::task::TaskAsk;
@@ -23,9 +23,9 @@ use crate::isolation::{CommandEvent, CommandSession};
 
 use crate::remote::protocol::SignalCommand;
 use crate::remote::protocol::{
-    BlobHash, CHUNK_BYTES, ConfigPush, Handover, LINK_ALPN, LinkRequest, LinkResponse,
-    TRANSFER_PIECE_BYTES, TaskRequest, TransferArchive, WatchEvent, WorkerReport, builder,
-    read_body, read_frame, write_frame,
+    BlobHash, CHUNK_BYTES, ConfigPush, Handover, LinkRequest, LinkResponse, TRANSFER_PIECE_BYTES,
+    TaskRequest, TransferArchive, WatchEvent, WorkerReport, builder, read_body, read_frame,
+    write_frame,
 };
 use crate::remote::transfer::{STOPPED, TransferUpdate, Unit};
 use crate::remote::{
@@ -76,7 +76,7 @@ impl fmt::Display for LinkPath {
 }
 
 // A peer and the conversation being held with it.
-type Conversation = (EndpointId, Vec<u8>);
+type Held = (EndpointId, Conversation);
 
 #[derive(Clone)]
 pub struct LinkClient {
@@ -85,7 +85,7 @@ pub struct LinkClient {
     // message is a handshake per message, and two handshakes to one peer at the same
     // moment — a heartbeat and a host's own layer fetch — is what starved a provision:
     // the second never got a usable path, so its stream was never sent.
-    peers: Arc<Mutex<HashMap<Conversation, Connection>>>,
+    peers: Arc<Mutex<HashMap<Held, Connection>>>,
 }
 
 impl LinkClient {
@@ -125,7 +125,7 @@ impl LinkClient {
         // The cache answers on its own ALPN, not the link's: a master serves three
         // conversations, and a host that dials the wrong one is refused at the
         // handshake rather than told to try again.
-        let dial = self.dial_alpn(peer, CACHE_ALPN).await?;
+        let dial = self.dial(peer, Conversation::Cache).await?;
         let (mut send, mut recv) = dial.0.open_bi().await?;
         write_frame(&mut send, request).await?;
         if !body.is_empty() {
@@ -150,7 +150,7 @@ impl LinkClient {
         request: &LayerRequest,
         mut sink: AsyncFile,
     ) -> LinkResult<bool> {
-        let dial = self.dial_alpn(peer, LAYER_ALPN).await?;
+        let dial = self.dial(peer, Conversation::Layers).await?;
         let (mut send, mut recv) = dial.0.open_bi().await?;
         write_frame(&mut send, request).await?;
         send.finish()?;
@@ -174,7 +174,7 @@ impl LinkClient {
         request: &LayerRequest,
         mut archive: AsyncFile,
     ) -> LinkResult<()> {
-        let dial = self.dial_alpn(peer, LAYER_ALPN).await?;
+        let dial = self.dial(peer, Conversation::Layers).await?;
         let (mut send, mut recv) = dial.0.open_bi().await?;
         write_frame(&mut send, request).await?;
         copy(&mut archive, &mut send).await?;
@@ -192,7 +192,7 @@ impl LinkClient {
         peer: impl Into<EndpointAddr>,
         request: &WorkerRequest,
     ) -> LinkResult<WorkerReply> {
-        let dial = self.dial_alpn(peer, WORKER_ALPN).await?;
+        let dial = self.dial(peer, Conversation::Worker).await?;
         let (mut send, mut recv) = dial.0.open_bi().await?;
         write_frame(&mut send, request).await?;
         send.finish()?;
@@ -207,7 +207,7 @@ impl LinkClient {
         request: &WorkerRequest,
         body: &[u8],
     ) -> LinkResult<WorkerReply> {
-        let dial = self.dial_alpn(peer, WORKER_ALPN).await?;
+        let dial = self.dial(peer, Conversation::Worker).await?;
         let (mut send, mut recv) = dial.0.open_bi().await?;
         write_frame(&mut send, request).await?;
         send.write_all(body).await?;
@@ -224,7 +224,7 @@ impl LinkClient {
         token: &str,
         tcp: TcpStream,
     ) -> LinkResult<()> {
-        let dial = self.dial(peer).await?;
+        let dial = self.dial(peer, Conversation::Link).await?;
         let (mut send, mut recv) = dial.0.open_bi().await?;
         write_frame(
             &mut send,
@@ -258,7 +258,7 @@ impl LinkClient {
         request: &WorkerRequest,
         mut file: AsyncFile,
     ) -> LinkResult<()> {
-        let dial = self.dial_alpn(peer, WORKER_ALPN).await?;
+        let dial = self.dial(peer, Conversation::Worker).await?;
         let (mut send, mut recv) = dial.0.open_bi().await?;
         write_frame(&mut send, request).await?;
         copy(&mut file, &mut send).await?;
@@ -277,7 +277,7 @@ impl LinkClient {
         request: &WorkerRequest,
         mut sink: AsyncFile,
     ) -> LinkResult<(u64, u64)> {
-        let dial = self.dial_alpn(peer, WORKER_ALPN).await?;
+        let dial = self.dial(peer, Conversation::Worker).await?;
         let (mut send, mut recv) = dial.0.open_bi().await?;
         write_frame(&mut send, request).await?;
         send.finish()?;
@@ -298,7 +298,7 @@ impl LinkClient {
         peer: impl Into<EndpointAddr>,
         request: &WorkerRequest,
     ) -> LinkResult<CommandSession> {
-        let dial = self.dial(peer).await?;
+        let dial = self.dial(peer, Conversation::Link).await?;
         let (mut send, mut recv) = dial.0.open_bi().await?;
         write_frame(&mut send, request).await?;
         match read_frame::<_, WorkerReply>(&mut recv).await? {
@@ -394,15 +394,15 @@ impl LinkClient {
         self.endpoint.close().await;
     }
 
-    async fn dial(&self, peer: impl Into<EndpointAddr>) -> LinkResult<Dial> {
-        self.dial_alpn(peer, LINK_ALPN).await
-    }
-
-    // Which conversation a dial starts is the ALPN, and the three of them are
-    // different conversations: a client's tasks, a host's sandboxes, a host's layers.
-    async fn dial_alpn(&self, peer: impl Into<EndpointAddr>, alpn: &[u8]) -> LinkResult<Dial> {
+    // A conversation is what a dial starts: a client's tasks, a host's sandboxes, a
+    // host's layers, a host's cache.
+    async fn dial(
+        &self,
+        peer: impl Into<EndpointAddr>,
+        conversation: Conversation,
+    ) -> LinkResult<Dial> {
         let peer = peer.into();
-        let key = (peer.id, alpn.to_vec());
+        let key = (peer.id, conversation);
         if let Some(held) = self
             .peers
             .lock()
@@ -413,7 +413,7 @@ impl LinkClient {
         {
             return Ok(Dial(held));
         }
-        let connection = self.endpoint.connect(peer, alpn).await?;
+        let connection = self.endpoint.connect(peer, conversation.alpn()).await?;
         self.peers
             .lock()
             .expect("the link's peer map")
@@ -426,7 +426,7 @@ impl LinkClient {
         peer: impl Into<EndpointAddr>,
         request: &LinkRequest,
     ) -> LinkResult<LinkResponse> {
-        let dial = self.dial(peer).await?;
+        let dial = self.dial(peer, Conversation::Link).await?;
         let (mut send, mut recv) = dial.0.open_bi().await?;
         write_frame(&mut send, request).await?;
         send.finish()?;
@@ -441,7 +441,7 @@ impl LinkClient {
         request: &LinkRequest,
         body: &[u8],
     ) -> LinkResult<LinkResponse> {
-        let dial = self.dial(peer).await?;
+        let dial = self.dial(peer, Conversation::Link).await?;
         let (mut send, mut recv) = dial.0.open_bi().await?;
         write_frame(&mut send, request).await?;
         for chunk in body.chunks(CHUNK_BYTES) {
@@ -458,7 +458,7 @@ impl LinkClient {
         peer: impl Into<EndpointAddr>,
         request: &LinkRequest,
     ) -> LinkResult<Vec<u8>> {
-        let dial = self.dial(peer).await?;
+        let dial = self.dial(peer, Conversation::Link).await?;
         let (mut send, mut recv) = dial.0.open_bi().await?;
         write_frame(&mut send, request).await?;
         send.finish()?;
@@ -476,7 +476,7 @@ impl LinkClient {
         peer: impl Into<EndpointAddr>,
         events: mpsc::UnboundedSender<WatchEvent>,
     ) -> LinkResult<()> {
-        let dial = self.dial(peer).await?;
+        let dial = self.dial(peer, Conversation::Link).await?;
         let (mut send, mut recv) = dial.0.open_bi().await?;
         write_frame(&mut send, &LinkRequest::WatchTasks).await?;
         send.finish()?;
@@ -763,7 +763,7 @@ impl LinkClient {
 
     // The bytes a digest names, read from the machine that holds them.
     pub async fn picture(&self, peer: impl Into<EndpointAddr>, id: &str) -> LinkResult<Vec<u8>> {
-        let dial = self.dial(peer).await?;
+        let dial = self.dial(peer, Conversation::Link).await?;
         let (mut send, mut recv) = dial.0.open_bi().await?;
         write_frame(&mut send, &LinkRequest::ReadPicture { id: id.to_owned() }).await?;
         send.finish()?;

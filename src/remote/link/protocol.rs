@@ -29,6 +29,30 @@ use crate::remote::{
 
 pub const LINK_ALPN: &[u8] = b"altitude/link/1";
 
+// Which conversation a connection carries. One endpoint serves four, and the ALPN is how
+// a peer says which it wants — so a call names the conversation rather than quoting it,
+// and the two places that must agree are a router's registration and this.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum Conversation {
+    Link,
+    Worker,
+    Layers,
+    // Only a Linux host mounts a project cache, so only there does anything ask for it.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    Cache,
+}
+
+impl Conversation {
+    pub(crate) fn alpn(self) -> &'static [u8] {
+        match self {
+            Self::Link => LINK_ALPN,
+            Self::Worker => crate::isolation::worker_protocol::WORKER_ALPN,
+            Self::Layers => crate::remote::layers::LAYER_ALPN,
+            Self::Cache => crate::remote::cache::protocol::CACHE_ALPN,
+        }
+    }
+}
+
 const MAX_FRAME_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_BLOB_BYTES: u64 = 64 * 1024 * 1024;
 pub(super) const CHUNK_BYTES: usize = 64 * 1024;
