@@ -33,9 +33,9 @@ impl App {
             .unwrap_or_default()
     }
 
-    /// The machines this client is waiting on: one that cannot be given work yet,
-    /// or one it still owes something. A machine that is ready and owed nothing is
-    /// not asked.
+    // The machines this client is waiting on: one that cannot be given work yet,
+    // or one it still owes something. A machine that is ready and owed nothing is
+    // not asked.
     pub(super) fn remotes_to_refresh(&self) -> Vec<String> {
         self.configured_remotes()
             .into_iter()

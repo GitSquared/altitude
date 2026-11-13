@@ -148,19 +148,19 @@ impl RemoteStatus {
     }
 }
 
-/// What this client still owes a remote. The panel and the pusher read the same
-/// answer, so what the panel says is being sent is what being sent means: a
-/// machine owed nothing was saying "sending setup…" forever, with nothing in
-/// flight and nothing to send.
+// What this client still owes a remote. The panel and the pusher read the same
+// answer, so what the panel says is being sent is what being sent means: a
+// machine owed nothing was saying "sending setup…" forever, with nothing in
+// flight and nothing to send.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::tui) enum Sync {
-    /// It holds what this machine would send.
+    // It holds what this machine would send.
     Nothing,
-    /// A configuration, or the revocation of one, is what it is owed.
+    // A configuration, or the revocation of one, is what it is owed.
     Configuration,
-    /// It runs none of this machine's projects, so there is nothing to send it.
+    // It runs none of this machine's projects, so there is nothing to send it.
     NoProjects,
-    /// What it holds keeps until the task it is running there is gone.
+    // What it holds keeps until the task it is running there is gone.
     UntilItsTaskEnds,
 }
 
@@ -376,7 +376,7 @@ pub enum WatchedTasks {
         key_status: RemoteKeyStatus,
         compatibility: Compatibility,
     },
-    /// What the remote is doing now: ready, or building what it needs first.
+    // What the remote is doing now: ready, or building what it needs first.
     Phase {
         address: String,
         phase: Phase,
@@ -565,15 +565,15 @@ pub struct App {
     pub(in crate::tui) foreground: Foreground,
     shell_behind: Behind<Foreground>,
     pub(in crate::tui) transfer: Option<TransferView>,
-    /// The task that is on its way to another machine, with the progress to show on
-    /// its card. One at a time: a handback is something the operator started.
+    // The task that is on its way to another machine, with the progress to show on
+    // its card. One at a time: a handback is something the operator started.
     pub(in crate::tui) moving: Option<Moving>,
-    /// What this machine has taken over, by the machine it came from and the id it
-    /// had there. A landing is a task of its own with its own id, so the copy the
-    /// source still lists cannot be recognised by what it is — only by where it was.
+    // What this machine has taken over, by the machine it came from and the id it
+    // had there. A landing is a task of its own with its own id, so the copy the
+    // source still lists cannot be recognised by what it is — only by where it was.
     pub(in crate::tui) superseded: Vec<(String, String)>,
-    /// The take over that is under way, if any: hidden from the moment it is asked
-    /// for, so the list never shows the task twice.
+    // The take over that is under way, if any: hidden from the moment it is asked
+    // for, so the list never shows the task twice.
     pub(in crate::tui) pending_take: Option<(String, String)>,
     pub(in crate::tui) pending_tasks: Vec<PendingTask>,
     pub(in crate::tui) remote_status: HashMap<String, RemoteStatus>,
@@ -623,9 +623,6 @@ impl Drop for App {
     }
 }
 
-// What the list is for: work that is still the operator's. An issue that ended elsewhere,
-// or a delegation that was withdrawn, is a record rather than a task to act on, and it is
-// read where it happened.
 // Work that ended somewhere else — the issue was closed, the delegation withdrawn —
 // is a record rather than a task to act on, and it is read where it happened. A
 // finished task is not that: it stays, so the list can show it when asked.

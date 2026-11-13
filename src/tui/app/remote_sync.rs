@@ -41,11 +41,11 @@ impl App {
         }
     }
 
-    /// Ask those machines what they are doing now. A first start is minutes of
-    /// installing and downloading, and the announcement is where a machine says
-    /// which part it is on. A watch says "ready" once, to whoever is listening at
-    /// that moment, so a client waiting on a machine reads the announcement again
-    /// rather than sitting on the word it got before the machine moved on.
+    // Ask those machines what they are doing now. A first start is minutes of
+    // installing and downloading, and the announcement is where a machine says
+    // which part it is on. A watch says "ready" once, to whoever is listening at
+    // that moment, so a client waiting on a machine reads the announcement again
+    // rather than sitting on the word it got before the machine moved on.
     pub(in crate::tui) fn refresh_remotes(&self) {
         let addresses = self.remotes_to_refresh();
         if addresses.is_empty() {
@@ -74,7 +74,7 @@ impl App {
         });
     }
 
-    /// What this machine still owes a remote, if anything.
+    // What this machine still owes a remote, if anything.
     pub(in crate::tui) fn sync_for(&self, address: &str) -> Sync {
         if !self.remote_needs_config(address) {
             return Sync::Nothing;
