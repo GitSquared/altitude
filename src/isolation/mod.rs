@@ -465,13 +465,6 @@ pub trait IsolationEngine: Send + Sync {
         landings()
     }
 
-    // Whether a start is waiting on this machine to make the place it will land in.
-    // Such a start has not stalled: compute is being built for it, and the engine is
-    // what bounds that. The watch that ends a wedged start asks this.
-    fn is_provisioning(&self) -> bool {
-        false
-    }
-
     // Where a project's memory lives on this machine. It comes from the engine rather
     // than from the caller's config because the engine is the piece that knows
     // whether this machine scopes storage per operator, and the sandbox mount and the

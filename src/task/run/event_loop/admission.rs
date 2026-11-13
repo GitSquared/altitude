@@ -71,17 +71,13 @@ impl<E: IsolationEngine + Clone + 'static> TaskEventLoop<E> {
                 _ = tick.tick() => {
                     let known = self.task(&task.id).await.ok().flatten();
                     let now = self.starting_stage(&task.id, known.as_ref());
-                    // A machine making the host this start will land in has not stopped
-                    // working on it, and it bounds that wait itself: failing the start
-                    // here would fail it for a build that was going to finish, which is
-                    // what a delegation arriving mid-rebuild looks like. The clock runs
-                    // from the moment that host stops being made.
-                    let waiting_for_host = self.service.isolation.is_provisioning();
-                    if now != stage || waiting_for_host {
+                    if now == stage {
+                        if reached_at.elapsed() >= START_BUDGET {
+                            return None;
+                        }
+                    } else {
                         stage = now;
                         reached_at = Instant::now();
-                    } else if reached_at.elapsed() >= START_BUDGET {
-                        return None;
                     }
                     tracing::debug!(
                         task = %task.id,
