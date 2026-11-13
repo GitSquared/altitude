@@ -1008,7 +1008,7 @@ fn queue_notice_state(standing: &QueueStanding) -> String {
     // watching, so they say what is being done rather than what is being waited for.
     match &standing.start {
         Some(Start::Provisioning) => {
-            return "Starting on the remote · making its sandbox".to_owned();
+            return "Starting on the remote · launching an isolated sandbox".to_owned();
         }
         Some(Start::Building(progress)) => {
             return format!(

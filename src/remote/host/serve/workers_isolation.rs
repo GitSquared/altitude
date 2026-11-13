@@ -16,10 +16,10 @@ use crate::{
     config::Config,
     isolation::{
         BaseSandboxRecipe, BaseSandboxSnapshot, CommandSession, CredentialCheck, CredentialReport,
-        CredentialSandbox, EnvironmentDescription, EnvironmentProgressSink, FileTally,
-        FileTransferSink, IsolationEngine, IsolationError, IsolationStatus, LayerView, Pressure,
-        ProfileRecipe, SandboxCeiling, SandboxOptions, SandboxPurpose, SandboxRoom, VsockRoute,
-        guest_absolute,
+        CredentialSandbox, EnvironmentDescription, EnvironmentProgress, EnvironmentProgressSink,
+        FileTally, FileTransferSink, IsolationEngine, IsolationError, IsolationStatus, LayerView,
+        Pressure, ProfileRecipe, SandboxCeiling, SandboxOptions, SandboxPurpose, SandboxRoom,
+        VsockRoute, guest_absolute,
         worker_protocol::{WorkerCall, WorkerProfile, WorkerReply, WorkerRequest},
     },
     project::Project,
@@ -271,6 +271,10 @@ fn expect_ok(reply: WorkerReply) -> Result<(), IsolationError> {
     }
 }
 
+// What a task waits for on a host: the host, the files and software it needs, and the
+// sandbox itself. The layer's own steps are reported on top of these.
+const PROVISION_STEPS: usize = 3;
+
 impl IsolationEngine for WorkersIsolation {
     // A worker's host has no host-pressure reading the master can lean on; the fleet
     // caps how many run, and the master's own valve is for its own machine.
@@ -323,7 +327,7 @@ impl IsolationEngine for WorkersIsolation {
         project: Project,
         recipes: Vec<ProfileRecipe>,
         vsock: Vec<VsockRoute>,
-        _progress: &dyn EnvironmentProgressSink,
+        progress: &dyn EnvironmentProgressSink,
     ) -> Result<(), IsolationError> {
         let agent_profile = recipes
             .first()
@@ -333,11 +337,23 @@ impl IsolationEngine for WorkersIsolation {
             .get(1)
             .map(|r| r.profile.clone())
             .unwrap_or_default();
+        // What a task waits for while a host is made, in the operator's words: the host
+        // itself, then the files and software it needs before a sandbox can exist there.
+        progress.report(EnvironmentProgress {
+            label: "provisioning a worker".to_owned(),
+            completed: 0,
+            total: PROVISION_STEPS,
+        });
         // The host is fresh, so the operator's profile files travel with the spawn.
         let profiles = self.profile_bundles(&recipes)?;
         let checkout = checkout_guest(&project);
         self.remember_checkout(&id, checkout.clone());
         let worker = self.provision_host(&id).await?;
+        progress.report(EnvironmentProgress {
+            label: "getting the worker ready".to_owned(),
+            completed: 1,
+            total: PROVISION_STEPS,
+        });
         let call = WorkerCall::Provision {
             id: id.clone(),
             snapshot: None,
@@ -355,6 +371,11 @@ impl IsolationEngine for WorkersIsolation {
             self.deprovision_host(&id).await;
             return Err(error);
         }
+        progress.report(EnvironmentProgress {
+            label: "launching the isolated sandbox".to_owned(),
+            completed: PROVISION_STEPS - 1,
+            total: PROVISION_STEPS,
+        });
         // A task that was parked gets its workspace back on the new host.
         if let Some(snapshot) = task_snapshot
             && let Err(error) = self
