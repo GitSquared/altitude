@@ -98,6 +98,7 @@ impl CacheFs {
     }
 
     fn call(&self, op: CacheOp, body: &[u8]) -> Result<(CacheReply, Vec<u8>), i32> {
+        let described = format!("{op:?}");
         let request = CacheRequest {
             token: self.token.clone(),
             owner: self.owner.clone(),
@@ -109,9 +110,11 @@ impl CacheFs {
                 .block_on(self.client.cache_call(self.peer.clone(), &request, body));
         match &answered {
             Ok((CacheReply::Failed(reason), _)) => {
-                tracing::warn!(%reason, ?op, "the master refused a cache call")
+                tracing::warn!(%reason, op = %described, "the master refused a cache call")
             }
-            Err(error) => tracing::warn!(%error, ?op, "a cache call did not reach the master"),
+            Err(error) => {
+                tracing::warn!(%error, op = %described, "a cache call did not reach the master")
+            }
             Ok(_) => {}
         }
         answered.map_err(|_| EIO)
