@@ -298,7 +298,7 @@ impl LinkClient {
         peer: impl Into<EndpointAddr>,
         request: &WorkerRequest,
     ) -> LinkResult<CommandSession> {
-        let dial = self.dial(peer, Conversation::Link).await?;
+        let dial = self.dial(peer, Conversation::Worker).await?;
         let (mut send, mut recv) = dial.0.open_bi().await?;
         write_frame(&mut send, request).await?;
         match read_frame::<_, WorkerReply>(&mut recv).await? {
