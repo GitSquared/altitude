@@ -1,5 +1,7 @@
 use std::path::Path;
 
+use tokio::task::spawn_blocking;
+
 use super::guest::{opener_script, project_scripts, run_setup, run_to_end};
 use super::*;
 use crate::isolation::{install_script, with_port_relay};
@@ -142,7 +144,17 @@ pub(crate) async fn create(
     snapshot: Option<SnapshotSource>,
     progress: &dyn EnvironmentProgressSink,
 ) -> Result<(), IsolationError> {
-    plan.initialize(config)?;
+    // The sandbox's own files include the mounts it will see, and one of those can be a
+    // filesystem this machine answers for over the link: a write to it is a network call
+    // that needs this runtime to be free, so it cannot be made from the runtime's thread.
+    let prepared = config.clone();
+    let mut prepared_plan = plan;
+    plan = spawn_blocking(move || {
+        prepared_plan.initialize(&prepared)?;
+        Ok::<_, IsolationError>(prepared_plan)
+    })
+    .await
+    .map_err(|error| IsolationError::new(error.to_string()))??;
     tracing::info!(sandbox = %id, "the sandbox's directories are prepared");
     let path = match snapshot {
         Some(SnapshotSource::Capsule(path)) => path,
