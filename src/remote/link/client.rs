@@ -185,6 +185,22 @@ impl LinkClient {
         read_frame(&mut recv).await
     }
 
+    // A provision carries the operator's profiles, which are too large for a frame:
+    // they follow it as the rest of the stream, the way a delivered file does.
+    pub(crate) async fn worker_provision(
+        &self,
+        peer: impl Into<EndpointAddr>,
+        request: &WorkerRequest,
+        body: &[u8],
+    ) -> LinkResult<WorkerReply> {
+        let dial = self.dial_alpn(peer, WORKER_ALPN).await?;
+        let (mut send, mut recv) = dial.0.open_bi().await?;
+        write_frame(&mut send, request).await?;
+        send.write_all(body).await?;
+        send.finish()?;
+        read_frame(&mut recv).await
+    }
+
     // A host carries one connection from an agent inside its sandbox to the
     // channel the master serves for that task.
     pub(crate) async fn pipe_agent_channel(

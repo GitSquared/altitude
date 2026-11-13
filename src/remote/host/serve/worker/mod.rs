@@ -218,6 +218,10 @@ impl ProtocolHandler for WorkerService {
                 self.run_command(send, recv, id, command).await;
                 Ok(())
             }
+            call @ WorkerCall::Provision { .. } => {
+                self.provision(send, recv, call).await;
+                Ok(())
+            }
             WorkerCall::DeliverFile { id, guest_path } => {
                 self.receive_file(send, recv, id, guest_path).await;
                 Ok(())

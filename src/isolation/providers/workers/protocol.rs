@@ -24,6 +24,10 @@ pub(crate) struct WorkerRequest {
 // wire never carries a host path that only makes sense on the master.
 // A profile's files as the master holds them, base64 so a token that is not text
 // still travels. The host writes them where its plan will mount the profile.
+//
+// They do not travel in the call: a profile is a CLI's whole home, which is
+// megabytes of plugins and caches, and a call is a frame of at most `MAX_FRAME_BYTES`.
+// A provision sends them after the frame, as the rest of the stream.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct WorkerProfile {
     pub profile: String,
@@ -43,7 +47,6 @@ pub(crate) enum WorkerCall {
         agent_profile: String,
         vcs_profile: String,
         vsock: Vec<VsockRoute>,
-        profiles: Vec<WorkerProfile>,
     },
     Create {
         id: String,

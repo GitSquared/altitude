@@ -3,6 +3,7 @@ use std::{fs, net::Ipv4Addr};
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 
 use iroh::endpoint::{RecvStream, SendStream};
+use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
 
 #[cfg(target_os = "linux")]
@@ -17,7 +18,7 @@ use crate::{
         private_directory,
         worker_protocol::{CommandFrame, WorkerCall, WorkerProfile, WorkerReply},
     },
-    remote::protocol::{read_frame, write_frame},
+    remote::protocol::{MAX_BLOB_BYTES, read_frame, write_frame},
 };
 
 #[cfg(target_os = "linux")]
@@ -126,47 +127,6 @@ impl WorkerService {
     fn unmount_cache(&self, _id: &str) {}
     pub(super) async fn dispatch(&self, call: WorkerCall) -> WorkerReply {
         match call {
-            WorkerCall::Provision {
-                id,
-                snapshot,
-                project,
-                owner,
-                agent_profile,
-                vcs_profile,
-                vsock,
-                profiles,
-            } => {
-                if let Err(error) = write_profiles(&self.config, &profiles) {
-                    return WorkerReply::Failed(error);
-                }
-                if let Err(error) = self.mount_cache(&id, &owner, &project.id) {
-                    return WorkerReply::Failed(error);
-                }
-                let recipes = match (
-                    profile_recipe(&agent_profile, &self.agents),
-                    profile_recipe(&vcs_profile, &self.agents),
-                ) {
-                    (Ok(agent), Ok(vcs)) => Ok(vec![agent, vcs]),
-                    (Err(error), _) | (_, Err(error)) => Err(error),
-                };
-                match recipes {
-                    Ok(recipes) => {
-                        let channels = vsock.clone();
-                        match self
-                            .engine
-                            .provision(id.clone(), snapshot, project, recipes, vsock, &Unwatched)
-                            .await
-                        {
-                            Ok(()) => {
-                                self.start_channels(&id, &channels);
-                                WorkerReply::Ok
-                            }
-                            Err(error) => WorkerReply::Failed(error.to_string()),
-                        }
-                    }
-                    Err(error) => WorkerReply::Failed(error.to_string()),
-                }
-            }
             WorkerCall::Create {
                 id,
                 options,
@@ -265,13 +225,88 @@ impl WorkerService {
                     Err(error) => WorkerReply::Failed(error.to_string()),
                 }
             }
-            WorkerCall::RunCommand { .. }
+            WorkerCall::Provision { .. }
+            | WorkerCall::RunCommand { .. }
             | WorkerCall::DeliverFile { .. }
             | WorkerCall::DeliverFiles { .. }
             | WorkerCall::CollectFile { .. }
             | WorkerCall::CollectFiles { .. }
             | WorkerCall::Snapshot { .. }
             | WorkerCall::Restore { .. } => unreachable!("this call is streamed"),
+        }
+    }
+
+    // A provision's profiles are the rest of the stream: a CLI's home is megabytes of
+    // plugins and caches, which no frame would hold.
+    pub(super) async fn provision(
+        &self,
+        mut send: SendStream,
+        mut recv: RecvStream,
+        call: WorkerCall,
+    ) {
+        let mut body = Vec::new();
+        let read = (&mut recv)
+            .take(MAX_BLOB_BYTES)
+            .read_to_end(&mut body)
+            .await;
+        let profiles = match read.map_err(|error| error.to_string()).and_then(|_| {
+            serde_json::from_slice::<Vec<WorkerProfile>>(&body).map_err(|error| error.to_string())
+        }) {
+            Ok(profiles) => profiles,
+            Err(error) => {
+                let _ = write_frame(
+                    &mut send,
+                    &WorkerReply::Failed(format!("could not read the profile files: {error}")),
+                )
+                .await;
+                return;
+            }
+        };
+        let reply = self.provision_call(call, profiles).await;
+        let _ = write_frame(&mut send, &reply).await;
+    }
+
+    async fn provision_call(&self, call: WorkerCall, profiles: Vec<WorkerProfile>) -> WorkerReply {
+        let WorkerCall::Provision {
+            id,
+            snapshot,
+            project,
+            owner,
+            agent_profile,
+            vcs_profile,
+            vsock,
+        } = call
+        else {
+            return WorkerReply::Failed("not a provision".into());
+        };
+        if let Err(error) = write_profiles(&self.config, &profiles) {
+            return WorkerReply::Failed(error);
+        }
+        if let Err(error) = self.mount_cache(&id, &owner, &project.id) {
+            return WorkerReply::Failed(error);
+        }
+        let recipes = match (
+            profile_recipe(&agent_profile, &self.agents),
+            profile_recipe(&vcs_profile, &self.agents),
+        ) {
+            (Ok(agent), Ok(vcs)) => Ok(vec![agent, vcs]),
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+        let recipes = match recipes {
+            Ok(recipes) => recipes,
+            Err(error) => return WorkerReply::Failed(error.to_string()),
+        };
+        let channels = vsock.clone();
+        match self
+            .engine
+            .provision(id.clone(), snapshot, project, recipes, vsock, &Unwatched)
+            .await
+        {
+            Ok(()) => {
+                self.start_channels(&id, &channels);
+                WorkerReply::Ok
+            }
+            Err(error) => WorkerReply::Failed(error.to_string()),
         }
     }
 

@@ -90,6 +90,27 @@ impl WorkersIsolation {
             .map_err(|error| IsolationError::new(error.to_string()))
     }
 
+    async fn provision_on(
+        &self,
+        worker: &str,
+        call: WorkerCall,
+        profiles: &[WorkerProfile],
+    ) -> Result<WorkerReply, IsolationError> {
+        let peer = self.fleet.peer(worker).ok_or_else(|| {
+            IsolationError::missing_sandbox(format!("isolation worker {worker} is gone"))
+        })?;
+        let request = WorkerRequest {
+            token: self.fleet.token().to_owned(),
+            call,
+        };
+        let body =
+            serde_json::to_vec(profiles).map_err(|error| IsolationError::new(error.to_string()))?;
+        self.client
+            .worker_provision(peer, &request, &body)
+            .await
+            .map_err(|error| IsolationError::new(error.to_string()))
+    }
+
     async fn call(&self, id: &str, call: WorkerCall) -> Result<WorkerReply, IsolationError> {
         let worker = self.placement(id).ok_or_else(|| {
             IsolationError::missing_sandbox(format!("sandbox {id} is not on a worker"))
@@ -310,9 +331,12 @@ impl IsolationEngine for WorkersIsolation {
             agent_profile,
             vcs_profile,
             vsock,
-            profiles,
         };
-        if let Err(error) = self.call_on(&worker, call).await.and_then(expect_ok) {
+        if let Err(error) = self
+            .provision_on(&worker, call, &profiles)
+            .await
+            .and_then(expect_ok)
+        {
             self.deprovision_host(&id).await;
             return Err(error);
         }
