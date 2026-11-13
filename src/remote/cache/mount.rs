@@ -10,7 +10,7 @@ use fuser::{
     ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyWrite, Request, TimeOrNow,
 };
 use iroh::EndpointAddr;
-use tokio::runtime::Handle;
+use tokio::runtime::{Builder, Handle, Runtime};
 
 use crate::remote::LinkClient;
 
@@ -36,7 +36,7 @@ pub(crate) struct CacheFs {
     project: String,
     handle: Handle,
     // The filesystem's own runtime, kept alive as long as the session is.
-    runtime: Option<tokio::runtime::Runtime>,
+    runtime: Option<Runtime>,
     paths: HashMap<u64, String>,
     inos: HashMap<String, u64>,
     next: u64,
@@ -533,7 +533,7 @@ pub(crate) fn mount(mut fs: CacheFs, mountpoint: &Path) -> Result<BackgroundSess
     // Its own thread, not a runtime the FUSE thread would have to drive: the caller
     // blocks in a syscall that only this filesystem can answer, so the answer has to be
     // made somewhere the caller is not.
-    let runtime = tokio::runtime::Builder::new_multi_thread()
+    let runtime = Builder::new_multi_thread()
         .worker_threads(1)
         .enable_all()
         .build()
