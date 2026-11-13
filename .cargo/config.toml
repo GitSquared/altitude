@@ -1,0 +1,5 @@
+[registry]
+# A malicious release is usually caught within days, so a resolution waits before
+# it takes a version younger than that. It only steers what Cargo would pick next:
+# a version already in Cargo.lock is kept, and a deliberate update can override it.
+global-min-publish-age = "3 days"
