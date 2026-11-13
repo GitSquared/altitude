@@ -305,6 +305,7 @@ fn seconds_ms(seconds: i64, nanos: i64) -> i64 {
 }
 
 // The handler that answers cache calls on a master's endpoint.
+#[derive(Clone)]
 pub(crate) struct CacheHandler {
     service: Arc<CacheService>,
 }
@@ -329,7 +330,8 @@ impl ProtocolHandler for CacheHandler {
             let Ok((send, recv)) = connection.accept_bi().await else {
                 return Ok(());
             };
-            self.answer_cache(send, recv).await;
+            let handler = self.clone();
+            tokio::spawn(async move { handler.answer_cache(send, recv).await });
         }
     }
 }

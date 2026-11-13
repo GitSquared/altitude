@@ -177,6 +177,7 @@ impl LayerStore {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct LayerHandler {
     store: Arc<LayerStore>,
 }
@@ -201,7 +202,8 @@ impl ProtocolHandler for LayerHandler {
             let Ok((send, recv)) = connection.accept_bi().await else {
                 return Ok(());
             };
-            self.answer_layer(send, recv).await;
+            let handler = self.clone();
+            tokio::spawn(async move { handler.answer_layer(send, recv).await });
         }
     }
 }

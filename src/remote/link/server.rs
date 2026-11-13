@@ -144,9 +144,15 @@ impl ProtocolHandler for LinkHandler {
             let Ok((send, recv)) = connection.accept_bi().await else {
                 return Ok(());
             };
-            if let Err(err) = answer(self, connection.remote_id(), send, recv).await {
-                tracing::warn!(%err, "link stream failed");
-            }
+            // Each message is its own task: a watch runs for as long as the operator
+            // watches, and the statements sent beside it are not going to wait for it.
+            let handler = self.clone();
+            let remote = connection.remote_id();
+            tokio::spawn(async move {
+                if let Err(err) = answer(&handler, remote, send, recv).await {
+                    tracing::warn!(%err, "link stream failed");
+                }
+            });
         }
     }
 }

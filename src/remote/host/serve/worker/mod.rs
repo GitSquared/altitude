@@ -168,6 +168,7 @@ pub(crate) async fn run(args: &WorkerArgs, base: Config) -> Result<(), Box<dyn E
     Ok(())
 }
 
+#[derive(Clone)]
 struct WorkerService {
     engine: TestbedIsolation,
     config: Config,
@@ -199,9 +200,12 @@ impl ProtocolHandler for WorkerService {
             let Ok((send, recv)) = connection.accept_bi().await else {
                 return Ok(());
             };
-            if let Err(error) = self.answer_call(send, recv).await {
-                tracing::warn!(%error, "a worker call went wrong");
-            }
+            let service = self.clone();
+            tokio::spawn(async move {
+                if let Err(error) = service.answer_call(send, recv).await {
+                    tracing::warn!(%error, "a worker call went wrong");
+                }
+            });
         }
     }
 }
