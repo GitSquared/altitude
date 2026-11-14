@@ -65,13 +65,24 @@ impl LinkClient {
         peer: impl Into<EndpointAddr>,
         request: &WorkerRequest,
         body: &[u8],
+        mut on_side: impl FnMut(WorkerReply),
     ) -> LinkResult<WorkerReply> {
         let dial = self.dial(peer, Conversation::Worker).await?;
         let (mut send, mut recv) = dial.0.open_bi().await?;
         write_frame(&mut send, request).await?;
         send.write_all(body).await?;
         send.finish()?;
-        read_frame(&mut recv).await
+        // A host narrates what it is doing while it does it, so a slow provision reads
+        // as work in progress rather than as a call that never answered.
+        loop {
+            let frame = read_frame::<_, WorkerReply>(&mut recv).await?;
+            match &frame {
+                // What the host says on the way to its answer: the step it is on, and
+                // the lines its own log is writing meanwhile.
+                WorkerReply::Progress { .. } | WorkerReply::Log { .. } => on_side(frame),
+                _ => return Ok(frame),
+            }
+        }
     }
 
     // A host carries one connection from an agent inside its sandbox to the

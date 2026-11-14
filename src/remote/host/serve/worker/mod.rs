@@ -234,10 +234,6 @@ impl WorkerService {
                 self.run_command(send, recv, id, command).await;
                 Ok(())
             }
-            call @ WorkerCall::Provision { .. } => {
-                self.provision(send, recv, call).await;
-                Ok(())
-            }
             WorkerCall::DeliverFile { id, guest_path } => {
                 self.receive_file(send, recv, id, guest_path).await;
                 Ok(())
@@ -262,10 +258,18 @@ impl WorkerService {
                 self.receive_snapshot(send, recv, id, checkout).await;
                 Ok(())
             }
+            call @ WorkerCall::Provision { .. } => {
+                let narrator = Narrator::start(send);
+                logging::relay(Some(narrator.relay_log()));
+                let reply = self.provision(recv, call, &narrator.progress()).await;
+                narrator.finish(reply).await;
+                Ok(())
+            }
             call => {
-                let reply = self.dispatch(call).await;
-                let _ = write_frame(&mut send, &reply).await;
-                let _ = send.finish();
+                let narrator = Narrator::start(send);
+                logging::relay(Some(narrator.relay_log()));
+                let reply = self.dispatch(call, &narrator.progress()).await;
+                narrator.finish(reply).await;
                 Ok(())
             }
         }
@@ -275,6 +279,8 @@ impl WorkerService {
 mod files;
 mod layers;
 mod service;
+
+use service::Narrator;
 
 fn local_capacity() -> WorkerReport {
     let Ok(mut system) = sysinfo::System::new() else {

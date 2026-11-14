@@ -124,6 +124,13 @@ pub(crate) enum WorkerCall {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) enum WorkerReply {
+    // A provision is minutes of work on a host, and a host that says nothing for that
+    // long cannot be told from one that died: it says what it is doing instead, and the
+    // answer comes when there is one.
+    Progress { label: String },
+    // A line of this host's log, on its way to the master's: what a host has to say
+    // about a failure in the middle of it is worth more than the failure alone.
+    Log { line: String },
     // The host started a command and what follows on the stream is its output.
     Ready,
     Ok,

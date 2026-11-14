@@ -62,6 +62,10 @@ pub(crate) fn builder() -> Builder {
     // minutes of work before it answers, and the transport's own idle window would close
     // the connection under it. Whether a peer is alive is the fleet's business, and a
     // heartbeat is what says so — not the absence of application bytes.
+    // iroh's own transport already pings an idle connection every five seconds, so a
+    // peer that is still working is not mistaken for one that left. What it does not
+    // allow is a peer that is busy: the idle window is thirty seconds, and a host
+    // building an installs layer says nothing for minutes.
     let transport = QuicTransportConfig::builder()
         .max_idle_timeout(Some(
             Duration::from_secs(600)

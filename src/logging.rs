@@ -3,7 +3,10 @@ use std::{
     fmt::{Debug, Result as FormatResult},
     fs, io,
     io::IsTerminal,
+    sync::{Mutex, OnceLock},
 };
+
+use tokio::sync::mpsc;
 
 use tracing::field::Field;
 use tracing_appender::{non_blocking::WorkerGuard, rolling};
@@ -28,7 +31,46 @@ pub fn init_service() {
                 .fmt_fields(fmt::format::debug_fn(serve_field))
                 .with_writer(io::stdout),
         )
+        .with(fmt::layer().with_ansi(false).with_writer(Relay))
         .init();
+}
+
+// While a host is answering a call, its log also goes to the master: the machine that
+// asked is the only place a failure on a machine it cannot see can be read. Outside a
+// call this is a sink that takes the line and drops it.
+static RELAY: OnceLock<Mutex<Option<mpsc::UnboundedSender<String>>>> = OnceLock::new();
+
+pub fn relay(lines: Option<mpsc::UnboundedSender<String>>) {
+    let relay = RELAY.get_or_init(|| Mutex::new(None));
+    if let Ok(mut current) = relay.lock() {
+        *current = lines;
+    }
+}
+
+struct Relay;
+
+impl io::Write for Relay {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if let Some(relay) = RELAY.get()
+            && let Ok(current) = relay.lock()
+            && let Some(lines) = current.as_ref()
+        {
+            let _ = lines.send(String::from_utf8_lossy(bytes).into_owned());
+        }
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> fmt::MakeWriter<'a> for Relay {
+    type Writer = Relay;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        Relay
+    }
 }
 
 fn serve_field(

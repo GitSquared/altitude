@@ -153,6 +153,7 @@ impl WorkersIsolation {
         worker: &str,
         call: WorkerCall,
         profiles: &[WorkerProfile],
+        progress: &dyn EnvironmentProgressSink,
     ) -> Result<WorkerReply, IsolationError> {
         let peer = self.fleet.peer(worker).ok_or_else(|| {
             IsolationError::missing_sandbox(format!("isolation worker {worker} is gone"))
@@ -171,7 +172,19 @@ impl WorkersIsolation {
         let began = Instant::now();
         let answer = self
             .client
-            .worker_provision(peer, &request, &body)
+            .worker_provision(peer, &request, &body, |says| match says {
+                // The operator's line is the host's own words: only it knows which step
+                // of a provision it is on.
+                WorkerReply::Progress { label } => progress.report(EnvironmentProgress {
+                    label,
+                    completed: 0,
+                    total: 0,
+                }),
+                // A host's log goes to this machine's journal with the host's name on
+                // it, which outlives the host the lines came from.
+                WorkerReply::Log { line } => tracing::info!(worker, "{line}"),
+                _ => {}
+            })
             .await
             .map_err(|error| IsolationError::new(error.to_string()));
         tracing::info!(
@@ -420,7 +433,7 @@ impl IsolationEngine for WorkersIsolation {
             vsock,
         };
         if let Err(error) = self
-            .provision_on(&worker, call, &profiles)
+            .provision_on(&worker, call, &profiles, progress)
             .await
             .and_then(expect_ok)
         {

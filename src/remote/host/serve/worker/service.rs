@@ -1,19 +1,29 @@
-use std::{fs, net::Ipv4Addr, path::PathBuf, process::Command, time::Instant};
+use std::{
+    fs,
+    net::Ipv4Addr,
+    path::PathBuf,
+    process::Command,
+    time::Instant,
+};
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 
 use iroh::endpoint::{RecvStream, SendStream};
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
-use tokio::task::spawn_blocking;
+use tokio::{
+    sync::mpsc,
+    task::{JoinHandle, spawn_blocking},
+};
 
 use crate::{
     agent::{AgentEngines, mcp},
+    logging,
     config::Config,
     credentials::profile_recipe,
     isolation::{
-        CommandEvent, CredentialSandbox, IsolationEngine, ProfileRecipe, Unwatched, VsockRoute,
-        private_directory,
+        CommandEvent, CredentialSandbox, EnvironmentProgress, EnvironmentProgressSink,
+        IsolationEngine, ProfileRecipe, Unwatched, VsockRoute, private_directory,
         worker_protocol::{CommandFrame, WorkerCall, WorkerProfile, WorkerReply},
     },
     remote::cache::share::client_ip,
@@ -21,6 +31,95 @@ use crate::{
 };
 
 use super::WorkerService;
+
+// What a host says while it works, and the answer it ends with. A provision is minutes
+// of work — an installs layer is built or restored inside it — so the host keeps
+// talking instead of going quiet and looking dead.
+pub(super) enum Statement {
+    Progress(String),
+    Log(String),
+    Answer(WorkerReply),
+}
+
+#[derive(Clone)]
+pub(super) struct Progress(mpsc::UnboundedSender<Statement>);
+
+// The host's half of a call: what it says while it works, and the one answer at the end.
+pub(super) struct Narrator {
+    statements: mpsc::UnboundedSender<Statement>,
+    task: JoinHandle<()>,
+}
+
+impl Narrator {
+    pub(super) fn start(mut send: SendStream) -> Self {
+        let (statements, mut said) = mpsc::unbounded_channel::<Statement>();
+        let task = tokio::spawn(async move {
+            while let Some(statement) = said.recv().await {
+                match statement {
+                    Statement::Progress(label) => {
+                        let frame = WorkerReply::Progress { label };
+                        if write_frame(&mut send, &frame).await.is_err() {
+                            break;
+                        }
+                    }
+                    Statement::Log(line) => {
+                        if write_frame(&mut send, &WorkerReply::Log { line })
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Statement::Answer(reply) => {
+                        let _ = write_frame(&mut send, &reply).await;
+                        let _ = send.finish();
+                        break;
+                    }
+                }
+            }
+        });
+        Self { statements, task }
+    }
+
+    pub(super) fn progress(&self) -> Progress {
+        Progress(self.statements.clone())
+    }
+
+    // The host's log travels to the master for the length of the call, and only then:
+    // outside it there is nobody to tell.
+    pub(super) fn relay_log(&self) -> mpsc::UnboundedSender<String> {
+        let (lines, mut said) = mpsc::unbounded_channel::<String>();
+        let statements = self.statements.clone();
+        tokio::spawn(async move {
+            while let Some(line) = said.recv().await {
+                if statements.send(Statement::Log(line)).is_err() {
+                    break;
+                }
+            }
+        });
+        lines
+    }
+
+    pub(super) async fn finish(self, reply: WorkerReply) {
+        let _ = self.statements.send(Statement::Answer(reply));
+        let _ = self.task.await;
+        logging::relay(None);
+    }
+}
+
+impl Progress {
+    pub(super) fn say(&self, label: impl Into<String>) {
+        let _ = self.0.send(Statement::Progress(label.into()));
+    }
+}
+
+// Everything the engine narrates on this host travels to the master's status line, so a
+// provision reads the same whether the sandbox is local or a machine we cannot see.
+impl EnvironmentProgressSink for Progress {
+    fn report(&self, progress: EnvironmentProgress) {
+        self.say(progress.label);
+    }
+}
 
 impl WorkerService {
     // The host's end of the agent channel: it listens on the loopback the sandbox
@@ -145,7 +244,9 @@ impl WorkerService {
         }
     }
 
-    pub(super) async fn dispatch(&self, call: WorkerCall) -> WorkerReply {
+    // The calls that reach here are quick; the long one, a provision, has its own path
+    // because it reads the profile files before it answers.
+    pub(super) async fn dispatch(&self, call: WorkerCall, _progress: &Progress) -> WorkerReply {
         match call {
             WorkerCall::Create {
                 id,
@@ -267,10 +368,10 @@ impl WorkerService {
     // plugins and caches, which no frame would hold.
     pub(super) async fn provision(
         &self,
-        mut send: SendStream,
         mut recv: RecvStream,
         call: WorkerCall,
-    ) {
+        progress: &Progress,
+    ) -> WorkerReply {
         let mut body = Vec::new();
         let read = (&mut recv)
             .take(MAX_BLOB_BYTES)
@@ -281,19 +382,18 @@ impl WorkerService {
         }) {
             Ok(profiles) => profiles,
             Err(error) => {
-                let _ = write_frame(
-                    &mut send,
-                    &WorkerReply::Failed(format!("could not read the profile files: {error}")),
-                )
-                .await;
-                return;
+                return WorkerReply::Failed(format!("could not read the profile files: {error}"));
             }
         };
-        let reply = self.provision_call(call, profiles).await;
-        let _ = write_frame(&mut send, &reply).await;
+        self.provision_call(call, profiles, progress).await
     }
 
-    async fn provision_call(&self, call: WorkerCall, profiles: Vec<WorkerProfile>) -> WorkerReply {
+    async fn provision_call(
+        &self,
+        call: WorkerCall,
+        profiles: Vec<WorkerProfile>,
+        progress: &Progress,
+    ) -> WorkerReply {
         let WorkerCall::Provision {
             id,
             snapshot,
@@ -308,6 +408,7 @@ impl WorkerService {
             return WorkerReply::Failed("not a provision".into());
         };
         tracing::info!("a provision arrived; writing its profiles");
+        progress.say("writing this sandbox's profile files");
         let began = Instant::now();
         match write_profiles_off_thread(self.config.clone(), profiles).await {
             Ok((files, bytes)) => tracing::info!(
@@ -318,6 +419,7 @@ impl WorkerService {
             ),
             Err(error) => return WorkerReply::Failed(error),
         }
+        progress.say("mounting this project's cache");
         if let Err(error) = self.mount_cache(cache.as_deref(), &owner, &project.id) {
             return WorkerReply::Failed(error);
         }
@@ -342,7 +444,7 @@ impl WorkerService {
         tracing::info!(sandbox = %id, "composing and creating the sandbox");
         let outcome = self
             .engine
-            .provision(id.clone(), snapshot, project, recipes, vsock, &Unwatched)
+            .provision(id.clone(), snapshot, project, recipes, vsock, progress)
             .await;
         tracing::info!(
             sandbox = %id,
