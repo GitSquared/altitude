@@ -1,4 +1,4 @@
-use std::{fs, net::Ipv4Addr, time::Instant};
+use std::{fs, net::Ipv4Addr, process::Command, time::Instant};
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 
@@ -19,11 +19,9 @@ use crate::{
         private_directory,
         worker_protocol::{CommandFrame, WorkerCall, WorkerProfile, WorkerReply},
     },
+    remote::cache::share::client_ip,
     remote::protocol::{MAX_BLOB_BYTES, read_frame, write_frame},
 };
-
-#[cfg(target_os = "linux")]
-use crate::remote::cache::{self, CacheFs};
 
 use super::WorkerService;
 
@@ -93,11 +91,37 @@ impl WorkerService {
     // task that finds it cold is slower, which is all a cache can cost. The network
     // filesystem this used to mount is gone — it made every read a call, and a call that
     // could be answered only by the thread waiting on it.
-    // The project cache is a directory on this host, empty until an export fills it: a task
-    // that finds it cold is slower, which is all a cache can cost. The network filesystem
-    // that used to be mounted here made every read a call to the master — and a call only
-    // the thread waiting on it could answer.
-    fn mount_cache(&self, _id: &str, _owner: &str, _project: &str) -> Result<(), String> {
+    // The project's cache, as the master exports it to this host for as long as its sandbox
+    // lives. Mounting is best-effort: a cache that is not there costs time, and nothing
+    // else, so a host that cannot reach the export works on a cold one.
+    fn mount_cache(&self, _id: &str, owner: &str, project: &str) -> Result<(), String> {
+        if owner.is_empty() {
+            return Ok(());
+        }
+        let Some(server) = client_ip(&self.master) else {
+            return Ok(());
+        };
+        let path = self.config.project_cache_dir(project);
+        if fs::create_dir_all(&path).is_err() {
+            return Ok(());
+        }
+        let mounted = Command::new("mount")
+            .arg("-t")
+            .arg("nfs4")
+            .arg(format!("{server}:{}", path.display()))
+            .arg(&path)
+            .output();
+        match mounted {
+            Ok(output) if output.status.success() => {
+                tracing::info!(project, "the project cache is mounted from the master")
+            }
+            Ok(output) => tracing::warn!(
+                project,
+                reason = %String::from_utf8_lossy(&output.stderr).trim(),
+                "no export for this project's cache; the sandbox starts with a cold one"
+            ),
+            Err(error) => tracing::warn!(%error, "could not run mount"),
+        }
         Ok(())
     }
 

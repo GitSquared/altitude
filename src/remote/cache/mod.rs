@@ -7,3 +7,4 @@ pub(crate) mod service;
 pub(crate) use mount::{CacheFs, mount};
 pub(crate) use protocol::CACHE_ALPN;
 pub(crate) use service::{CacheHandler, CacheService};
+pub(crate) mod share;
