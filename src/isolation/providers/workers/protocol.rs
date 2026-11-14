@@ -42,8 +42,10 @@ pub(crate) enum WorkerCall {
         id: String,
         snapshot: Option<String>,
         project: Project,
-        // The operator whose cache this is; the host mounts it before building.
+        // The operator whose cache this is, and where this master exports it from: the
+        // host mounts that path on its own cache directory before building.
         owner: String,
+        cache: Option<String>,
         agent_profile: String,
         vcs_profile: String,
         vsock: Vec<VsockRoute>,

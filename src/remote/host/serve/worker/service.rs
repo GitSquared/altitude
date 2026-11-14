@@ -94,11 +94,11 @@ impl WorkerService {
     // The project's cache, as the master exports it to this host for as long as its sandbox
     // lives. Mounting is best-effort: a cache that is not there costs time, and nothing
     // else, so a host that cannot reach the export works on a cold one.
-    fn mount_cache(&self, _id: &str, owner: &str, project: &str) -> Result<(), String> {
+    fn mount_cache(&self, cache: Option<&str>, owner: &str, project: &str) -> Result<(), String> {
         if owner.is_empty() {
             return Ok(());
         }
-        let Some(server) = client_ip(&self.master) else {
+        let (Some(source), Some(server)) = (cache, client_ip(&self.master)) else {
             return Ok(());
         };
         let path = self.config.project_cache_dir(project);
@@ -108,7 +108,7 @@ impl WorkerService {
         let mounted = Command::new("mount")
             .arg("-t")
             .arg("nfs4")
-            .arg(format!("{server}:{}", path.display()))
+            .arg(format!("{server}:{source}"))
             .arg(&path)
             .output();
         match mounted {
@@ -274,6 +274,7 @@ impl WorkerService {
             snapshot,
             project,
             owner,
+            cache,
             agent_profile,
             vcs_profile,
             vsock,
@@ -292,7 +293,7 @@ impl WorkerService {
             ),
             Err(error) => return WorkerReply::Failed(error),
         }
-        if let Err(error) = self.mount_cache(&id, &owner, &project.id) {
+        if let Err(error) = self.mount_cache(cache.as_deref(), &owner, &project.id) {
             return WorkerReply::Failed(error);
         }
         let recipes = match (

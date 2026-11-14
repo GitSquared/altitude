@@ -420,6 +420,17 @@ impl WorkerHost for WorkerFleet {
                         "an isolation worker joined"
                     );
                 }
+                // A host joins once, as it starts, and a host that starts holds no
+                // sandbox. Whatever this machine last gave this name is on a machine that
+                // is gone, and holding it would keep the host busy forever: the reaper
+                // spares an assigned host so it can survive a provision, which means an
+                // assignment outlives the host that never answered again.
+                if state.assigned.remove(&name) {
+                    tracing::warn!(
+                        worker = %name,
+                        "a host joined again with a sandbox this machine still believed in"
+                    );
+                }
                 state.connected.insert(
                     name,
                     ConnectedWorker {

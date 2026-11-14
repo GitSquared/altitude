@@ -52,6 +52,30 @@ pub(crate) struct WorkersIsolation {
 impl WorkersIsolation {
     // Whoever owns the data directory owns the cache it holds, so the export maps every
     // writing host onto that one account.
+    // The cache is a directory here either way; the export is what lets this one host see
+    // it, and no other machine on the network, for as long as its sandbox lives.
+    fn export_cache(&self, worker: &str, id: &str, project: &Project) -> Option<String> {
+        let client = self
+            .fleet
+            .peer(worker)
+            .and_then(|peer| share::client_ip(&peer))?;
+        let path = self.config.project_cache_dir(&project.id);
+        if let Err(error) = fs::create_dir_all(&path) {
+            tracing::warn!(%error, "could not make the project's cache directory");
+            return None;
+        }
+        match share::export(&client, &path, self.cache_owner_uid()) {
+            Ok(()) => {
+                self.remember_export(id, client, path.clone());
+                Some(path.display().to_string())
+            }
+            Err(error) => {
+                tracing::warn!(%error, worker = %worker, "could not export the project cache");
+                None
+            }
+        }
+    }
+
     // What this machine lent to which host, so the lend is taken back when the sandbox ends.
     fn remember_export(&self, id: &str, client: String, path: PathBuf) {
         if let Ok(mut exports) = self.exports.lock() {
@@ -379,21 +403,7 @@ impl IsolationEngine for WorkersIsolation {
         let checkout = checkout_guest(&project);
         self.remember_checkout(&id, checkout.clone());
         let worker = self.provision_host(&id).await?;
-        // The cache is a directory here either way; an export is what lets this one host
-        // see it while its sandbox lives, and nothing else on the network can.
-        let cache_dir = self.config.project_cache_dir(&project.id);
-        let exported_to = self
-            .fleet
-            .peer(&worker)
-            .and_then(|peer| share::client_ip(&peer));
-        if let Some(client) = exported_to.clone() {
-            match share::export(&client, &cache_dir, self.cache_owner_uid()) {
-                Ok(()) => self.remember_export(&id, client, cache_dir.clone()),
-                Err(error) => {
-                    tracing::warn!(%error, worker = %worker, "could not export the project cache")
-                }
-            }
-        }
+        let cache = self.export_cache(&worker, &id, &project);
         progress.report(EnvironmentProgress {
             label: "getting the worker ready".to_owned(),
             completed: 0,
@@ -404,6 +414,7 @@ impl IsolationEngine for WorkersIsolation {
             snapshot: None,
             project,
             owner: self.owner.clone().unwrap_or_default(),
+            cache,
             agent_profile,
             vcs_profile,
             vsock,
