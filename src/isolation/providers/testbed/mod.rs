@@ -397,14 +397,15 @@ impl TestbedIsolation {
         }
         let file = fs::File::create(destination).map_err(io_error)?;
         let mut builder = Builder::new(file);
-        builder.append_dir_all("root", &root).map_err(io_error)?;
+        // A sandbox is being written while it is packed — the agent may be running in it
+        // — so an entry that cannot be read at this instant is an entry to leave out,
+        // not a reason to lose the whole snapshot.
+        pack_home(&mut builder, "root", &root).map_err(IsolationError::new)?;
         if let Some(checkout) = checkout {
             let record = self.read_record(id)?;
             let host = self.host_path(id, &record, checkout);
             if host.exists() {
-                builder
-                    .append_dir_all("checkout", &host)
-                    .map_err(io_error)?;
+                pack_home(&mut builder, "checkout", &host).map_err(IsolationError::new)?;
             }
         }
         builder.finish().map_err(io_error)?;

@@ -288,20 +288,35 @@ where
                         );
                         Ok(())
                     }
-                    // Where it was writing is half of why it could not: a permission
-                    // denied on one machine is a directory owned by another, and the
-                    // operator is the only one who can look.
+                    // A capsule that could not be packed is a capsule this pause does
+                    // not keep, and that is all it costs: the task keeps its record and
+                    // its memory, and the next run builds a sandbox again. Ending the
+                    // task over it ends the work the operator was watching, which is a
+                    // worse answer than a slower next start.
+                    //
+                    // Where it was writing is half of why it could not — a file changed
+                    // while it was read, a permission denied on another machine's
+                    // directory — so the directory is in the warning.
                     Err(error) => {
+                        tracing::warn!(
+                            task_id = %task.id,
+                            snapshots = %service.snapshots_dir.display(),
+                            %error,
+                            "a task's sandbox could not be saved; the pause keeps no snapshot"
+                        );
                         service
-                            .fail(
-                                &task,
-                                format!(
-                                    "could not save the task sandbox to {}: {error}",
-                                    service.snapshots_dir.display()
-                                ),
+                            .record(
+                                &task.id,
+                                &[TaskHistoryEvent::ExecutionPaused {
+                                    execution_status: TaskExecutionStatus::Paused,
+                                    sandbox_available: false,
+                                    snapshot_available: false,
+                                    execution_pause_reason: reason.clone(),
+                                    snapshot_path: String::new(),
+                                }],
                             )
                             .await?;
-                        Err(TaskServiceError::Isolation(error))
+                        Ok(())
                     }
                 }
             }
