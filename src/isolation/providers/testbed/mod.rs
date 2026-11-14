@@ -468,15 +468,6 @@ pub(super) fn os_release() -> String {
         .unwrap_or_default()
 }
 
-pub(super) fn output_tail(output: &str) -> &str {
-    const LIMIT: usize = 1_000;
-    let mut start = output.len().saturating_sub(LIMIT);
-    while start < output.len() && !output.is_char_boundary(start) {
-        start += 1;
-    }
-    output[start..].trim()
-}
-
 pub(super) fn check_environment() -> Result<(), IsolationError> {
     for binary in ["/usr/bin/unshare", "/usr/sbin/chroot", "/usr/bin/mount"] {
         if !Path::new(binary).is_file() {

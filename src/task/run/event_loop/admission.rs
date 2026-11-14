@@ -18,7 +18,12 @@ use crate::task::TaskEventLoop;
 // would never return, so nothing after it on the machine would move either. What the
 // budget measures is progress and not duration, because a cold environment build is
 // minutes of honest work: a start that keeps reaching new stages is a start working.
-const START_BUDGET: Duration = Duration::from_secs(10 * 60);
+// Long enough to outlast the slowest single step a start has, which is an install of a
+// project's dependencies on a host that has to build the image's layer for the first
+// time. That step carries its own patience and reports it; this reads the stage, and a
+// stage cannot change while one step is running. A budget shorter than that step turns a
+// slow first build into a task that never builds the layer everyone after it restores.
+const START_BUDGET: Duration = Duration::from_secs(35 * 60);
 
 // A start is minutes of silence in a log. At debug, saying so every half minute is
 // what tells a slow start from a stopped one, which otherwise read the same.

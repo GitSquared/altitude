@@ -1,20 +1,30 @@
 use std::{
+    collections::VecDeque,
     fs,
     io::{self, ErrorKind, Read, Write},
     os::unix::fs::{PermissionsExt, symlink},
     path::{Path, PathBuf},
+    process::Stdio,
+    sync::{Arc, Mutex},
     thread,
 };
 
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 use tokio::process::Command as TokioCommand;
 use tokio::sync::mpsc;
+use tokio::time::{Duration, timeout};
 
 use crate::isolation::{
     Command, CommandEvent, CommandSession, GUEST_PATH, IsolationError, OutputStream, shell_quote,
 };
 
-use super::{SandboxRecord, output_tail};
+use super::SandboxRecord;
+
+// A step gets long enough for a cold install over a slow link, and no longer: a step
+// that outlives this is one nobody is going to get an answer out of.
+const STEP_PATIENCE: Duration = Duration::from_secs(25 * 60);
+const SAID_LINES: usize = 20;
 
 // The skeleton a sandbox's own disk holds. Everything else a command sees is bound
 // over it: the machine's system trees, and the plan's mounts.
@@ -206,23 +216,73 @@ pub(super) async fn run_step(
     for (key, value) in &record.environment {
         builder.env(key, value);
     }
-    let output = builder
-        .output()
-        .await
+    // A step that installs a project's dependencies is minutes of other people's
+    // software talking to a network, and it says nothing at the end that its own output
+    // would not have said as it went. That output is logged rather than swallowed: on a
+    // host it travels to the master with the rest of the host's log, so an install that
+    // is slow and one that is wedged look different.
+    //
+    // Corepack asks before it downloads a package manager, and there is nobody here to
+    // answer: without this it waits out the step's whole patience on a question.
+    builder.env("COREPACK_ENABLE_DOWNLOAD_PROMPT", "0");
+    builder.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = builder
+        .spawn()
         .map_err(|error| IsolationError::new(error.to_string()))?;
-    if output.status.success() {
+    let tail = Arc::new(Mutex::new(VecDeque::new()));
+    let readers = [
+        child
+            .stdout
+            .take()
+            .map(|out| tokio::spawn(relay(out, Arc::clone(&tail)))),
+        child
+            .stderr
+            .take()
+            .map(|err| tokio::spawn(relay(err, Arc::clone(&tail)))),
+    ];
+    let status = match timeout(STEP_PATIENCE, child.wait()).await {
+        Ok(status) => status.map_err(|error| IsolationError::new(error.to_string()))?,
+        Err(_) => {
+            let _ = child.kill().await;
+            return Err(IsolationError::new(format!(
+                "{} ran for {} minutes without finishing",
+                command.lines().next().unwrap_or("a setup step"),
+                STEP_PATIENCE.as_secs() / 60
+            )));
+        }
+    };
+    for reader in readers.into_iter().flatten() {
+        let _ = reader.await;
+    }
+    if status.success() {
         return Ok(());
     }
-    let stderr = output_tail(&String::from_utf8_lossy(&output.stderr)).to_owned();
-    let said = if stderr.is_empty() {
-        output_tail(&String::from_utf8_lossy(&output.stdout)).to_owned()
-    } else {
-        stderr
-    };
+    let said = tail
+        .lock()
+        .map(|tail| tail.iter().cloned().collect::<Vec<_>>().join("\n"))
+        .unwrap_or_default();
     Err(IsolationError::new(format!(
         "setup exited with code {:?}: {said}",
-        output.status.code()
+        status.code()
     )))
+}
+
+// Enough of a step's output to explain it, which is the end of it: the start is the
+// part that says nothing a reader did not already know.
+async fn relay<R>(reader: R, tail: Arc<Mutex<VecDeque<String>>>)
+where
+    R: AsyncRead + Unpin,
+{
+    let mut lines = BufReader::new(reader).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        tracing::info!("{line}");
+        if let Ok(mut tail) = tail.lock() {
+            if tail.len() == SAID_LINES {
+                tail.pop_front();
+            }
+            tail.push_back(line);
+        }
+    }
 }
 
 // A fresh namespace per command, because the mounts a command needs are what make
