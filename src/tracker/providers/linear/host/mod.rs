@@ -8,6 +8,7 @@ use std::{
 };
 
 use crate::remote::identity::write_private;
+use crate::task::TaskExecutionStatus;
 use crate::task::{QueueStanding, Start};
 use crate::task::{TaskAsk, TaskAskKind, TaskExecutionPauseReason, TaskHistoryEvent};
 use crate::tracker::host::{BoundTask, DelegatedWork};
@@ -98,17 +99,24 @@ pub struct RemoteTracker {
     delivered: AtomicBool,
 }
 
-// An error activity ends the session's "working" state, so it says what stopped the
-// task rather than only that something did. A failure is a state and not a question,
-// which is why the way out of it is part of the same message.
-fn failure_notice(error: &str) -> String {
-    format!(
-        "**altitude stopped this task.**\n\n{}\n\n\
-         Take it over with ctrl-↩ in the altitude terminal and unblock it there: leaving \
-         the terminal hands the work back to altitude, which carries on from where you left \
-         it. A message here restarts it too, without a terminal.",
-        error.trim()
-    )
+// An error activity ends the session's "working" state, so it says what happened rather
+// than only that something did. A task that failed before it took a turn was never
+// running, and calling that stopped claims an action nobody took: the difference is the
+// status the failure was recorded under.
+fn failure_notice(error: &str, status: &TaskExecutionStatus) -> String {
+    let (opening, closing) = match status {
+        TaskExecutionStatus::Pending => (
+            "**altitude could not start this task.**",
+            "It never took a turn, so nothing was lost: a message here tries again.",
+        ),
+        _ => (
+            "**altitude stopped this task.**",
+            "Take it over with ctrl-↩ in the altitude terminal and unblock it there: leaving \
+             the terminal hands the work back to altitude, which carries on from where you left \
+             it. A message here restarts it too, without a terminal.",
+        ),
+    };
+    format!("{opening}\n\n{}\n\n{closing}", error.trim())
 }
 
 // A pause that asks a person for something is the last thing a run says, and it is

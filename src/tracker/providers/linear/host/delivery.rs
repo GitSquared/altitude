@@ -284,12 +284,15 @@ impl RemoteTracker {
             // failure raised carries the detail; this is what stops the session
             // claiming the agent is still busy, which is what it looked like while
             // the machine had already given up.
-            TaskHistoryEvent::ExecutionFailed { error, .. } => {
+            TaskHistoryEvent::ExecutionFailed {
+                execution_status,
+                error,
+            } => {
                 self.say_system(
                     report,
                     &stable_id(&format!("{}-{index}", report.task_id), "failed"),
                     AgentActivityContent::Error {
-                        body: failure_notice(error),
+                        body: failure_notice(error, &execution_status),
                     },
                 )
                 .await
