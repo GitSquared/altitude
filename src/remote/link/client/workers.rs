@@ -1,13 +1,39 @@
+use std::time::Duration;
+
+use tokio::time;
+
 use super::*;
+
+// A host waiting on a layer it may not get is a host not doing its own work.
+const LAYER_PATIENCE: Duration = Duration::from_secs(10);
 
 impl LinkClient {
     // What another host built, fetched by this one: the archive is copied into the
     // sink, and `false` says the master has nothing for this environment and tag.
+    // A layer is an optimisation and a host that cannot fetch one builds its own, so the
+    // fetch is bounded: a conversation that stalls costs this host a build, not the ten
+    // minutes a connection's idle window takes to decide the conversation is over.
     pub(crate) async fn layer_fetch(
         &self,
         peer: impl Into<EndpointAddr>,
         request: &LayerRequest,
         mut sink: AsyncFile,
+    ) -> LinkResult<bool> {
+        let peer = peer.into();
+        match time::timeout(LAYER_PATIENCE, self.fetch_layer(peer, request, &mut sink)).await {
+            Ok(result) => result,
+            Err(_) => {
+                tracing::warn!("an installs layer went unanswered; this host builds its own");
+                Ok(false)
+            }
+        }
+    }
+
+    async fn fetch_layer(
+        &self,
+        peer: EndpointAddr,
+        request: &LayerRequest,
+        sink: &mut AsyncFile,
     ) -> LinkResult<bool> {
         let dial = self.dial(peer, Conversation::Layers).await?;
         let (mut send, mut recv) = dial.0.open_bi().await?;
@@ -15,7 +41,7 @@ impl LinkClient {
         send.finish()?;
         match read_frame::<_, LayerReply>(&mut recv).await? {
             LayerReply::Blob { .. } => {
-                copy(&mut recv, &mut sink).await?;
+                copy(&mut recv, sink).await?;
                 sink.sync_all().await?;
                 Ok(true)
             }
