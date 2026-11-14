@@ -1,10 +1,4 @@
-use std::{
-    fs,
-    net::Ipv4Addr,
-    path::PathBuf,
-    process::Command,
-    time::Instant,
-};
+use std::{fs, net::Ipv4Addr, path::PathBuf, process::Command, time::Instant};
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 
@@ -18,7 +12,6 @@ use tokio::{
 
 use crate::{
     agent::{AgentEngines, mcp},
-    logging,
     config::Config,
     credentials::profile_recipe,
     isolation::{
@@ -26,6 +19,7 @@ use crate::{
         IsolationEngine, ProfileRecipe, Unwatched, VsockRoute, private_directory,
         worker_protocol::{CommandFrame, WorkerCall, WorkerProfile, WorkerReply},
     },
+    logging,
     remote::cache::share::client_ip,
     remote::protocol::{MAX_BLOB_BYTES, read_frame, write_frame},
 };
