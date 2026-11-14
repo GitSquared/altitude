@@ -4,9 +4,10 @@ use tokio::net::lookup_host;
 
 use iroh::{
     Endpoint, EndpointAddr, EndpointId,
-    endpoint::{Builder, presets},
+    endpoint::{Builder, QuicTransportConfig, presets},
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use std::time::Duration;
 
 use crate::task::{
     LeadingAsk, Task, TaskAsk, TaskExecutionMode, TaskExecutionPauseReason, TaskExecutionStatus,
@@ -57,7 +58,18 @@ pub(super) const CHUNK_BYTES: usize = 64 * 1024;
 pub(crate) const TRANSFER_PIECE_BYTES: u64 = 4 * 1024 * 1024;
 
 pub(crate) fn builder() -> Builder {
-    Endpoint::builder(presets::Minimal)
+    // A host can be silent for a long time inside one call: building an installs layer is
+    // minutes of work before it answers, and the transport's own idle window would close
+    // the connection under it. Whether a peer is alive is the fleet's business, and a
+    // heartbeat is what says so — not the absence of application bytes.
+    let transport = QuicTransportConfig::builder()
+        .max_idle_timeout(Some(
+            Duration::from_secs(600)
+                .try_into()
+                .expect("ten minutes is a window QUIC can carry"),
+        ))
+        .build();
+    Endpoint::builder(presets::Minimal).transport_config(transport)
 }
 
 // ------------------------------------------------------------------- the wire
