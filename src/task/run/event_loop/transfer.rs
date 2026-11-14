@@ -109,8 +109,17 @@ where
             .isolation
             .for_operator(owner)
             .map_err(TaskServiceError::Isolation)?;
-        // A task that is not holding a sandbox is given one here before anything can
-        // be read out of it, and on a cold machine that is a build, not a copy.
+        // Files come from a sandbox the task is holding, or from one restored from its
+        // snapshot. A task with neither has no files to carry — and provisioning a
+        // machine to copy nothing out of it is a build that ends in the same failure
+        // that ended the task, while whoever asked for the handover waits for it.
+        if !task.facts.sandbox_available && !task.facts.snapshot_available {
+            tracing::info!(
+                task = %task.id,
+                "packing a task that holds no sandbox: its record is all it has"
+            );
+            return Ok(());
+        }
         tracing::info!(task = %task.id, "resuming a task's sandbox to pack its files");
         let resumed = self.service.provision(task.clone()).await?;
         let sandbox_id = resumed
