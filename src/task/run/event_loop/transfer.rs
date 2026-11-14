@@ -121,12 +121,25 @@ where
             return Ok(());
         }
         tracing::info!(task = %task.id, "resuming a task's sandbox to pack its files");
-        let resumed = self.service.provision(task.clone()).await?;
-        let sandbox_id = resumed
-            .facts
-            .sandbox_id
-            .clone()
-            .ok_or(TaskServiceError::Task(TaskError::MissingSandbox))?;
+        // The record is what a handover must carry; the files are what it can carry. A
+        // sandbox that cannot be stood up — its host is gone, or none can be had — is a
+        // reason to hand the task over without its working tree, not a reason to leave
+        // the operator with a progress line that cannot finish.
+        let resumed = match self.service.provision(task.clone()).await {
+            Ok(resumed) => resumed,
+            Err(error) => {
+                tracing::warn!(
+                    task = %task.id,
+                    %error,
+                    "no sandbox could be stood up to pack from; the task travels as its record"
+                );
+                return Ok(());
+            }
+        };
+        let Some(sandbox_id) = resumed.facts.sandbox_id.clone() else {
+            tracing::warn!(task = %task.id, "the sandbox gave no id to pack from");
+            return Ok(());
+        };
         let packed = self
             .pack_into(
                 &isolation,
@@ -144,13 +157,17 @@ where
         // When the pack failed it stays, because it holds the work the capsule never
         // got: what the agent has in that tree is the only copy of it, and a transfer
         // that ends without a capsule is not a reason to destroy it.
-        if packed.is_err() {
+        if let Err(error) = &packed {
+            // The sandbox stays — what the agent has in that tree is the only copy of it
+            // — and the handover carries the record without the files rather than
+            // leaving whoever asked waiting on a transfer that cannot complete.
             tracing::warn!(
                 task = %task.id,
                 sandbox_id = %sandbox_id,
+                %error,
                 "a task's files could not be packed; its sandbox stays where the work is"
             );
-            return packed;
+            return Ok(());
         }
         if let Err(error) = isolation.remove(sandbox_id).await {
             tracing::warn!(%error, "could not remove the sandbox a task was packed from");
