@@ -19,11 +19,14 @@ use super::{VsockRoute, private_directory};
 
 pub(crate) const PORT_RELAY_GUEST_PORT: u32 = 5001;
 
-const HELPER: &str = "/usr/local/bin/altitude-port-relay.py";
+// In the guest's own home, not /usr/local/bin: on a host the sandbox is an unprivileged
+// account's home and namespace, so the machine's /usr/local/bin is not the sandbox's to
+// write, and a setup that tried failed before the task had started.
+const HELPER: &str = "/root/.altitude/altitude-port-relay.py";
 
 pub(crate) fn install_script() -> String {
     format!(
-        "cat > {HELPER} <<'ALTITUDE_PORTS'\n{}ALTITUDE_PORTS\nchmod 0755 {HELPER}\n",
+        "mkdir -p /root/.altitude\ncat > {HELPER} <<'ALTITUDE_PORTS'\n{}ALTITUDE_PORTS\nchmod 0755 {HELPER}\n",
         include_str!("assets/port-relay.py")
     )
 }
