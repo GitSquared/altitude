@@ -330,7 +330,7 @@ impl RemoteTracker {
                     report,
                     &stable_id(&format!("{}-{index}", report.task_id), "woken"),
                     AgentActivityContent::Thought {
-                        body: "altitude is waking this task to read a new message.".to_owned(),
+                        body: "altitude is waking this task to read a new message".to_owned(),
                     },
                 )
                 .await

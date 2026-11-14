@@ -153,9 +153,9 @@ fn queue_notice_state(standing: &QueueStanding) -> String {
     // minutes it spends starting are the ones an operator is most likely to be
     // watching, so they say what is being done rather than what is being waited for.
     match &standing.start {
-        Some(Start::Provisioning) => {
-            return "Starting on the remote · launching an isolated sandbox".to_owned();
-        }
+        // Nothing has said what it is doing yet: claiming to be launching a sandbox
+        // would be a guess, and a wrong one while a worker is still being fetched.
+        Some(Start::Provisioning) => return "Starting on the remote".to_owned(),
         // No count: what an operator wants is what is being done now, and a number out
         // of a total that the machine doing its own work would not have is noise.
         Some(Start::Building(progress)) => {

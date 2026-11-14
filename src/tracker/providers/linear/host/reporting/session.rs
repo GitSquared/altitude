@@ -223,7 +223,7 @@ impl RemoteTracker {
         let body = match (&task.status, task.pause_reason.as_ref()) {
             (TaskExecutionStatus::Running, _) => {
                 format!(
-                    "altitude is working on this task on {}.",
+                    "altitude is working on this task on {}",
                     self.config.host_label
                 )
             }
@@ -232,11 +232,11 @@ impl RemoteTracker {
             }
             (TaskExecutionStatus::Paused, Some(reason)) => reason.notice().to_owned(),
             (TaskExecutionStatus::Pending, _) => format!(
-                "altitude has this task queued on {}; it starts when the machine has room.",
+                "altitude has this task queued on {}; it starts when the machine has room",
                 self.config.host_label
             ),
             _ => format!(
-                "altitude is reporting on this task from {}.",
+                "altitude is reporting on this task from {}",
                 self.config.host_label
             ),
         };
