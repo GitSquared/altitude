@@ -49,13 +49,28 @@ pub fn relay(lines: Option<mpsc::UnboundedSender<String>>) {
 
 struct Relay;
 
+// A tracing event reaches its writer in pieces — the timestamp, then the fields, then
+// the newline — and a reader on the other end wants lines, not pieces.
+static PENDING: OnceLock<Mutex<String>> = OnceLock::new();
+
 impl io::Write for Relay {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        if let Some(relay) = RELAY.get()
-            && let Ok(current) = relay.lock()
-            && let Some(lines) = current.as_ref()
-        {
-            let _ = lines.send(String::from_utf8_lossy(bytes).into_owned());
+        let Some(relay) = RELAY.get() else {
+            return Ok(bytes.len());
+        };
+        let pending = PENDING.get_or_init(|| Mutex::new(String::new()));
+        let Ok(mut pending) = pending.lock() else {
+            return Ok(bytes.len());
+        };
+        pending.push_str(&String::from_utf8_lossy(bytes));
+        while let Some(end) = pending.find('\n') {
+            let line: String = pending.drain(..=end).collect();
+            let line = line.trim_end().to_owned();
+            if let Ok(current) = relay.lock()
+                && let Some(lines) = current.as_ref()
+            {
+                let _ = lines.send(line);
+            }
         }
         Ok(bytes.len())
     }
