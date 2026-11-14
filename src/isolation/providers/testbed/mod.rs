@@ -311,6 +311,10 @@ impl TestbedIsolation {
     // The home as this host holds it, which is the whole of an installs layer: the
     // profile directories and project caches are mounted into the layer's view from
     // the master, so taking the home from outside that view leaves them out.
+    // A layer is a convenience for the next host, not a thing this one owes: an entry it
+    // cannot read is left out and said aloud, because one socket or one root-owned file
+    // in an account's home is not a reason for every host after this one to build the
+    // same layer again.
     async fn store_home(
         &self,
         layers: &Arc<dyn HostLayers>,
@@ -324,9 +328,7 @@ impl TestbedIsolation {
         spawn_blocking(move || -> Result<(), String> {
             let file = fs::File::create(&packing).map_err(|error| error.to_string())?;
             let mut builder = Builder::new(file);
-            builder
-                .append_dir_all(&entry, &home)
-                .map_err(|error| error.to_string())?;
+            pack_home(&mut builder, &entry, &home)?;
             builder.finish().map_err(|error| error.to_string())
         })
         .await
@@ -442,6 +444,39 @@ impl TestbedIsolation {
         }
         Ok(())
     }
+}
+
+fn pack_home(builder: &mut Builder<fs::File>, entry: &str, home: &Path) -> Result<(), String> {
+    let mut pending = vec![(home.to_path_buf(), entry.to_owned())];
+    while let Some((path, name)) = pending.pop() {
+        let read = match fs::read_dir(&path) {
+            Ok(read) => read,
+            Err(error) => {
+                tracing::warn!(path = %path.display(), %error, "leaving an entry out of a layer");
+                continue;
+            }
+        };
+        for child in read.flatten() {
+            let child_name = format!("{name}/{}", child.file_name().to_string_lossy());
+            let child_path = child.path();
+            match fs::symlink_metadata(&child_path) {
+                Ok(metadata) if metadata.is_dir() => pending.push((child_path, child_name)),
+                Ok(_) => {
+                    if let Err(error) = builder.append_path_with_name(&child_path, &child_name) {
+                        tracing::warn!(
+                            path = %child_path.display(),
+                            %error,
+                            "leaving an entry out of a layer"
+                        );
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(path = %child_path.display(), %error, "leaving an entry out of a layer")
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn io_error(error: io::Error) -> IsolationError {
