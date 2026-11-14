@@ -1,4 +1,3 @@
-use std::os::unix::fs::MetadataExt;
 use std::{
     collections::HashMap,
     fs,
@@ -44,64 +43,10 @@ pub(crate) struct WorkersIsolation {
     // The project checkout each sandbox works in, so a snapshot knows what to carry
     // besides the sandbox tree. `None` for a sandbox with no project.
     checkouts: Arc<Mutex<HashMap<String, Option<String>>>>,
-    // The project cache each sandbox was lent: the host it went to, and the directory.
-    exports: Arc<Mutex<HashMap<String, (String, PathBuf)>>>,
     owner: Option<String>,
 }
 
 impl WorkersIsolation {
-    // Whoever owns the data directory owns the cache it holds, so the export maps every
-    // writing host onto that one account.
-    // The cache is a directory here either way; the export is what lets this one host see
-    // it, and no other machine on the network, for as long as its sandbox lives.
-    fn export_cache(&self, worker: &str, id: &str, project: &Project) -> Option<String> {
-        let client = self
-            .fleet
-            .peer(worker)
-            .and_then(|peer| share::client_ip(&peer))?;
-        let path = self.config.project_cache_dir(&project.id);
-        if let Err(error) = fs::create_dir_all(&path) {
-            tracing::warn!(%error, "could not make the project's cache directory");
-            return None;
-        }
-        match share::export(&client, &path, self.cache_owner_uid()) {
-            Ok(()) => {
-                self.remember_export(id, client, path.clone());
-                Some(path.display().to_string())
-            }
-            Err(error) => {
-                tracing::warn!(%error, worker = %worker, "could not export the project cache");
-                None
-            }
-        }
-    }
-
-    // What this machine lent to which host, so the lend is taken back when the sandbox ends.
-    fn remember_export(&self, id: &str, client: String, path: PathBuf) {
-        if let Ok(mut exports) = self.exports.lock() {
-            exports.insert(id.to_owned(), (client, path));
-        }
-    }
-
-    fn forget_export(&self, id: &str) {
-        let taken = self
-            .exports
-            .lock()
-            .ok()
-            .and_then(|mut exports| exports.remove(id));
-        if let Some((client, path)) = taken
-            && let Err(error) = share::unexport(&client, &path)
-        {
-            tracing::warn!(%error, client, "could not take back an exported cache");
-        }
-    }
-
-    fn cache_owner_uid(&self) -> u32 {
-        fs::metadata(self.config.data_dir())
-            .map(|metadata| metadata.uid())
-            .unwrap_or(0)
-    }
-
     pub(crate) fn new(fleet: Arc<WorkerFleet>, client: LinkClient, config: &Config) -> Self {
         Self {
             fleet,
@@ -109,7 +54,6 @@ impl WorkersIsolation {
             config: config.clone(),
             placements: Arc::new(Mutex::new(HashMap::new())),
             checkouts: Arc::new(Mutex::new(HashMap::new())),
-            exports: Arc::new(Mutex::new(HashMap::new())),
             owner: None,
         }
     }
@@ -222,7 +166,6 @@ impl WorkersIsolation {
     }
 
     async fn deprovision_host(&self, id: &str) {
-        self.forget_export(id);
         let worker = self.placements.lock().ok().and_then(|mut p| p.remove(id));
         if let Some(worker) = worker {
             self.fleet.deprovision_worker(&worker).await;
@@ -424,7 +367,7 @@ impl IsolationEngine for WorkersIsolation {
         let checkout = checkout_guest(&project);
         self.remember_checkout(&id, checkout.clone());
         let worker = self.provision_host(&id).await?;
-        let cache = self.export_cache(&worker, &id, &project);
+        let cache = Some(share::cache_path(&project.id));
         progress.report(EnvironmentProgress {
             label: "getting the worker ready".to_owned(),
             completed: 0,
