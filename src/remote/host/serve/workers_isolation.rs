@@ -134,6 +134,14 @@ impl WorkersIsolation {
         self.checkouts.lock().ok()?.get(id).cloned().flatten()
     }
 
+    async fn sandbox_is_there(&self, worker: &str, id: &str) -> bool {
+        matches!(
+            self.call_on(worker, WorkerCall::HasSandbox { id: id.to_owned() })
+                .await,
+            Ok(WorkerReply::Bool(true))
+        )
+    }
+
     async fn call_on(&self, worker: &str, call: WorkerCall) -> Result<WorkerReply, IsolationError> {
         let peer = self.fleet.peer(worker).ok_or_else(|| {
             IsolationError::missing_sandbox(format!("isolation worker {worker} is gone"))
@@ -437,8 +445,21 @@ impl IsolationEngine for WorkersIsolation {
             .await
             .and_then(expect_ok)
         {
-            self.deprovision_host(&id).await;
-            return Err(error);
+            // The call failed, which is not the same as the sandbox not existing: a
+            // connection can break while the host carries on working. Whether the
+            // sandbox is there is a fact only the host holds, and asking it is cheaper
+            // than failing a task over a lost frame — and cheaper than throwing away a
+            // host that has the sandbox a task is waiting for.
+            if !self.sandbox_is_there(&worker, &id).await {
+                self.deprovision_host(&id).await;
+                return Err(error);
+            }
+            tracing::warn!(
+                sandbox = %id,
+                worker = %worker,
+                %error,
+                "the provision's call failed but the sandbox is there"
+            );
         }
         progress.report(EnvironmentProgress {
             label: "launching the isolated sandbox".to_owned(),
