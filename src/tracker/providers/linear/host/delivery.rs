@@ -292,7 +292,7 @@ impl RemoteTracker {
                     report,
                     &stable_id(&format!("{}-{index}", report.task_id), "failed"),
                     AgentActivityContent::Error {
-                        body: failure_notice(error, &execution_status),
+                        body: failure_notice(error, execution_status),
                     },
                 )
                 .await
