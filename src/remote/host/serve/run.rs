@@ -36,7 +36,6 @@ use crate::{
     remote::{
         ClientRecord, InstallationKey, LinkClient, LinkServer, TrackerConnection,
         announce::{Phase, TrackerReadiness},
-        cache::CacheService,
         layers::LayerStore,
         server::{AgentChannelAccess, ServerParts, WorkerHost},
     },
@@ -374,9 +373,6 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
             directory: config.agent_channel_dir(),
             token: fleet.token().to_owned(),
         }),
-        cache: fleet
-            .as_ref()
-            .map(|fleet| Arc::new(CacheService::new(&config, fleet.token().to_owned()))),
         layers: match &fleet {
             // A layer store is only worth keeping where hosts exist to share it with:
             // a remote that runs its own sandboxes builds them once anyway.

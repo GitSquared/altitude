@@ -17,8 +17,6 @@ pub struct ServerParts {
     // Where the agent channels live and the token that may reach them, when this
     // machine lets its workers carry an agent's channel through.
     pub agent_channels: Option<AgentChannelAccess>,
-    // The projects' caches, when this machine serves them to workers over FUSE.
-    pub cache: Option<Arc<CacheService>>,
     // The installs layers its hosts built, when this machine keeps them for the next
     // host rather than making every host build its own.
     pub layers: Option<Arc<LayerStore>>,

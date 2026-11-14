@@ -31,7 +31,6 @@ use crate::task::ProjectMemoryFile;
 use crate::task::memory;
 use crate::task::picture;
 
-use crate::remote::cache::{CACHE_ALPN, CacheHandler, CacheService};
 use crate::remote::host::clients::{ClientLog, ClientRecord};
 use crate::remote::layers::{LAYER_ALPN, LayerHandler, LayerStore};
 use crate::task::TaskAsk;
@@ -114,7 +113,7 @@ impl fmt::Debug for LinkHandler {
 impl ProtocolHandler for LinkHandler {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
         // A connection carries a conversation, and a conversation is any number of
-        // messages: a host's heartbeats, a client's tasks, a cache's reads. They are
+        // messages: a host's heartbeats, a client's tasks, a host's layers. They are
         // taken one at a time, in the order they arrive, and the connection is the
         // client's to keep.
         loop {
@@ -337,7 +336,6 @@ impl LinkServer {
             tasks,
             workers,
             agent_channels,
-            cache,
             layers,
         } = parts;
         let handler = LinkHandler {
@@ -351,7 +349,7 @@ impl LinkServer {
         let log = ClientLog {
             record: clients.clone(),
         };
-        let mut alpns = vec![LINK_ALPN.to_vec(), CACHE_ALPN.to_vec()];
+        let mut alpns = vec![LINK_ALPN.to_vec()];
         if layers.is_some() {
             alpns.push(LAYER_ALPN.to_vec());
         }
@@ -366,9 +364,6 @@ impl LinkServer {
         .await
         .map_err(|error| format!("UDP task bind at {listen}: {error}"))?;
         let mut router = Router::builder(endpoint).accept(LINK_ALPN, handler);
-        if let Some(cache) = cache {
-            router = router.accept(CACHE_ALPN, CacheHandler::new(cache));
-        }
         if let Some(layers) = layers {
             router = router.accept(LAYER_ALPN, LayerHandler::new(layers));
         }
