@@ -29,6 +29,5 @@ services:
       - apparmor=unconfined
     cap_add:
       - SYS_ADMIN
-    # Each project's cache is a FUSE mount of the remote's.
-    devices:
-      - /dev/fuse:/dev/fuse
+    # A project's cache is mounted from the remote over NFS, which the container does
+    # as root: SYS_ADMIN above is what a mount needs, and no device is involved.
