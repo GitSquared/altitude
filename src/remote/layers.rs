@@ -132,7 +132,14 @@ impl LayerStore {
 
     fn adopt(&self, environment: &str, tag: &str, received: PathBuf) -> io::Result<u64> {
         let path = self.archive_path(environment, tag);
-        fs::rename(&received, &path)?;
+        // The path matters as much as the reason: a store that refuses says which file
+        // it refused, because the host that sent it can do nothing with "denied".
+        fs::rename(&received, &path).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("{} -> {}: {error}", received.display(), path.display()),
+            )
+        })?;
         let len = fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
         self.enforce_budget(&path);
         Ok(len)
@@ -293,7 +300,7 @@ async fn receive(recv: &mut RecvStream, destination: &Path, len: u64) -> Result<
     let incoming = destination.with_extension("incoming");
     let mut file = AsyncFile::create(&incoming)
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| format!("{}: {error}", incoming.display()))?;
     let copied = copy(&mut recv.take(len), &mut file)
         .await
         .map_err(|error| error.to_string())?;
