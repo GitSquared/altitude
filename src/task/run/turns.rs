@@ -500,16 +500,19 @@ where
             .await
         {
             Ok(path) => Ok(path.to_string_lossy().into_owned()),
+            // A capsule that could not be packed is a pause that keeps no snapshot: the
+            // task keeps its record and its memory, and the next run builds a sandbox
+            // again. Ending the task here ends the work the operator was watching, which
+            // is a worse answer than a slower next start — and this is the pause an agent
+            // still writing in its own sandbox can always provoke.
             Err(error) => {
-                self.fail(
-                    task,
-                    format!(
-                        "could not save the task sandbox to {}: {error}",
-                        self.snapshots_dir.display()
-                    ),
-                )
-                .await?;
-                Err(TaskServiceError::Isolation(error))
+                tracing::warn!(
+                    task_id = %task.id,
+                    snapshots = %self.snapshots_dir.display(),
+                    %error,
+                    "a task's sandbox could not be saved; the pause keeps no snapshot"
+                );
+                Ok(String::new())
             }
         }
     }
