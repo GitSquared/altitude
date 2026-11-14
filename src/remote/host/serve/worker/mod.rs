@@ -3,6 +3,7 @@ use std::{
     error::Error,
     fmt, io,
     io::IsTerminal,
+    path::PathBuf,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -111,6 +112,7 @@ pub(crate) async fn run(args: &WorkerArgs, base: Config) -> Result<(), Box<dyn E
         client: client.clone(),
         master: peer.clone(),
         channels: Arc::new(Mutex::new(HashMap::new())),
+        mounted: Arc::new(Mutex::new(HashMap::new())),
     };
     let worker_addr = endpoint.addr();
     let _router = Router::builder(endpoint)
@@ -175,6 +177,8 @@ struct WorkerService {
     master: EndpointAddr,
     // The loopback listeners carrying each sandbox's agent channel to the master.
     channels: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
+    // The project cache each sandbox borrows, until the sandbox is gone.
+    mounted: Arc<Mutex<HashMap<String, PathBuf>>>,
 }
 
 impl fmt::Debug for WorkerService {

@@ -4,6 +4,9 @@ use std::{
     sync::{Mutex, OnceLock},
 };
 
+// Sharing a cache is an export, and an export is the machine's business, not this
+// process's: both sides ask for the one command they need and nothing else.
+
 // Exports are one file on the machine, so they are written one at a time.
 fn serialise() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -18,7 +21,9 @@ pub(crate) fn export(client: &str, path: &Path, owner_uid: u32) -> Result<(), St
     let options =
         format!("rw,sync,no_subtree_check,all_squash,anonuid={owner_uid},anongid={owner_uid}");
     let spec = format!("{client}:{}", path.display());
-    let output = Command::new("exportfs")
+    let output = Command::new("sudo")
+        .arg("-n")
+        .arg("/usr/sbin/exportfs")
         .arg("-o")
         .arg(&options)
         .arg(&spec)
@@ -33,7 +38,9 @@ pub(crate) fn export(client: &str, path: &Path, owner_uid: u32) -> Result<(), St
 pub(crate) fn unexport(client: &str, path: &Path) -> Result<(), String> {
     let _serial = serialise().lock().expect("the export lock");
     let spec = format!("{client}:{}", path.display());
-    let output = Command::new("exportfs")
+    let output = Command::new("sudo")
+        .arg("-n")
+        .arg("/usr/sbin/exportfs")
         .arg("-u")
         .arg(&spec)
         .output()

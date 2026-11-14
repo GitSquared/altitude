@@ -1,4 +1,4 @@
-use std::{fs, net::Ipv4Addr, process::Command, time::Instant};
+use std::{fs, net::Ipv4Addr, path::PathBuf, process::Command, time::Instant};
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 
@@ -96,7 +96,9 @@ impl WorkerService {
         if fs::create_dir_all(&path).is_err() {
             return Ok(());
         }
-        let mounted = Command::new("mount")
+        let mounted = Command::new("sudo")
+            .arg("-n")
+            .arg("mount")
             .arg("-t")
             .arg("nfs4")
             .arg(format!("{server}:{source}"))
@@ -116,7 +118,32 @@ impl WorkerService {
         Ok(())
     }
 
-    fn unmount_cache(&self, _id: &str) {}
+    // The lend ends with the sandbox: the mount goes, so nothing of the master's stays
+    // reachable on a host that is about to be thrown away.
+    fn unmount_cache(&self, path: PathBuf) {
+        let Some(project) = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+        else {
+            return;
+        };
+        let unmounted = Command::new("sudo")
+            .arg("-n")
+            .arg("umount")
+            .arg(&path)
+            .output();
+        match unmounted {
+            Ok(output) if output.status.success() => {
+                tracing::info!(project, "the project cache is no longer mounted")
+            }
+            Ok(output) => tracing::warn!(
+                project,
+                reason = %String::from_utf8_lossy(&output.stderr).trim(),
+                "could not unmount the project cache"
+            ),
+            Err(error) => tracing::warn!(%error, "could not run umount"),
+        }
+    }
 
     pub(super) async fn dispatch(&self, call: WorkerCall) -> WorkerReply {
         match call {
@@ -130,7 +157,14 @@ impl WorkerService {
             },
             WorkerCall::Remove { id } => {
                 self.stop_channel(&id);
-                self.unmount_cache(&id);
+                let mounted = self
+                    .mounted
+                    .lock()
+                    .ok()
+                    .and_then(|mut mounted| mounted.remove(&id));
+                if let Some(path) = mounted {
+                    self.unmount_cache(path);
+                }
                 match self.engine.remove(id).await {
                     Ok(()) => WorkerReply::Ok,
                     Err(error) => WorkerReply::Failed(error.to_string()),
@@ -286,6 +320,12 @@ impl WorkerService {
         }
         if let Err(error) = self.mount_cache(cache.as_deref(), &owner, &project.id) {
             return WorkerReply::Failed(error);
+        }
+        if cache.is_some()
+            && !owner.is_empty()
+            && let Ok(mut mounted) = self.mounted.lock()
+        {
+            mounted.insert(id.clone(), self.config.project_cache_dir(&project.id));
         }
         let recipes = match (
             profile_recipe(&agent_profile, &self.agents),
