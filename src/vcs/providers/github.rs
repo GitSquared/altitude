@@ -77,6 +77,20 @@ impl VcsProvider for GitHub {
                 // prompt waiting for an operator who is not there. Failing instead
                 // is the same answer, in the place the operator can read it.
                 ("GIT_TERMINAL_PROMPT", "0"),
+                // A repository named by its https URL goes over the key this profile
+                // already holds: `gh` enrols for SSH, and https would ask for a
+                // credential no sandbox has. Injected rather than written into the
+                // operator's config, which is theirs to edit.
+                ("GIT_CONFIG_COUNT", "1"),
+                ("GIT_CONFIG_KEY_0", "url.git@github.com:.insteadOf"),
+                ("GIT_CONFIG_VALUE_0", "https://github.com/"),
+                // A profile's `known_hosts` starts empty, and a sandbox has nobody to
+                // answer the question an unknown host asks. The first clone learns the
+                // key and every one after it checks it.
+                (
+                    "GIT_SSH_COMMAND",
+                    "ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/altitude/ssh/known_hosts",
+                ),
             ],
         }
     }
