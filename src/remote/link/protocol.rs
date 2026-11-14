@@ -22,7 +22,6 @@ use crate::{
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::isolation::worker_protocol::WORKER_ALPN;
-use crate::remote::cache::protocol::CACHE_ALPN;
 use crate::remote::layers::LAYER_ALPN;
 use crate::remote::{
     LinkError, LinkResult,
@@ -40,9 +39,6 @@ pub(crate) enum Conversation {
     Link,
     Worker,
     Layers,
-    // Only a Linux host mounts a project cache, so only there does anything ask for it.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-    Cache,
 }
 
 impl Conversation {
@@ -51,7 +47,6 @@ impl Conversation {
             Self::Link => LINK_ALPN,
             Self::Worker => WORKER_ALPN,
             Self::Layers => LAYER_ALPN,
-            Self::Cache => CACHE_ALPN,
         }
     }
 }

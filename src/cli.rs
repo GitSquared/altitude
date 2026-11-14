@@ -135,9 +135,10 @@ To set workers up on a remote:
       git, gh, openssh-client   the version-control profile checks for them
       python3                   the bridge altitude's tools arrive through
       the agent harness         or the network to fetch it
-    It also needs /dev/fuse and, unless it runs as root, the setuid fusermount3:
-    each project's cache is mounted from the remote through them. The Dockerfile's
-    worker target and compose.worker.example.yaml are a starting point.
+      nfs-common                the project's cache, which the master exports to
+                                this host for as long as its sandbox lives
+    The Dockerfile's worker target and compose.worker.example.yaml are a starting
+    point.
  6. Say what the image is. Set ALTITUDE_WORKER_ENVIRONMENT to the image's own name.
     A host builds the installs layer - the agent harness, git and gh - the first time
     one runs it, and leaves it on its master; the next host of that image restores it

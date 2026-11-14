@@ -7,9 +7,6 @@ use std::{
     time::Duration,
 };
 
-#[cfg(target_os = "linux")]
-use fuser::BackgroundSession;
-
 use iroh::{
     EndpointAddr,
     endpoint::{Connection, RecvStream, SendStream},
@@ -114,8 +111,6 @@ pub(crate) async fn run(args: &WorkerArgs, base: Config) -> Result<(), Box<dyn E
         client: client.clone(),
         master: peer.clone(),
         channels: Arc::new(Mutex::new(HashMap::new())),
-        #[cfg(target_os = "linux")]
-        caches: Arc::new(Mutex::new(HashMap::new())),
     };
     let worker_addr = endpoint.addr();
     let _router = Router::builder(endpoint)
@@ -180,10 +175,6 @@ struct WorkerService {
     master: EndpointAddr,
     // The loopback listeners carrying each sandbox's agent channel to the master.
     channels: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
-    // The FUSE mount of each sandbox's project cache, kept alive until the sandbox
-    // is gone and unmounted when it drops.
-    #[cfg(target_os = "linux")]
-    caches: Arc<Mutex<HashMap<String, BackgroundSession>>>,
 }
 
 impl fmt::Debug for WorkerService {

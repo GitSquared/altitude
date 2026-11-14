@@ -1,35 +1,6 @@
 use super::*;
 
 impl LinkClient {
-    // One cache call to a master, carrying the body a write needs and returning the
-    // bytes a read produced.
-    #[cfg(target_os = "linux")]
-    pub(crate) async fn cache_call(
-        &self,
-        peer: impl Into<EndpointAddr>,
-        request: &CacheRequest,
-        body: &[u8],
-    ) -> LinkResult<(CacheReply, Vec<u8>)> {
-        // The cache answers on its own ALPN, not the link's: a master serves three
-        // conversations, and a host that dials the wrong one is refused at the
-        // handshake rather than told to try again.
-        let dial = self.dial(peer, Conversation::Cache).await?;
-        let (mut send, mut recv) = dial.0.open_bi().await?;
-        write_frame(&mut send, request).await?;
-        if !body.is_empty() {
-            send.write_all(body).await?;
-        }
-        send.finish()?;
-        let reply: CacheReply = read_frame(&mut recv).await?;
-        let bytes = match &reply {
-            CacheReply::Data { len } => {
-                read_body(&mut recv, u64::from(*len), MAX_BLOB_BYTES).await?
-            }
-            _ => Vec::new(),
-        };
-        Ok((reply, bytes))
-    }
-
     // What another host built, fetched by this one: the archive is copied into the
     // sink, and `false` says the master has nothing for this environment and tag.
     pub(crate) async fn layer_fetch(

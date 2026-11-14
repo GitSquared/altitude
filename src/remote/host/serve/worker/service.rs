@@ -7,9 +7,6 @@ use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
 use tokio::task::spawn_blocking;
 
-#[cfg(target_os = "linux")]
-use tokio::runtime::Handle;
-
 use crate::{
     agent::{AgentEngines, mcp},
     config::Config,
@@ -84,16 +81,10 @@ impl WorkerService {
         }
     }
 
-    // Mount the master's cache for this project where the sandbox will look for it.
-    // A host whose owner is not named, or whose master serves no cache, simply
-    // builds without one.
-    // The project cache is a directory on this host, empty until an export fills it: a
-    // task that finds it cold is slower, which is all a cache can cost. The network
-    // filesystem this used to mount is gone — it made every read a call, and a call that
-    // could be answered only by the thread waiting on it.
-    // The project's cache, as the master exports it to this host for as long as its sandbox
-    // lives. Mounting is best-effort: a cache that is not there costs time, and nothing
-    // else, so a host that cannot reach the export works on a cold one.
+    // The project's cache, as the master exports it to this host for as long as its
+    // sandbox lives. Mounting is best-effort: a cache that is not there costs time and
+    // nothing else, so a host with nothing exported to it — no owner named, no export
+    // named, no address to reach it at — works on a cold one.
     fn mount_cache(&self, cache: Option<&str>, owner: &str, project: &str) -> Result<(), String> {
         if owner.is_empty() {
             return Ok(());

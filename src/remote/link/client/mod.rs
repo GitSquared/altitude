@@ -9,12 +9,8 @@ use tokio::io::copy;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
-#[cfg(target_os = "linux")]
-use crate::remote::cache::protocol::{CacheReply, CacheRequest};
 use crate::remote::layers::{LayerReply, LayerRequest};
 use crate::remote::protocol::Conversation;
-#[cfg(target_os = "linux")]
-use crate::remote::protocol::MAX_BLOB_BYTES;
 use crate::task::TaskAsk;
 use crate::task::picture;
 
