@@ -3,7 +3,7 @@ FROM debian:bookworm-slim AS runtime
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates libssl3 libstdc++6 curl git openssh-client \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd --uid 1000 --create-home altitude
+    && (useradd --uid 1000 --create-home altitude || useradd --create-home altitude)
 ENV HOME=/home/altitude
 WORKDIR /home/altitude
 ENTRYPOINT ["altitude"]
@@ -55,11 +55,11 @@ FROM node:22-bookworm-slim AS worker
 ARG ALTITUDE_WORKER_ENVIRONMENT
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        bash ca-certificates clang cmake curl gh git gnupg nfs-common \
+        bash build-essential ca-certificates clang cmake curl gh git gnupg nfs-common \
         jq libssl-dev openssh-client perl pkg-config python3 ripgrep \
     && rm -rf /var/lib/apt/lists/* \
     && npm install -g --no-fund --no-audit --no-progress @tobilu/qmd@2 \
-    && useradd --uid 1000 --create-home altitude
+    && (useradd --uid 1000 --create-home altitude || useradd --create-home altitude)
 ENV ALTITUDE_WORKER_ENVIRONMENT=${ALTITUDE_WORKER_ENVIRONMENT}
 ENV HOME=/home/altitude
 WORKDIR /home/altitude
