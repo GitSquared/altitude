@@ -100,9 +100,9 @@ pub struct RemoteTracker {
 }
 
 // An error activity ends the session's "working" state, so it says what happened rather
-// than only that something did. A task that failed before it took a turn was never
-// running, and calling that stopped claims an action nobody took: the difference is the
-// status the failure was recorded under.
+// than only that something did. Nothing here was stopped: a stop is something someone
+// chose, and this is a run that could not carry on — or, before its first turn, never
+// began. Which of the two is the status the failure was recorded under.
 fn failure_notice(error: &str, status: &TaskExecutionStatus) -> String {
     let (opening, closing) = match status {
         TaskExecutionStatus::Pending => (
@@ -110,7 +110,7 @@ fn failure_notice(error: &str, status: &TaskExecutionStatus) -> String {
             "It never took a turn, so nothing was lost: a message here tries again.",
         ),
         _ => (
-            "**altitude stopped this task.**",
+            "**altitude could not finish this task.**",
             "Take it over with ctrl-↩ in the altitude terminal and unblock it there: leaving \
              the terminal hands the work back to altitude, which carries on from where you left \
              it. A message here restarts it too, without a terminal.",
