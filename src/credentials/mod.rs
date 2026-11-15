@@ -208,6 +208,17 @@ where
         if recipe.renew_command.trim().is_empty() {
             return Ok(Renewal::NothingToRenew);
         }
+        // A sandbox is only handed out for a layer that exists, so a machine that has
+        // never built this profile's harness gets one built before it is asked to renew.
+        if self
+            .isolation
+            .project_snapshot(Project::profile_build(), vec![recipe.clone()])
+            .is_none()
+        {
+            let (quiet, _) =
+                tokio::sync::watch::channel(crate::isolation::IsolationStatus::Starting);
+            self.isolation.prepare(&quiet).await.ok();
+        }
         let recipes = vec![recipe.clone()];
         let check = CredentialCheck {
             profile: profile.to_owned(),
