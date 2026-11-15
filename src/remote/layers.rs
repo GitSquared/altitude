@@ -217,6 +217,8 @@ impl ProtocolHandler for LayerHandler {
 
 impl LayerHandler {
     async fn answer_layer(&self, mut send: SendStream, mut recv: RecvStream) {
+        // A host waiting on an answer it never gets is indistinguishable from a master
+        // that never heard the question, and only one of those is a bug here.
         let request: LayerRequest = match read_frame(&mut recv).await {
             Ok(request) => request,
             Err(error) => {
@@ -224,6 +226,7 @@ impl LayerHandler {
                 return;
             }
         };
+        tracing::info!(tag = %request.tag, "a host asked for an installs layer");
         if request.token != self.store.token() {
             let _ = write_frame(
                 &mut send,
