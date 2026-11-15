@@ -4,7 +4,7 @@ use tokio::sync::watch;
 
 use crate::{
     isolation::{
-        BaseSandboxRecipe, BaseSandboxSnapshot, CommandSession, CredentialAsk, CredentialOutcome,
+        BaseSandboxRecipe, BaseSandboxSnapshot, CommandSession, CredentialCheck, CredentialReport,
         CredentialSandbox, EnvironmentDescription, EnvironmentProgressSink, FileTally,
         FileTransferSink, IsolationEngine, IsolationError, IsolationStatus, LAYER_MARKER,
         LayerView, Pressure, ProfileRecipe, SandboxOptions, SandboxPurpose, SandboxRoom,
@@ -174,10 +174,10 @@ impl IsolationEngine for TestbedIsolation {
     async fn credential_reports(
         &self,
         sandbox: CredentialSandbox,
-        ask: CredentialAsk,
+        checks: Vec<CredentialCheck>,
         progress: &dyn EnvironmentProgressSink,
-    ) -> Result<Option<CredentialOutcome>, IsolationError> {
-        sandbox::credential_reports(self, &self.config, sandbox, ask, progress).await
+    ) -> Result<Option<Vec<(String, CredentialReport)>>, IsolationError> {
+        sandbox::credential_reports(self, &self.config, sandbox, checks, progress).await
     }
 
     fn project_snapshot(&self, project: Project, recipes: Vec<ProfileRecipe>) -> Option<String> {

@@ -15,7 +15,7 @@ use tokio::sync::watch;
 use crate::{
     config::Config,
     isolation::{
-        BaseSandboxRecipe, BaseSandboxSnapshot, CommandSession, CredentialAsk, CredentialOutcome,
+        BaseSandboxRecipe, BaseSandboxSnapshot, CommandSession, CredentialCheck, CredentialReport,
         CredentialSandbox, EnvironmentDescription, EnvironmentProgress, EnvironmentProgressSink,
         FileTally, FileTransferSink, IsolationEngine, IsolationError, IsolationStatus, LayerView,
         Pressure, ProfileRecipe, SandboxCeiling, SandboxOptions, SandboxPurpose, SandboxRoom,
@@ -578,9 +578,9 @@ impl IsolationEngine for WorkersIsolation {
     async fn credential_reports(
         &self,
         sandbox: CredentialSandbox,
-        ask: CredentialAsk,
+        checks: Vec<CredentialCheck>,
         _progress: &dyn EnvironmentProgressSink,
-    ) -> Result<Option<CredentialOutcome>, IsolationError> {
+    ) -> Result<Option<Vec<(String, CredentialReport)>>, IsolationError> {
         let worker = self.provision_host(&sandbox.id).await?;
         let profiles = self.profile_bundles(&sandbox.recipes)?;
         let call = WorkerCall::CredentialReports {
@@ -588,7 +588,7 @@ impl IsolationEngine for WorkersIsolation {
             profiles,
             snapshot: sandbox.snapshot,
             vsock: sandbox.vsock,
-            ask,
+            checks,
         };
         match self.call_on(&worker, call).await? {
             WorkerReply::Reports(reports) => Ok(reports),

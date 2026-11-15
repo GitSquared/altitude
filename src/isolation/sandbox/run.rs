@@ -2,8 +2,6 @@ use std::path::Path;
 
 use tokio::task::spawn_blocking;
 
-use crate::isolation::{CredentialAsk, CredentialOutcome};
-
 use super::guest::{opener_script, project_scripts, run_setup, run_to_end};
 use super::*;
 use crate::isolation::{install_script, with_port_relay};
@@ -14,8 +12,8 @@ use crate::{
 };
 
 use super::{
-    BaseSandboxSnapshot, CredentialSandbox, EnvironmentProgressSink, IsolationEngine,
-    IsolationError, PORT_RELAY_GUEST_PORT,
+    BaseSandboxSnapshot, CredentialCheck, CredentialReport, CredentialSandbox,
+    EnvironmentProgressSink, IsolationEngine, IsolationError, PORT_RELAY_GUEST_PORT,
 };
 
 pub async fn ensure_project(
@@ -31,17 +29,65 @@ pub async fn ensure_project(
     engine.ensure_base(plan.layers, view, progress).await
 }
 
-// A credential sandbox exists to answer questions about a profile by running its harness.
-// Renewing a session is one of those questions — "use this, and keep what it writes" — so
-// it is the same machinery with files to bring back rather than a second kind of call.
+// A session is renewed by using its harness once. The sandbox is the only place a model
+// can be reached, so this is where a renewal happens — on whichever machine can make one.
+pub(crate) async fn renew_credential(
+    engine: &impl IsolationEngine,
+    config: &Config,
+    sandbox: CredentialSandbox,
+    command: String,
+    take_back: Vec<(String, PathBuf)>,
+    progress: &dyn EnvironmentProgressSink,
+) -> Result<bool, IsolationError> {
+    let CredentialSandbox {
+        id,
+        recipes,
+        snapshot,
+        vsock: _,
+    } = sandbox;
+    let plan = SandboxPlan::compose(config, Project::profile_build(), recipes)?;
+    create(
+        engine,
+        config,
+        id.clone(),
+        plan,
+        SandboxKind::Shell,
+        snapshot.map(SnapshotSource::Environment),
+        progress,
+    )
+    .await?;
+    let used = match run_to_end(engine, id.clone(), command).await {
+        Ok((status, _)) => status == 0,
+        Err(error) => {
+            let _ = engine.remove(id.clone()).await;
+            return Err(error);
+        }
+    };
+    // The renewal happened inside the sandbox, so the file holding it has to come out
+    // before the sandbox goes, or the machine renews a copy it is about to throw away.
+    if used {
+        for (guest, host) in take_back {
+            match engine.collect_file(id.clone(), guest, host).await {
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(%error, "a renewed credential could not be taken back")
+                }
+            }
+        }
+    }
+    if let Err(error) = engine.remove(id.clone()).await {
+        tracing::warn!(sandbox_id = %id, %error, "could not remove a sandbox after a renewal");
+    }
+    Ok(used)
+}
+
 pub(crate) async fn credential_reports(
     engine: &impl IsolationEngine,
     config: &Config,
     sandbox: CredentialSandbox,
-    ask: CredentialAsk,
+    checks: Vec<CredentialCheck>,
     progress: &dyn EnvironmentProgressSink,
-) -> Result<Option<CredentialOutcome>, IsolationError> {
-    let CredentialAsk { checks, keep } = ask;
+) -> Result<Option<Vec<(String, CredentialReport)>>, IsolationError> {
     let CredentialSandbox {
         id,
         recipes,
@@ -82,31 +128,10 @@ pub(crate) async fn credential_reports(
             }
         }
     }
-    let mut files = Vec::new();
-    if !keep.is_empty() {
-        let staging = tempfile::tempdir().map_err(io_error)?;
-        for (guest, name) in keep {
-            let path = staging.path().join(&name);
-            if engine
-                .collect_file(id.clone(), guest, path.clone())
-                .await
-                .is_err()
-            {
-                tracing::warn!(%name, "a session file could not be taken out");
-                continue;
-            }
-            if let Ok(bytes) = fs::read(&path) {
-                files.push((name, bytes));
-            }
-        }
-    }
     if let Err(error) = engine.remove(id.clone()).await {
         tracing::warn!(sandbox_id = %id, %error, "could not remove a sandbox after a check");
     }
-    Ok(Some(CredentialOutcome {
-        reports,
-        files: Vec::new(),
-    }))
+    Ok(Some(reports))
 }
 
 pub(crate) async fn credential_shell(
