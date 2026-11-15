@@ -73,6 +73,9 @@ pub async fn probe(probe: Probe) -> Result<(), Boxed> {
     let known = first_snapshot(&mut received).await;
     let project = publish(&link, &probe).await?;
     let started = Instant::now();
+    // Only a task made after this moment is this probe's: the master holds tasks from
+    // every earlier run, and a watch reports them all.
+    let sent_at_ms = chrono::Utc::now().timestamp_millis();
     link.run_task(
         probe.master.clone(),
         TaskRequest {
@@ -109,11 +112,14 @@ pub async fn probe(probe: Probe) -> Result<(), Boxed> {
             WatchEvent::Changed(summary) => {
                 // The task this probe made is the one that was not here when it started.
                 let is_ours = ours.as_deref() == Some(&summary.id)
-                    || (ours.is_none() && !known.contains(&summary.id));
+                    || (ours.is_none()
+                        && !known.contains(&summary.id)
+                        && summary.created_at_ms >= sent_at_ms);
                 if !is_ours {
                     None
                 } else {
                     ours = Some(summary.id.clone());
+                    println!("probe: watching {}", summary.id);
                     Some(*summary)
                 }
             }
