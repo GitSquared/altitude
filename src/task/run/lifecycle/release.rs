@@ -316,6 +316,23 @@ where
                                 }],
                             )
                             .await?;
+                        // A pause with no snapshot leaves a sandbox that can only live on
+                        // the host it was made on, and that host is then kept alive for a
+                        // task that cannot use it. Letting the sandbox go makes the host
+                        // unclaimed, which is what hands the machine back.
+                        if let Some(sandbox_id) = task.facts.sandbox_id.clone() {
+                            match service.isolation.remove(sandbox_id.clone()).await {
+                                Ok(()) => tracing::info!(
+                                    sandbox = %sandbox_id,
+                                    "the sandbox is gone; its host can be let go"
+                                ),
+                                Err(error) => tracing::warn!(
+                                    sandbox = %sandbox_id,
+                                    %error,
+                                    "could not remove a sandbox whose pause kept no snapshot"
+                                ),
+                            }
+                        }
                         Ok(())
                     }
                 }
