@@ -14,6 +14,7 @@ use tokio::sync::watch;
 
 use crate::{
     config::Config,
+    credentials::freshness,
     isolation::{
         BaseSandboxRecipe, BaseSandboxSnapshot, CommandSession, CredentialCheck, CredentialReport,
         CredentialSandbox, EnvironmentDescription, EnvironmentProgress, EnvironmentProgressSink,
@@ -223,6 +224,24 @@ impl WorkersIsolation {
         for recipe in recipes {
             let bundle = ProfileBundle::of(scope.scoped_data_dir(), &recipe.profile)
                 .map_err(|error| IsolationError::new(error.to_string()))?;
+            // Said here, before a host exists: a credential that cannot renew itself
+            // would otherwise cost a machine, a clone and a setup before the agent
+            // discovered it could not sign in.
+            if let Some(freshness) = bundle
+                .files
+                .iter()
+                .find(|file| file.path.ends_with(freshness::CREDENTIAL_FILE))
+                .and_then(|file| freshness::of_file(&file.contents))
+            {
+                if freshness.is_dead() {
+                    return Err(IsolationError::new(format!(
+                        "the credential for {} {}; sign in again where it was enrolled and let altitude sync it",
+                        bundle.profile,
+                        freshness.describe()
+                    )));
+                }
+                tracing::info!(profile = %bundle.profile, "{}", freshness.describe());
+            }
             profiles.push(WorkerProfile {
                 profile: bundle.profile,
                 files: bundle
