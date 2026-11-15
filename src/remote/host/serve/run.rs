@@ -28,8 +28,11 @@ use crate::{
     agent::{AgentEngines, AgentKind},
     cli::{ServeArgs, ServeCommand, Tracker},
     config::{Config, DEFAULT_PORT},
+    credentials::{Credentials, keeper},
     db::Database,
-    isolation::{self, IsolationStatus, MicrosandboxIsolation, Unwatched},
+    isolation::{
+        self, IsolationEngine, IsolationStatus, MicrosandboxIsolation, PortRelays, Unwatched,
+    },
     logging,
     project::Project,
     remote::protocol::TaskSummary,
@@ -196,7 +199,7 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
     let clients =
         ClientRecord::open(config.data_dir().join("clients.json")).map_err(io::Error::other)?;
     let label = config.identity().map_err(io::Error::other)?.label;
-    let isolation = match &fleet {
+    let keeper_isolation = match &fleet {
         Some(fleet) => {
             // A remote that has hosts speaks to them on a link of its own; it
             // needs no sandbox runtime here.
@@ -207,6 +210,7 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
         }
         None => ServeIsolation::Microsandbox(MicrosandboxIsolation::new(&config)),
     };
+    let isolation = keeper_isolation.clone();
     let prepared = isolation::prepare(isolation.clone());
     // This machine's own answer to "can you be given work", which is not the same
     // question as "is the runtime up": it is ready once its runtime can make
@@ -232,6 +236,48 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
     );
     if reports_through_pushed_logins {
         tasks = tasks.with_trackers(Arc::new(PushedTrackers::new(config.clone())));
+    }
+    // A credential is renewed by whichever machine is up, and this one is up even when the
+    // operator's own machine is not: the same keeper the client runs, over the profiles
+    // this remote holds for its operators. The renewal is written back into the copy a
+    // host is given, so the next task on any host starts with a working session.
+    {
+        let config = config.clone();
+        let isolation = keeper_isolation;
+        tokio::spawn(async move {
+            loop {
+                for owner in config.operator_ids() {
+                    let Ok(scoped) = config.for_operator(&owner) else {
+                        continue;
+                    };
+                    let Ok(inner) = isolation.for_operator(&owner) else {
+                        continue;
+                    };
+                    let profiles = scoped
+                        .load_or_create_settings()
+                        .ok()
+                        .map(|file| {
+                            file.settings()
+                                .credentials()
+                                .iter()
+                                .map(|credential| credential.id.clone())
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    if profiles.is_empty() {
+                        continue;
+                    }
+                    let credentials = Credentials::new(
+                        inner,
+                        scoped.clone(),
+                        AgentEngines::new(),
+                        PortRelays::new(scoped.agent_channel_dir()),
+                    );
+                    keeper::refresh_due(&credentials, &profiles).await;
+                }
+                time::sleep(keeper::LOOK_EVERY).await;
+            }
+        });
     }
     let (task_loop, mut updates) = TaskEventLoop::waiting_for_runtime(tasks);
     let task_loop = Arc::new(task_loop);

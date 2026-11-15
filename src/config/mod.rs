@@ -123,6 +123,18 @@ impl Config {
         }
     }
 
+    // The operators this remote holds anything for: one directory each, named by key.
+    pub fn operator_ids(&self) -> Vec<String> {
+        let Ok(entries) = fs::read_dir(self.data_dir.join("operators")) else {
+            return Vec::new();
+        };
+        entries
+            .flatten()
+            .filter(|entry| entry.path().is_dir())
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .collect()
+    }
+
     pub fn for_operator(&self, owner: &str) -> io::Result<Self> {
         if !is_safe_operator_key(owner) {
             return Err(io::Error::new(

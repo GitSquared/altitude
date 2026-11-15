@@ -16,7 +16,7 @@ use tokio::sync::watch;
 #[cfg(any(test, debug_assertions, feature = "testkit"))]
 use std::collections::HashMap;
 
-use crate::isolation::{GuestPath, IsolationStatus, guest_absolute, renew_credential};
+use crate::isolation::{IsolationStatus, renew_credential};
 use crate::vcs;
 
 pub use model::{Credential, Service, Slot, agent_of, describe, new_id};
@@ -229,26 +229,6 @@ where
                 .isolation
                 .project_snapshot(Project::profile_build(), recipes.clone());
         }
-        // The profile is mounted whole, so the files the harness renews are known by
-        // their names inside it and are taken back to the directory this machine keeps.
-        let take_back = match recipe.directories.first() {
-            Some(directory) => {
-                let root = match directory.guest_path {
-                    GuestPath::Absolute(path) | GuestPath::HomeRelative(path) => path,
-                };
-                let root = guest_absolute(root).map_err(CredentialsError::Isolation)?;
-                [freshness::CREDENTIAL_FILE, ".claude.json"]
-                    .into_iter()
-                    .map(|name| {
-                        (
-                            format!("{root}/{name}"),
-                            self.config.profile_dir(profile).join(name),
-                        )
-                    })
-                    .collect()
-            }
-            None => Vec::new(),
-        };
         let sandbox = CredentialSandbox {
             id: check_id(&[profile.to_owned()]),
             recipes,
@@ -260,7 +240,6 @@ where
             &self.config,
             sandbox,
             recipe.renew_command.to_owned(),
-            take_back,
             &Unwatched,
         )
         .await
