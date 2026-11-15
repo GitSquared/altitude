@@ -1,7 +1,7 @@
 use crate::agent::{
     AUTOPILOT_SYSTEM_PROMPT, Activity, AgentEngine, AgentKind, AgentRefusal, AgentStanding,
-    AgentUsage, AgentWindow, AgentWindowReading, TaskProgressDecoder, TaskStreamDecoder, TaskUsage,
-    activity, system_prompt,
+    AgentUsage, AgentWindow, AgentWindowReading, SessionExpiry, TaskProgressDecoder,
+    TaskStreamDecoder, TaskUsage, activity, system_prompt,
 };
 use crate::isolation::{
     DefaultFile, GUEST_PATH, GuestPath, PersistentDirectory, ProfileRecipe, SignInCommand,
@@ -12,6 +12,13 @@ use crate::vcs::now_ms;
 use serde_json::Value;
 use std::mem;
 use uuid::Uuid;
+
+// The harness's own invocation, in one place: a turn is that program given a session and
+// the operator's flags, and a renewal is the same program asked to answer once — which is
+// the only thing that makes a harness renew the session it was handed.
+const HARNESS: &str = "claude -p --permission-mode auto";
+const STREAM_FLAGS: &str = "--output-format stream-json --verbose --include-partial-messages";
+const RENEW_HARNESS: &str = "claude -p --permission-mode auto --output-format json";
 
 #[derive(Clone)]
 pub struct ClaudeCode;
@@ -381,8 +388,7 @@ impl AgentEngine for ClaudeCode {
             format!("--session-id {}", shell_quote(conversation_id))
         };
         format!(
-            "exec claude -p --permission-mode auto \\
-             --output-format stream-json --verbose --include-partial-messages \\
+            "exec {HARNESS} {STREAM_FLAGS} \\
              --system-prompt-snapshot off \\
              --mcp-config /altitude/claude/mcp.json \
              --allowedTools {} \
@@ -415,6 +421,31 @@ impl AgentEngine for ClaudeCode {
         true
     }
 
+    fn session_file(&self) -> Option<&'static str> {
+        Some(".credentials.json")
+    }
+
+    fn session_expiry(&self, contents: &str) -> Option<SessionExpiry> {
+        let file: serde_json::Value = serde_json::from_str(contents).ok()?;
+        let oauth = file.get("claudeAiOauth")?;
+        let expires_at_ms = oauth.get("expiresAt")?.as_i64()?;
+        let can_renew = oauth
+            .get("refreshToken")
+            .and_then(|token| token.as_str())
+            .is_some_and(|token| !token.is_empty());
+        Some(SessionExpiry {
+            expires_at_ms,
+            can_renew,
+        })
+    }
+
+    fn renew_command(&self) -> Option<String> {
+        Some(format!(
+            "printf %s {} | {RENEW_HARNESS}",
+            shell_quote("reply with the single word: ready")
+        ))
+    }
+
     fn profile_recipe(&self) -> ProfileRecipe {
         ProfileRecipe {
             profile: AgentKind::Claude.profile().to_owned(),
@@ -427,7 +458,6 @@ impl AgentEngine for ClaudeCode {
             // no way to be asked. Existence and size only: the contents are the
             // credential, and altitude does not read it.
             status_command: "test -s /altitude/claude/.credentials.json && echo a login is here",
-            renew_command: "claude -p ready --output-format json",
             label: "installing Claude Code",
             setup_command: Self::install_command(),
             directories: vec![

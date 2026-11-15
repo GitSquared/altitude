@@ -46,7 +46,6 @@ impl VcsProvider for GitHub {
             // The one profile whose CLI can be asked, and answers with the account and
             // the token's scopes.
             status_command: "gh auth status",
-            renew_command: "",
             label: "installing GitHub tools",
             setup_command: SETUP_COMMAND,
             directories: vec![

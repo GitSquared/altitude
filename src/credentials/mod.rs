@@ -5,11 +5,7 @@ pub mod keeper;
 mod model;
 mod shell;
 
-use std::{
-    error::Error,
-    fmt, fs,
-    path::{Path, PathBuf},
-};
+use std::{error::Error, fmt, fs, path::PathBuf};
 
 use tokio::sync::watch;
 
@@ -34,7 +30,7 @@ pub use shell::{
 };
 
 use crate::{
-    agent::{AgentChannels, AgentEngines},
+    agent::{AgentChannels, AgentEngines, SessionExpiry},
     config::Config,
     isolation::{
         CREDENTIAL_PREFIX, CredentialCheck, CredentialSandbox, IsolationEngine, IsolationError,
@@ -118,7 +114,7 @@ where
             display: recipe.display,
             sign_in: recipe.sign_in,
             sign_in_command: recipe.sign_in_command,
-            expires: expiry_of(&self.config.profile_dir(&recipe.profile)),
+            expires: expiry_of(self, &recipe.profile),
         })
     }
 
@@ -213,9 +209,15 @@ where
     // the harness once, in the same kind of sandbox its checks use.
     pub async fn renew(&self, profile: &str) -> Result<Renewal, CredentialsError> {
         let recipe = self.recipe(profile)?;
-        if recipe.renew_command.trim().is_empty() {
+        // Whether a credential can renew itself is the harness's business, not this
+        // layer's: the one that can is asked for the command, and the ones that cannot
+        // say nothing.
+        let Some(command) = Service::from_id(profile).and_then(|service| match service {
+            Service::Agent(kind) => self.agents.engine(kind).renew_command(),
+            _ => None,
+        }) else {
             return Ok(Renewal::NothingToRenew);
-        }
+        };
         // A sandbox is only handed out for a layer that exists, so a machine that has
         // never built this profile's harness gets one built first.
         let recipes = vec![recipe.clone()];
@@ -235,15 +237,9 @@ where
             snapshot,
             vsock: Vec::new(),
         };
-        let used = renew_credential(
-            &self.isolation,
-            &self.config,
-            sandbox,
-            recipe.renew_command.to_owned(),
-            &Unwatched,
-        )
-        .await
-        .map_err(CredentialsError::Isolation)?;
+        let used = renew_credential(&self.isolation, &self.config, sandbox, command, &Unwatched)
+            .await
+            .map_err(CredentialsError::Isolation)?;
         Ok(if used {
             Renewal::Renewed
         } else {
@@ -336,12 +332,48 @@ where
 
 // What a profile's files say about its session, read from the directory the operator's
 // copy lives in so the list says the same thing the check would find out later.
-fn expiry_of(profile_dir: &Path) -> Option<String> {
-    let contents = fs::read_to_string(profile_dir.join(freshness::CREDENTIAL_FILE)).ok()?;
-    freshness::of_file(&contents).map(|freshness| freshness.describe())
+// The same answer, for files that have travelled instead of staying on this machine: a
+// host is handed a profile's files, and asking whether they still work uses the provider
+// that made them.
+pub fn freshness_of(
+    profile: &str,
+    agents: &AgentEngines,
+    files: &[(String, String)],
+) -> Option<freshness::Freshness> {
+    let engine = match Service::from_id(profile)? {
+        Service::Agent(kind) => agents.engine(kind),
+        _ => return None,
+    };
+    let name = engine.session_file()?;
+    let contents = files
+        .iter()
+        .find(|(path, _)| path.ends_with(name))
+        .map(|(_, contents)| contents.as_str())?;
+    engine.session_expiry(contents).map(freshness::of)
+}
+
+fn expiry_of(credentials: &Credentials<impl IsolationEngine>, profile: &str) -> Option<String> {
+    credentials
+        .session_expiry(profile)
+        .map(freshness::of)
+        .map(freshness::Freshness::describe)
 }
 
 fn check_id(profiles: &[String]) -> String {
     let first = profiles.first().map(String::as_str).unwrap_or("profiles");
     format!("{CREDENTIAL_PREFIX}check-{}", first.replace('/', "-"))
+}
+
+impl<E: IsolationEngine> Credentials<E> {
+    // What this profile's own provider says about the session in it: the file it keeps, and
+    // the deadline inside it. The credential layer carries the answer and nothing else.
+    pub fn session_expiry(&self, profile: &str) -> Option<SessionExpiry> {
+        let engine = match Service::from_id(profile)? {
+            Service::Agent(kind) => self.agents.engine(kind),
+            _ => return None,
+        };
+        let name = engine.session_file()?;
+        let contents = fs::read_to_string(self.config.profile_dir(profile).join(name)).ok()?;
+        engine.session_expiry(&contents)
+    }
 }

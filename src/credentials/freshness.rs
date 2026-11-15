@@ -1,6 +1,6 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde::Deserialize;
+use crate::agent::SessionExpiry;
 
 // How long the credential in a profile will keep working, read from the profile's own
 // files rather than remembered anywhere. A fleet that has been idle for a week therefore
@@ -16,53 +16,26 @@ pub enum Freshness {
     Dead { since_ms: i64 },
 }
 
-// The name a profile's OAuth session lives under, for the harnesses that keep one. A
-// profile without this file carries no session to expire (a token in an environment
-// file, say), and freshness has nothing to say about it.
-pub const CREDENTIAL_FILE: &str = ".credentials.json";
-
+// A session with less than this left is worth renewing now rather than mid-task.
 const RENEW_WITHIN_MS: i64 = 15 * 60 * 1000;
 
-#[derive(Deserialize)]
-struct CredentialFile {
-    #[serde(rename = "claudeAiOauth")]
-    claude: Option<Oauth>,
-}
-
-#[derive(Deserialize)]
-struct Oauth {
-    #[serde(rename = "expiresAt")]
-    expires_at: Option<i64>,
-    #[serde(rename = "refreshTokenExpiresAt")]
-    refresh_expires_at: Option<i64>,
-    #[serde(rename = "refreshToken")]
-    refresh_token: Option<String>,
-}
-
-// `None` says this profile has no session to expire, which is not a problem to report.
-pub fn of_file(contents: &str) -> Option<Freshness> {
-    let file: CredentialFile = serde_json::from_str(contents).ok()?;
-    let oauth = file.claude?;
+// Where a session stands, worked out from what its own provider read out of its own file.
+// Nothing here knows what a credential looks like.
+pub fn of(session: SessionExpiry) -> Freshness {
     let now = now_ms();
-    let expires_at = oauth.expires_at?;
-    let can_refresh = oauth
-        .refresh_token
-        .as_deref()
-        .is_some_and(|token| !token.is_empty())
-        && oauth.refresh_expires_at.is_none_or(|until| until > now);
-    if expires_at > now + RENEW_WITHIN_MS {
-        return Some(Freshness::Fresh {
-            expires_at_ms: expires_at,
-        });
+    if session.expires_at_ms > now + RENEW_WITHIN_MS {
+        return Freshness::Fresh {
+            expires_at_ms: session.expires_at_ms,
+        };
     }
-    if can_refresh {
-        return Some(Freshness::RefreshDue {
-            expires_at_ms: expires_at,
-        });
+    if session.can_renew {
+        return Freshness::RefreshDue {
+            expires_at_ms: session.expires_at_ms,
+        };
     }
-    Some(Freshness::Dead {
-        since_ms: expires_at,
-    })
+    Freshness::Dead {
+        since_ms: session.expires_at_ms,
+    }
 }
 
 impl Freshness {

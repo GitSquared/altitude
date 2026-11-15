@@ -191,8 +191,31 @@ fn system_prompt(base: &str, context: &TaskAgentTurnContext) -> String {
     prompt
 }
 
+// What a harness's own file says about its session: when it stops working, and whether
+// anything but a sign-in can change that.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SessionExpiry {
+    pub expires_at_ms: i64,
+    pub can_renew: bool,
+}
+
 pub trait AgentEngine: Send + Sync {
     fn profile_recipe(&self) -> ProfileRecipe;
+    // How this harness renews its own session: by being used. A harness whose credential
+    // is a plain token has nothing to renew, and says so by answering nothing.
+    fn renew_command(&self) -> Option<String> {
+        None
+    }
+    // The file this harness keeps its session in, relative to the profile, and how to read
+    // its deadline out of that file. Nobody else knows either: the credential layer asks,
+    // and all it gets back is when the session ends and whether it can be renewed.
+    fn session_file(&self) -> Option<&'static str> {
+        None
+    }
+    fn session_expiry(&self, contents: &str) -> Option<SessionExpiry> {
+        let _ = contents;
+        None
+    }
     fn new_conversation_id(&self) -> String;
     fn conversation_transcript_path(&self, conversation_id: &str) -> String;
     fn autopilot_command(

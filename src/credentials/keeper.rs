@@ -16,14 +16,7 @@ const RENEW_WITHIN: Duration = Duration::from_secs(60 * 60);
 pub const LOOK_EVERY: Duration = Duration::from_secs(15 * 60);
 
 pub fn due(credentials: &Credentials<impl IsolationEngine>, profile: &str) -> Option<Freshness> {
-    let contents = fs::read_to_string(
-        credentials
-            .config()
-            .profile_dir(profile)
-            .join(freshness::CREDENTIAL_FILE),
-    )
-    .ok()?;
-    match freshness::of_file(&contents)? {
+    match freshness::of(credentials.session_expiry(profile)?) {
         Freshness::Fresh { expires_at_ms }
             if expires_at_ms > freshness::now_ms() + RENEW_WITHIN.as_millis() as i64 =>
         {
@@ -52,9 +45,7 @@ pub fn profiles(config: &Config) -> Vec<String> {
             // A profile is a directory named "profile" holding a session, wherever in the
             // tree an operator's copy happens to sit: ids carry slashes.
             if path.file_name().is_some_and(|name| name == "profile") {
-                if path.join(freshness::CREDENTIAL_FILE).is_file()
-                    && let Some(id) = path.parent().and_then(|dir| dir.strip_prefix(&root).ok())
-                {
+                if let Some(id) = path.parent().and_then(|dir| dir.strip_prefix(&root).ok()) {
                     found.push(id.to_string_lossy().into_owned());
                 }
                 continue;
