@@ -253,6 +253,16 @@ where
             }
             None => Vec::new(),
         };
+        // A session file is a file in its own profile: a name with a path in it would
+        // write somewhere else entirely, and that is worth stopping rather than logging.
+        let profile_dir = self.config.profile_dir(profile);
+        for (_, host) in &take_back {
+            debug_assert!(
+                host.starts_with(&profile_dir),
+                "a renewed credential must land inside {}",
+                profile_dir.display()
+            );
+        }
         let used = renew_credential(
             &self.isolation,
             &self.config,

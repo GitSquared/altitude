@@ -216,10 +216,13 @@ machine). `task` is `store`, `agent`, `run` and `mirror`.
   keyboard ownership, attention requests and replies, restart, and recovery.
 - Exercise changed interactive behavior in a real terminal. Tests that assert
   shortcut labels or mock a successful resume do not establish that they work.
-- Do not add automated tests, test fixtures, or test infrastructure for now.
-  First demonstrate useful functionality through working user journeys.
-  Reintroduce tests only when Gabriel explicitly agrees to a narrowly scoped
-  testing task; do not accumulate unit tests as part of ordinary implementation.
+- There are no tests in this repository, and adding any is not the way to prove
+  something works: a journey that runs is the evidence.
+- What a test would have asserted belongs in the code as `assert!` for a fact that
+  must hold to go on, and `debug_assert!` for a fact that would make a bug obvious —
+  a path that has to stay inside its directory, an invariant a rename could break, a
+  conversion that cannot lose anything. Write the assertion where the fact is
+  established, so a development build says so the first time it is violated.
 - Before committing Rust code, run `cargo fmt --check` and `cargo check`.
   Run Clippy when available. Documentation-only edits need a diff review,
   not an unrelated runtime suite.

@@ -36,6 +36,11 @@ pub(crate) async fn reconcile_sessions(client: &LinkClient, peer: EndpointAddr, 
         if here.is_some_and(|here| here >= theirs) {
             continue;
         }
+        debug_assert!(
+            path.starts_with(config.profile_dir(&profile)),
+            "an adopted session belongs inside {}",
+            config.profile_dir(&profile).display()
+        );
         if let Some(parent) = path.parent()
             && fs::create_dir_all(parent).is_err()
         {
