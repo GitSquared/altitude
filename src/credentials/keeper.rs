@@ -1,9 +1,9 @@
-use std::time::Duration;
+use std::{fs, time::Duration};
 
 use crate::isolation::IsolationEngine;
 
-use super::Credentials;
 use super::freshness::{self, Freshness};
+use super::{Credentials, Renewed};
 
 // A session is kept alive by the only thing that can keep it alive: using it. The check
 // that asks a profile whether it still signs in runs the harness in a sandbox, and the
@@ -22,7 +22,7 @@ pub fn due(credentials: &Credentials<impl IsolationEngine>, profile: &str) -> Op
         .join(profile)
         .join("profile")
         .join(freshness::CREDENTIAL_FILE);
-    let contents = std::fs::read_to_string(path).ok()?;
+    let contents = fs::read_to_string(path).ok()?;
     match freshness::of_file(&contents)? {
         Freshness::Fresh { expires_at_ms }
             if expires_at_ms > freshness::now_ms() + RENEW_WITHIN.as_millis() as i64 =>
@@ -46,21 +46,17 @@ where
             continue;
         };
         tracing::info!(profile, "{}; renewing it", state.describe());
-        match credentials.answers(vec![profile.clone()]).await {
-            Ok(answers) => {
-                for (_, answer) in answers {
-                    if answer.signed_in {
-                        tracing::info!(profile, "renewed");
-                    } else {
-                        tracing::warn!(
-                            profile,
-                            output = %answer.output.trim(),
-                            "could not renew this credential; it needs a sign-in"
-                        );
-                    }
-                }
+        match credentials.renew(profile).await {
+            Ok(Renewed::Renewed) => tracing::info!(profile, "renewed"),
+            Ok(Renewed::NothingToRenew) => {
+                tracing::info!(profile, "nothing in this profile renews itself")
             }
-            Err(error) => tracing::warn!(profile, %error, "could not check this credential"),
+            Ok(Renewed::Refused(output)) => tracing::warn!(
+                profile,
+                %output,
+                "could not renew this credential; it needs a sign-in"
+            ),
+            Err(error) => tracing::warn!(profile, %error, "could not renew this credential"),
         }
     }
 }

@@ -23,6 +23,10 @@ pub struct ProfileRecipe {
     pub sign_in: &'static str,
     pub sign_in_command: SignInCommand,
     pub status_command: &'static str,
+    // What actually renews the session: using the harness. The status check only looks,
+    // so a credential close to running out is renewed by running this once. Empty for a
+    // credential that has nothing to renew.
+    pub renew_command: &'static str,
     pub label: &'static str,
     pub setup_command: &'static str,
     pub directories: Vec<PersistentDirectory>,

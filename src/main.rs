@@ -12,7 +12,9 @@ use crate::{
     cli::{Cli, Command},
     config::Config,
     db::Database,
-    isolation::{IsolationBackend, IsolationEngine, MicrosandboxIsolation, TestbedIsolation},
+    isolation::{
+        IsolationBackend, IsolationEngine, MicrosandboxIsolation, PortRelays, TestbedIsolation,
+    },
     remote::{InstallationKey, LinkClient, RemoteKeys},
     task::{TaskEventLoop, TaskService, TaskStore, TrackerHost},
     tracker::TrackerKind,
@@ -60,6 +62,7 @@ async fn main() -> ExitCode {
         Some(Command::Serve(args)) => remote::serve::run(args).await,
         Some(Command::Poster) => tui::poster().await.map_err(Into::into),
         Some(Command::Probe(args)) => probe::run(args).await,
+        Some(Command::Credentials(args)) => renew_credentials(args).await,
         None => client().await,
     };
     match result {
@@ -79,6 +82,65 @@ async fn client() -> Result<(), Box<dyn Error>> {
         }
         IsolationBackend::Testbed => client_with(TestbedIsolation::new(&config), config).await,
     }
+}
+
+async fn renew_credentials(args: cli::CredentialsArgs) -> Result<(), Box<dyn Error>> {
+    let config = Config::load()?;
+    let _log_guard = logging::init(&config)?;
+    match IsolationBackend::from_environment() {
+        IsolationBackend::Microsandbox => {
+            renew_with(MicrosandboxIsolation::new(&config), config, args).await
+        }
+        IsolationBackend::Testbed => renew_with(TestbedIsolation::new(&config), config, args).await,
+    }
+}
+
+async fn renew_with<E>(
+    isolation: E,
+    config: Config,
+    args: cli::CredentialsArgs,
+) -> Result<(), Box<dyn Error>>
+where
+    E: IsolationEngine + Clone + 'static,
+{
+    let credentials = credentials::Credentials::new(
+        isolation,
+        config.clone(),
+        agent_engines(),
+        PortRelays::new(config.agent_channel_dir()),
+    );
+    let profiles = match args.profile {
+        Some(profile) => vec![profile],
+        None => config
+            .load_or_create_settings()
+            .ok()
+            .map(|file| {
+                file.settings()
+                    .credentials()
+                    .iter()
+                    .map(|credential| credential.id.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default(),
+    };
+    for profile in profiles {
+        let Some(state) = credentials::keeper::due(&credentials, &profile) else {
+            println!("{profile}: still valid");
+            continue;
+        };
+        println!("{profile}: {}; renewing", state.describe());
+        match credentials.renew(&profile).await {
+            Ok(credentials::Renewed::Renewed) => println!("{profile}: renewed"),
+            Ok(credentials::Renewed::NothingToRenew) => {
+                println!("{profile}: nothing in it renews itself")
+            }
+            Ok(credentials::Renewed::Refused(output)) => {
+                println!("{profile}: could not renew it — {output}")
+            }
+            Err(error) => println!("{profile}: could not renew it — {error}"),
+        }
+    }
+    Ok(())
 }
 
 // The harnesses this machine runs turns with. A debug build, or one asked for the
@@ -212,7 +274,7 @@ where
                         })
                         .unwrap_or_default();
                     credentials::keeper::refresh_due(keeping.credentials(), &profiles).await;
-                    tokio::time::sleep(credentials::keeper::LOOK_EVERY).await;
+                    tokio::time::sleep(crate::credentials::keeper::LOOK_EVERY).await;
                 }
             });
         }

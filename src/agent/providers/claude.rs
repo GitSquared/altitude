@@ -427,6 +427,7 @@ impl AgentEngine for ClaudeCode {
             // no way to be asked. Existence and size only: the contents are the
             // credential, and altitude does not read it.
             status_command: "test -s /altitude/claude/.credentials.json && echo a login is here",
+            renew_command: "claude -p ready --output-format json",
             label: "installing Claude Code",
             setup_command: Self::install_command(),
             directories: vec![

@@ -42,6 +42,16 @@ pub enum Command {
     Poster,
     #[command(long_about = PROBE_MODE)]
     Probe(ProbeArgs),
+    #[command(long_about = CREDENTIALS_MODE)]
+    Credentials(CredentialsArgs),
+}
+
+const CREDENTIALS_MODE: &str = "Say what each credential this machine holds has left, and renew the ones close to running out by using them once — the only thing that renews a session.";
+
+#[derive(Debug, Args)]
+pub struct CredentialsArgs {
+    #[arg(long, value_name = "ID")]
+    pub profile: Option<String>,
 }
 
 const PROBE_MODE: &str = "Send one intent to a project on a remote and print every change it makes, until it stops. The exit code is the verdict: nothing running and nothing wrong is a success.";

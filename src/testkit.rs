@@ -51,6 +51,7 @@ pub fn scripted_vcs_recipe() -> ProfileRecipe {
         sign_in: "Nothing to sign in.",
         sign_in_command: SignInCommand::Direct("true"),
         status_command: "true",
+        renew_command: "",
         label: "the scripted version control",
         setup_command: "",
         directories: Vec::new(),
@@ -71,6 +72,7 @@ impl AgentEngine for ScriptedAgent {
             sign_in: "Nothing to sign in.",
             sign_in_command: SignInCommand::Direct("true"),
             status_command: "true",
+            renew_command: "",
             label: "the scripted agent",
             setup_command: "",
             directories: vec![PersistentDirectory::root(

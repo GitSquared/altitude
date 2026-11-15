@@ -286,6 +286,7 @@ impl AgentEngine for PiCode {
             // object when there are none, so the question is whether it has any.
             status_command: "jq -e 'length > 0' /altitude/pi/auth.json >/dev/null \
                              && echo a provider is logged in",
+            renew_command: "",
             label: "installing Pi",
             setup_command: INSTALL_COMMAND,
             directories: vec![

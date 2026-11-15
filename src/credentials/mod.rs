@@ -13,6 +13,15 @@ use std::collections::HashMap;
 use crate::vcs;
 
 pub use model::{Credential, Service, Slot, agent_of, describe, new_id};
+
+// What came of trying to renew a profile: the harness was used and its session is
+// newer, there was nothing for it to renew, or it refused and said why.
+#[derive(Clone, Debug)]
+pub enum Renewed {
+    Renewed,
+    NothingToRenew,
+    Refused(String),
+}
 pub use shell::{
     CredentialShell, CredentialShellCancel, CredentialShellEvent, credential_shell_id,
 };
@@ -189,6 +198,46 @@ where
         }
         answers.sort_by(|left, right| left.0.cmp(&right.0));
         Ok(answers)
+    }
+
+    // Using the harness is the only thing that renews its session: the status check
+    // reads a file and cannot. So a profile close to running out is renewed by running
+    // the harness once, in the same kind of sandbox its checks use.
+    pub async fn renew(&self, profile: &str) -> Result<Renewed, CredentialsError> {
+        let recipe = self.recipe(profile)?;
+        if recipe.renew_command.trim().is_empty() {
+            return Ok(Renewed::NothingToRenew);
+        }
+        let recipes = vec![recipe.clone()];
+        let check = CredentialCheck {
+            profile: profile.to_owned(),
+            command: recipe.renew_command.to_owned(),
+        };
+        let Some(snapshot) = self
+            .isolation
+            .project_snapshot(Project::profile_build(), recipes.clone())
+        else {
+            return Err(CredentialsError::Refused(
+                "no sandbox is available to renew this profile".to_owned(),
+            ));
+        };
+        let sandbox = CredentialSandbox {
+            id: check_id(&[profile.to_owned()]),
+            recipes,
+            snapshot: Some(snapshot),
+            vsock: Vec::new(),
+        };
+        let reports = self
+            .isolation
+            .credential_reports(sandbox, vec![check], &Unwatched)
+            .await
+            .map_err(CredentialsError::Isolation)?
+            .unwrap_or_default();
+        Ok(match reports.into_iter().next() {
+            Some((_, report)) if report.signed_in => Renewed::Renewed,
+            Some((_, report)) => Renewed::Refused(report.output.trim().to_owned()),
+            None => Renewed::Refused("the harness said nothing".to_owned()),
+        })
     }
 
     async fn answer_batch(
