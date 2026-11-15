@@ -2,26 +2,18 @@ use std::{fs, time::Duration};
 
 use crate::{config::Config, isolation::IsolationEngine};
 
-use super::freshness::{self, Freshness};
+use super::freshness::Standing;
 use super::{Credentials, Renewal};
 
-// A session is kept alive by the only thing that can keep it alive: using it. The check
-// that asks a profile whether it still signs in runs the harness in a sandbox, and the
-// harness renews its own session while it is there — so a profile that is close to
-// running out is renewed by asking.
-const RENEW_WITHIN: Duration = Duration::from_secs(60 * 60);
-
+// A session is kept alive by the only thing that can keep it alive: using it.
 // How often a running machine looks. Nothing is refreshed because this fired; it fired
 // to look at what the profile's own files say.
 pub const LOOK_EVERY: Duration = Duration::from_secs(15 * 60);
 
-pub fn due(credentials: &Credentials<impl IsolationEngine>, profile: &str) -> Option<Freshness> {
-    match freshness::of(credentials.session_expiry(profile)?) {
-        Freshness::Fresh { expires_at_ms }
-            if expires_at_ms > freshness::now_ms() + RENEW_WITHIN.as_millis() as i64 =>
-        {
-            None
-        }
+pub fn due(credentials: &Credentials<impl IsolationEngine>, profile: &str) -> Option<Standing> {
+    let standing = standing(credentials, profile)?;
+    match standing {
+        standing if !standing.is_due() => None,
         due => Some(due),
     }
 }
@@ -29,6 +21,14 @@ pub fn due(credentials: &Credentials<impl IsolationEngine>, profile: &str) -> Op
 // The profiles this machine can renew: the ones whose directory actually holds a session.
 // Read from the disk rather than from a settings list, so a machine renews what it has
 // whether or not anything remembered to name it.
+// What the profile's provider says about the session in it.
+pub fn standing(
+    credentials: &Credentials<impl IsolationEngine>,
+    profile: &str,
+) -> Option<Standing> {
+    Some(Standing::new(credentials.session_expiry(profile)?))
+}
+
 pub fn profiles(config: &Config) -> Vec<String> {
     let root = config.scoped_data_dir().to_path_buf();
     let mut found = Vec::new();
@@ -68,7 +68,11 @@ where
         let Some(state) = due(credentials, profile) else {
             continue;
         };
-        tracing::info!(profile, "{}; renewing it", state.describe());
+        tracing::info!(
+            profile,
+            "{}; renewing it",
+            state.describe(credentials.can_renew(profile))
+        );
         match credentials.renew(profile).await {
             Ok(Renewal::Renewed) => tracing::info!(profile, "renewed"),
             Ok(Renewal::NothingToRenew) => {

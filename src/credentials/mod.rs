@@ -5,7 +5,11 @@ pub mod keeper;
 mod model;
 mod shell;
 
-use std::{error::Error, fmt, fs, path::PathBuf};
+use std::{
+    error::Error,
+    fmt, fs,
+    path::{Path, PathBuf},
+};
 
 use tokio::sync::watch;
 
@@ -30,7 +34,7 @@ pub use shell::{
 };
 
 use crate::{
-    agent::{AgentChannels, AgentEngines, SessionExpiry},
+    agent::{AgentChannels, AgentEngines},
     config::Config,
     isolation::{
         CREDENTIAL_PREFIX, CredentialCheck, CredentialSandbox, IsolationEngine, IsolationError,
@@ -116,14 +120,6 @@ where
             sign_in_command: recipe.sign_in_command,
             expires: expiry_of(self, &recipe.profile),
         })
-    }
-
-    pub(crate) fn recipe(&self, profile: &str) -> Result<ProfileRecipe, CredentialsError> {
-        #[cfg(any(test, debug_assertions, feature = "testkit"))]
-        if let Some(recipe) = self.overrides.get(profile) {
-            return Ok(recipe.clone());
-        }
-        profile_recipe(profile, &self.agents)
     }
 }
 
@@ -212,10 +208,7 @@ where
         // Whether a credential can renew itself is the harness's business, not this
         // layer's: the one that can is asked for the command, and the ones that cannot
         // say nothing.
-        let Some(command) = Service::from_id(profile).and_then(|service| match service {
-            Service::Agent(kind) => self.agents.engine(kind).renew_command(),
-            _ => None,
-        }) else {
+        let Some(command) = recipe.session_renew else {
             return Ok(Renewal::NothingToRenew);
         };
         // A sandbox is only handed out for a layer that exists, so a machine that has
@@ -239,16 +232,14 @@ where
         };
         // The session files the provider names are what a renewal has to keep: they come
         // back out of the sandbox into the directory this machine owns the profile in.
-        let take_back = match (Service::from_id(profile), recipe.directories.first()) {
-            (Some(Service::Agent(kind)), Some(directory)) => {
+        let take_back = match recipe.directories.first() {
+            Some(directory) => {
                 let root = match directory.guest_path {
                     GuestPath::Absolute(path) | GuestPath::HomeRelative(path) => path,
                 };
                 match guest_absolute(root) {
-                    Ok(root) => self
-                        .agents
-                        .engine(kind)
-                        .session_files()
+                    Ok(root) => recipe
+                        .session_keep
                         .iter()
                         .map(|name| {
                             (
@@ -260,13 +251,13 @@ where
                     Err(_) => Vec::new(),
                 }
             }
-            _ => Vec::new(),
+            None => Vec::new(),
         };
         let used = renew_credential(
             &self.isolation,
             &self.config,
             sandbox,
-            command,
+            command.to_owned(),
             take_back,
             &Unwatched,
         )
@@ -371,24 +362,27 @@ pub fn freshness_of(
     profile: &str,
     agents: &AgentEngines,
     files: &[(String, String)],
-) -> Option<freshness::Freshness> {
-    let engine = match Service::from_id(profile)? {
-        Service::Agent(kind) => agents.engine(kind),
-        _ => return None,
-    };
-    let name = engine.session_file()?;
+) -> Option<freshness::Standing> {
+    let recipe = profile_recipe(profile, agents).ok()?;
+    let file = recipe.session_file?;
     let contents = files
         .iter()
-        .find(|(path, _)| path.ends_with(name))
+        .find(|(path, _)| path.ends_with(file))
         .map(|(_, contents)| contents.as_str())?;
-    engine.session_expiry(contents).map(freshness::of)
+    (recipe.session_deadline?)(contents).map(freshness::Standing::new)
 }
 
 fn expiry_of(credentials: &Credentials<impl IsolationEngine>, profile: &str) -> Option<String> {
     credentials
         .session_expiry(profile)
-        .map(freshness::of)
-        .map(freshness::Freshness::describe)
+        .map(freshness::Standing::new)
+        .map(|standing| standing.describe(can_renew(profile, credentials.agents())))
+}
+
+// Whether a profile's provider can renew its session at all: asked of the provider, which
+// answers with the command that does it, or with nothing.
+pub fn can_renew(profile: &str, agents: &AgentEngines) -> bool {
+    profile_recipe(profile, agents).is_ok_and(|recipe| recipe.session_renew.is_some())
 }
 
 fn check_id(profiles: &[String]) -> String {
@@ -397,15 +391,60 @@ fn check_id(profiles: &[String]) -> String {
 }
 
 impl<E: IsolationEngine> Credentials<E> {
+    pub(crate) fn recipe(&self, profile: &str) -> Result<ProfileRecipe, CredentialsError> {
+        #[cfg(any(test, debug_assertions, feature = "testkit"))]
+        if let Some(recipe) = self.overrides.get(profile) {
+            return Ok(recipe.clone());
+        }
+        profile_recipe(profile, &self.agents)
+    }
+
+    // Whether this profile's provider can renew its session at all: the provider knows,
+    // and answers with the command that does it or with nothing.
+    pub fn can_renew(&self, profile: &str) -> bool {
+        self.recipe(profile)
+            .is_ok_and(|recipe| recipe.session_renew.is_some())
+    }
+
+    pub(crate) fn agents(&self) -> &AgentEngines {
+        &self.agents
+    }
+
     // What this profile's own provider says about the session in it: the file it keeps, and
     // the deadline inside it. The credential layer carries the answer and nothing else.
-    pub fn session_expiry(&self, profile: &str) -> Option<SessionExpiry> {
-        let engine = match Service::from_id(profile)? {
-            Service::Agent(kind) => self.agents.engine(kind),
-            _ => return None,
-        };
-        let name = engine.session_file()?;
+    pub fn session_expiry(&self, profile: &str) -> Option<i64> {
+        let recipe = self.recipe(profile).ok()?;
+        let name = recipe.session_file?;
         let contents = fs::read_to_string(self.config.profile_dir(profile).join(name)).ok()?;
-        engine.session_expiry(&contents)
+        (recipe.session_deadline?)(&contents)
     }
+}
+
+// The rule both machines share, in the layer that owns the question: a copy whose session
+// ends sooner never replaces one that lasts longer. Answers whether the copy already on
+// this machine should be kept instead of the one arriving.
+pub fn stored_outlasts(
+    profile_dir: &Path,
+    profile: &str,
+    agents: &AgentEngines,
+    arriving: &[(String, String)],
+) -> bool {
+    let Some(arriving) = freshness_of(profile, agents, arriving) else {
+        return false;
+    };
+    let Ok(recipe) = profile_recipe(profile, agents) else {
+        return false;
+    };
+    let here = recipe
+        .session_keep
+        .iter()
+        .filter_map(|name| {
+            let contents = fs::read_to_string(profile_dir.join(name)).ok()?;
+            Some((name.to_string(), contents))
+        })
+        .collect::<Vec<_>>();
+    let Some(here) = freshness_of(profile, agents, &here) else {
+        return false;
+    };
+    here.outlasts(arriving)
 }

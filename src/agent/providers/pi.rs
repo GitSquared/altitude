@@ -277,6 +277,10 @@ impl AgentEngine for PiCode {
 
     fn profile_recipe(&self) -> ProfileRecipe {
         ProfileRecipe {
+            session_file: None,
+            session_deadline: None,
+            session_renew: None,
+            session_keep: &[],
             profile: AgentKind::Pi.profile().to_owned(),
             display: "Pi",
             sign_in: "Use /login in Pi to connect your provider.",

@@ -1,63 +1,54 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::agent::SessionExpiry;
-
-// How long the credential in a profile will keep working, read from the profile's own
-// files rather than remembered anywhere. A fleet that has been idle for a week therefore
-// says the same thing as one that has just synced, and nobody has to guess.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Freshness {
-    // Fresh enough that a task starting now will not be the thing that spends it.
-    Fresh { expires_at_ms: i64 },
-    // The access token is spent or nearly spent, but the profile can buy another one the
-    // first time something uses it. Worth saying, not worth refusing.
-    RefreshDue { expires_at_ms: i64 },
-    // Nothing in this profile can renew it: only somebody signing in can.
-    Dead { since_ms: i64 },
-}
-
 // A session with less than this left is worth renewing now rather than mid-task.
-const RENEW_WITHIN_MS: i64 = 15 * 60 * 1000;
+pub const RENEW_WITHIN_MS: i64 = 15 * 60 * 1000;
 
-// Where a session stands, worked out from what its own provider read out of its own file.
-// Nothing here knows what a credential looks like.
-pub fn of(session: SessionExpiry) -> Freshness {
-    let now = now_ms();
-    if session.expires_at_ms > now + RENEW_WITHIN_MS {
-        return Freshness::Fresh {
-            expires_at_ms: session.expires_at_ms,
-        };
-    }
-    if session.can_renew {
-        return Freshness::RefreshDue {
-            expires_at_ms: session.expires_at_ms,
-        };
-    }
-    Freshness::Dead {
-        since_ms: session.expires_at_ms,
-    }
+// Where a session stands, as the two facts its own provider read out of its own files:
+// when it stops working, and whether using it can extend that. Nothing here classifies a
+// session into a named state — every question asked of it is a comparison, so a provider
+// that reports different facts gets sensible answers without this layer learning about it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Standing {
+    pub expires_at_ms: i64,
 }
 
-impl Freshness {
-    pub fn describe(self) -> String {
-        match self {
-            Self::Fresh { expires_at_ms } => {
-                format!("expires in {}", span(expires_at_ms - now_ms()))
-            }
-            Self::RefreshDue { expires_at_ms } => format!(
+impl Standing {
+    pub fn new(expires_at_ms: i64) -> Self {
+        Self { expires_at_ms }
+    }
+
+    // Whether acting now is worth it: spent, or close enough that a task starting would
+    // be the thing that spends it.
+    pub fn is_due(self) -> bool {
+        self.expires_at_ms <= now_ms() + RENEW_WITHIN_MS
+    }
+
+    // Whether this copy will outlast another, which is the whole of the rule for deciding
+    // which of two copies of one credential to keep.
+    pub fn outlasts(self, other: Self) -> bool {
+        self.expires_at_ms > other.expires_at_ms
+    }
+
+    // Said in the terms the reader needs. Whether a spent session can come back is the
+    // provider's answer, not this one's: `renewable` is passed in by whoever asked it.
+    pub fn describe(self, renewable: bool) -> String {
+        let left = self.expires_at_ms - now_ms();
+        match (left >= 0, renewable) {
+            (true, _) => format!("expires in {}", span(left)),
+            (false, true) => format!(
                 "spent {} ago; renews when a sandbox next uses it",
-                span(now_ms() - expires_at_ms)
+                span(-left)
             ),
-            Self::Dead { since_ms } => format!(
-                "expired {} ago and cannot renew itself",
-                span(now_ms() - since_ms)
-            ),
+            (false, false) => format!("expired {} ago and cannot renew itself", span(-left)),
         }
     }
+}
 
-    pub fn is_dead(self) -> bool {
-        matches!(self, Self::Dead { .. })
-    }
+pub fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|since| since.as_millis() as i64)
+        .unwrap_or_default()
 }
 
 fn span(millis: i64) -> String {
@@ -68,11 +59,4 @@ fn span(millis: i64) -> String {
         m if m < 60 * 48 => format!("{}h", m / 60),
         m => format!("{}d", m / (60 * 24)),
     }
-}
-
-pub fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|since| since.as_millis() as i64)
-        .unwrap_or_default()
 }

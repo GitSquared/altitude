@@ -43,7 +43,9 @@ use crate::remote::{
     identity::InstallationKey,
 };
 
+use crate::agent::AgentEngines;
 use crate::credentials::Service;
+use crate::credentials::stored_outlasts;
 use crate::remote::protocol::SignalCommand;
 use crate::remote::protocol::{
     BlobHash, Handover, LINK_ALPN, LinkRequest, LinkResponse, MAX_BLOB_BYTES, RemoteTicket,
@@ -184,6 +186,44 @@ impl LinkHandler {
         }
         let operator_dir = self.operator_dir(peer);
         fs::create_dir_all(&operator_dir)?;
+        let agents = AgentEngines::new();
+        // Two machines refresh the same credential independently, so the rule for what
+        // arrives is the rule for what leaves: a copy whose session ends sooner never
+        // replaces one whose ends later. A client that has been away is exactly the one
+        // holding the older copy, and it is the one that would otherwise overwrite a
+        // session this machine kept alive.
+        let superseded = bundle
+            .profiles
+            .iter()
+            .filter(|profile| {
+                let arriving = profile
+                    .files
+                    .iter()
+                    .filter_map(|file| {
+                        let contents = BASE64.decode(&file.contents).ok()?;
+                        Some((file.path.clone(), String::from_utf8(contents).ok()?))
+                    })
+                    .collect::<Vec<_>>();
+                stored_outlasts(
+                    &operator_dir.join(&profile.profile).join("profile"),
+                    &profile.profile,
+                    &agents,
+                    &arriving,
+                )
+            })
+            .map(|profile| profile.profile.clone())
+            .collect::<Vec<_>>();
+        for profile in &superseded {
+            tracing::info!(%profile, "keeping the credential already here; it lasts longer than the one sent");
+        }
+        let decoded = decoded
+            .into_iter()
+            .filter(|(path, _)| {
+                !superseded
+                    .iter()
+                    .any(|profile| path.starts_with(Path::new(profile)))
+            })
+            .collect::<Vec<_>>();
         let root = Dir::open_ambient_dir(&operator_dir, cap_std::ambient_authority())?;
         for (path, contents) in decoded {
             let parent = path

@@ -13,9 +13,7 @@ use tokio::fs::File as AsyncFile;
 use tokio::sync::watch;
 
 use crate::{
-    agent::AgentEngines,
     config::Config,
-    credentials::freshness_of,
     isolation::{
         BaseSandboxRecipe, BaseSandboxSnapshot, CommandSession, CredentialCheck, CredentialReport,
         CredentialSandbox, EnvironmentDescription, EnvironmentProgress, EnvironmentProgressSink,
@@ -228,21 +226,6 @@ impl WorkersIsolation {
             // Said here, before a host exists: a credential that cannot renew itself
             // would otherwise cost a machine, a clone and a setup before the agent
             // discovered it could not sign in.
-            let held = bundle
-                .files
-                .iter()
-                .map(|file| (file.path.clone(), file.contents.clone()))
-                .collect::<Vec<_>>();
-            if let Some(freshness) = freshness_of(&bundle.profile, &AgentEngines::new(), &held) {
-                if freshness.is_dead() {
-                    return Err(IsolationError::new(format!(
-                        "the credential for {} {}; sign in again where it was enrolled and let altitude sync it",
-                        bundle.profile,
-                        freshness.describe()
-                    )));
-                }
-                tracing::info!(profile = %bundle.profile, "{}", freshness.describe());
-            }
             profiles.push(WorkerProfile {
                 profile: bundle.profile,
                 files: bundle

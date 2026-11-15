@@ -23,6 +23,13 @@ pub struct ProfileRecipe {
     pub sign_in: &'static str,
     pub sign_in_command: SignInCommand,
     pub status_command: &'static str,
+    // The session the profile holds, if it holds one: the file that states when it stops
+    // working and how to read that out of it, the command that renews it by using it, and
+    // the files that hold it. A provider with no session says so with `None`s.
+    pub session_file: Option<&'static str>,
+    pub session_deadline: Option<fn(&str) -> Option<i64>>,
+    pub session_renew: Option<&'static str>,
+    pub session_keep: &'static [&'static str],
     pub label: &'static str,
     pub setup_command: &'static str,
     pub directories: Vec<PersistentDirectory>,
