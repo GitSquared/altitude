@@ -31,7 +31,7 @@ pub(crate) use plan::{
 pub use profile::{DefaultFile, GuestPath, PersistentDirectory, ProfileRecipe, SignInCommand};
 pub(crate) use run::{
     add_commits_env, create, credential_reports, credential_shell, ensure_project,
-    renew_credential, watcher,
+    renew_credential, stop_work, watcher,
 };
 
 pub(super) const GUEST_HOME: &str = "/root";

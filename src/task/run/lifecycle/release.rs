@@ -90,6 +90,9 @@ where
                 if let Some(sandbox_id) = &task.facts.sandbox_id
                     && task.facts.sandbox_available
                 {
+                    if let Err(error) = service.isolation.stop_work(sandbox_id.clone()).await {
+                        tracing::warn!(%error, "could not stop the sandbox before archiving it");
+                    }
                     match service
                         .isolation
                         .suspend(
@@ -223,6 +226,9 @@ where
                     .sandbox_id
                     .clone()
                     .expect("suspendable tasks have a sandbox");
+                if let Err(error) = service.isolation.stop_work(sandbox_id.clone()).await {
+                    tracing::warn!(%error, "could not stop the sandbox before archiving it");
+                }
                 match service
                     .isolation
                     .suspend(

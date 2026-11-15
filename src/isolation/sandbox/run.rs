@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use tokio::task::spawn_blocking;
+use tokio::time;
 
 use super::guest::{opener_script, project_scripts, run_setup, run_to_end};
 use super::*;
@@ -79,6 +80,23 @@ pub(crate) async fn renew_credential(
         tracing::warn!(sandbox_id = %id, %error, "could not remove a sandbox after a renewal");
     }
     Ok(used)
+}
+
+// Signal everything in the sandbox, including the shell that is doing the signalling, and
+// wait for the tree to go quiet. A killed session is a success here: what matters is that
+// nothing is writing when the archive starts.
+pub(crate) async fn stop_work(
+    engine: &impl IsolationEngine,
+    id: String,
+) -> Result<(), IsolationError> {
+    let _ = run_to_end(
+        engine,
+        id.clone(),
+        "kill -TERM -1 2>/dev/null || true".to_owned(),
+    )
+    .await;
+    time::sleep(Duration::from_secs(2)).await;
+    Ok(())
 }
 
 pub(crate) async fn credential_reports(

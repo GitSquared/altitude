@@ -562,6 +562,16 @@ pub trait IsolationEngine: Send + Sync {
     // stop took with it, and asking is cheaper than building a new one to find out.
     fn has_sandbox(&self, id: String) -> impl Future<Output = bool> + Send;
 
+    // Stop everything the sandbox is running. Archiving a tree that is still being written
+    // is how a snapshot fails, and a turn's processes are not the whole of what writes: a
+    // package manager or a dev server keeps going after the turn that started it.
+    fn stop_work(&self, id: String) -> impl Future<Output = Result<(), IsolationError>> + Send
+    where
+        Self: Sized,
+    {
+        async move { sandbox::stop_work(self, id).await }
+    }
+
     fn suspend(
         &self,
         id: String,

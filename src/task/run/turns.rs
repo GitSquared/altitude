@@ -490,6 +490,11 @@ where
             .sandbox_id
             .clone()
             .ok_or(TaskServiceError::Task(TaskError::MissingSandbox))?;
+        // The sandbox has to be still before it is packed, or the archive reads a tree
+        // that is still being written and the pause keeps nothing.
+        if let Err(error) = self.isolation.stop_work(sandbox_id.clone()).await {
+            tracing::warn!(%error, "could not stop the sandbox before archiving it");
+        }
         match self
             .isolation
             .suspend(
