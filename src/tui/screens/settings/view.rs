@@ -227,7 +227,21 @@ impl App {
             } => public_identity(&id, output),
             _ => None,
         };
-        let detail = format!("{}: {}", service.label(), account.unwrap_or(status));
+        // How long the credential in this profile will keep working, from its own files:
+        // the row an operator looks at says it, rather than a task finding out.
+        let expires = self
+            .profiles
+            .iter()
+            .find(|summary| summary.profile == id)
+            .and_then(|summary| summary.expires.clone());
+        let detail = match expires {
+            Some(expires) => format!(
+                "{}: {} · {expires}",
+                service.label(),
+                account.unwrap_or(status)
+            ),
+            None => format!("{}: {}", service.label(), account.unwrap_or(status)),
+        };
         Row {
             label: label.clone(),
             detail: Some(detail),

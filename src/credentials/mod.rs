@@ -5,7 +5,11 @@ pub mod keeper;
 mod model;
 mod shell;
 
-use std::{error::Error, fmt, path::PathBuf};
+use std::{
+    error::Error,
+    fmt, fs,
+    path::{Path, PathBuf},
+};
 
 use tokio::sync::watch;
 
@@ -110,10 +114,11 @@ where
     pub fn summary(&self, profile: &str) -> Option<ProfileSummary> {
         let recipe = self.recipe(profile).ok()?;
         Some(ProfileSummary {
-            profile: recipe.profile,
+            profile: recipe.profile.clone(),
             display: recipe.display,
             sign_in: recipe.sign_in,
             sign_in_command: recipe.sign_in_command,
+            expires: expiry_of(&self.config.profile_dir(&recipe.profile)),
         })
     }
 
@@ -334,6 +339,13 @@ where
     fn profile_directory(&self, profile: &str) -> PathBuf {
         self.config.profile_dir(profile)
     }
+}
+
+// What a profile's files say about its session, read from the directory the operator's
+// copy lives in so the list says the same thing the check would find out later.
+fn expiry_of(profile_dir: &Path) -> Option<String> {
+    let contents = fs::read_to_string(profile_dir.join(freshness::CREDENTIAL_FILE)).ok()?;
+    freshness::of_file(&contents).map(|freshness| freshness.describe())
 }
 
 fn check_id(profiles: &[String]) -> String {

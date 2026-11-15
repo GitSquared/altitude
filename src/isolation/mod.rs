@@ -183,6 +183,9 @@ pub struct ProfileSummary {
     pub display: &'static str,
     pub sign_in: &'static str,
     pub sign_in_command: SignInCommand,
+    // What the profile's own files say about how long the credential in them will work,
+    // so the list an operator looks at says it before a task finds out.
+    pub expires: Option<String>,
 }
 
 pub const CREDENTIAL_PREFIX: &str = "credentials-";
