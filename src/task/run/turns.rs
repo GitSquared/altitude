@@ -493,7 +493,7 @@ where
         match self
             .isolation
             .suspend(
-                sandbox_id,
+                sandbox_id.clone(),
                 snapshot_name(&task.id),
                 self.snapshots_dir.clone(),
             )
@@ -512,6 +512,12 @@ where
                     %error,
                     "a task's sandbox could not be saved; the pause keeps no snapshot"
                 );
+                // The sandbox can only live on the host that made it, and a task that
+                // cannot use it has no business holding that host. Letting it go leaves
+                // the machine unclaimed, which is what hands it back.
+                if let Err(error) = self.isolation.remove(sandbox_id).await {
+                    tracing::warn!(%error, "could not remove a sandbox whose pause kept no snapshot");
+                }
                 Ok(String::new())
             }
         }
