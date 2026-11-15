@@ -16,7 +16,7 @@ use tokio::sync::watch;
 #[cfg(any(test, debug_assertions, feature = "testkit"))]
 use std::collections::HashMap;
 
-use crate::isolation::IsolationStatus;
+use crate::isolation::{GuestPath, IsolationStatus, guest_absolute, renew_credential};
 use crate::vcs;
 
 pub use model::{Credential, Service, Slot, agent_of, describe, new_id};
@@ -217,44 +217,58 @@ where
             return Ok(Renewal::NothingToRenew);
         }
         // A sandbox is only handed out for a layer that exists, so a machine that has
-        // never built this profile's harness gets one built before it is asked to renew.
-        if self
+        // never built this profile's harness gets one built first.
+        let recipes = vec![recipe.clone()];
+        let mut snapshot = self
             .isolation
-            .project_snapshot(Project::profile_build(), vec![recipe.clone()])
-            .is_none()
-        {
+            .project_snapshot(Project::profile_build(), recipes.clone());
+        if snapshot.is_none() {
             let (quiet, _) = watch::channel(IsolationStatus::Starting);
             self.isolation.prepare(&quiet).await.ok();
+            snapshot = self
+                .isolation
+                .project_snapshot(Project::profile_build(), recipes.clone());
         }
-        let recipes = vec![recipe.clone()];
-        let check = CredentialCheck {
-            profile: profile.to_owned(),
-            command: recipe.renew_command.to_owned(),
-        };
-        let Some(snapshot) = self
-            .isolation
-            .project_snapshot(Project::profile_build(), recipes.clone())
-        else {
-            return Err(CredentialsError::Refused(
-                "no sandbox is available to renew this profile".to_owned(),
-            ));
+        // The profile is mounted whole, so the files the harness renews are known by
+        // their names inside it and are taken back to the directory this machine keeps.
+        let take_back = match recipe.directories.first() {
+            Some(directory) => {
+                let root = match directory.guest_path {
+                    GuestPath::Absolute(path) | GuestPath::HomeRelative(path) => path,
+                };
+                let root = guest_absolute(root).map_err(CredentialsError::Isolation)?;
+                [freshness::CREDENTIAL_FILE, ".claude.json"]
+                    .into_iter()
+                    .map(|name| {
+                        (
+                            format!("{root}/{name}"),
+                            self.config.profile_dir(profile).join(name),
+                        )
+                    })
+                    .collect()
+            }
+            None => Vec::new(),
         };
         let sandbox = CredentialSandbox {
             id: check_id(&[profile.to_owned()]),
             recipes,
-            snapshot: Some(snapshot),
+            snapshot,
             vsock: Vec::new(),
         };
-        let reports = self
-            .isolation
-            .credential_reports(sandbox, vec![check], &Unwatched)
-            .await
-            .map_err(CredentialsError::Isolation)?
-            .unwrap_or_default();
-        Ok(match reports.into_iter().next() {
-            Some((_, report)) if report.signed_in => Renewal::Renewed,
-            Some((_, report)) => Renewal::Refused(report.output.trim().to_owned()),
-            None => Renewal::Refused("the harness said nothing".to_owned()),
+        let used = renew_credential(
+            &self.isolation,
+            &self.config,
+            sandbox,
+            recipe.renew_command.to_owned(),
+            take_back,
+            &Unwatched,
+        )
+        .await
+        .map_err(CredentialsError::Isolation)?;
+        Ok(if used {
+            Renewal::Renewed
+        } else {
+            Renewal::Refused("its harness could not be used".to_owned())
         })
     }
 

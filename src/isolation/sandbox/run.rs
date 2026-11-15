@@ -29,6 +29,54 @@ pub async fn ensure_project(
     engine.ensure_base(plan.layers, view, progress).await
 }
 
+// A session is renewed by using its harness, and the renewal only counts if it outlives
+// the sandbox that made it: so this runs one command and takes the files it changed back
+// out, to wherever the profile this machine owns actually lives.
+pub(crate) async fn renew_credential(
+    engine: &impl IsolationEngine,
+    config: &Config,
+    sandbox: CredentialSandbox,
+    command: String,
+    take_back: Vec<(String, PathBuf)>,
+    progress: &dyn EnvironmentProgressSink,
+) -> Result<bool, IsolationError> {
+    let CredentialSandbox {
+        id,
+        recipes,
+        snapshot,
+        vsock: _,
+    } = sandbox;
+    let plan = SandboxPlan::compose(config, Project::profile_build(), recipes)?;
+    create(
+        engine,
+        config,
+        id.clone(),
+        plan,
+        SandboxKind::Shell,
+        snapshot.map(SnapshotSource::Environment),
+        progress,
+    )
+    .await?;
+    let used = match run_to_end(engine, id.clone(), command).await {
+        Ok((status, _)) => status == 0,
+        Err(error) => {
+            let _ = engine.remove(id.clone()).await;
+            return Err(error);
+        }
+    };
+    if used {
+        for (guest, host) in take_back {
+            if let Err(error) = engine.collect_file(id.clone(), guest, host).await {
+                tracing::warn!(%error, "a renewed credential could not be taken back out");
+            }
+        }
+    }
+    if let Err(error) = engine.remove(id.clone()).await {
+        tracing::warn!(sandbox_id = %id, %error, "could not remove a sandbox after a renewal");
+    }
+    Ok(used)
+}
+
 pub(crate) async fn credential_reports(
     engine: &impl IsolationEngine,
     config: &Config,
