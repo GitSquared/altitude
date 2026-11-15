@@ -7,9 +7,12 @@ mod shell;
 
 use std::{error::Error, fmt, path::PathBuf};
 
+use tokio::sync::watch;
+
 #[cfg(any(test, debug_assertions, feature = "testkit"))]
 use std::collections::HashMap;
 
+use crate::isolation::IsolationStatus;
 use crate::vcs;
 
 pub use model::{Credential, Service, Slot, agent_of, describe, new_id};
@@ -215,8 +218,7 @@ where
             .project_snapshot(Project::profile_build(), vec![recipe.clone()])
             .is_none()
         {
-            let (quiet, _) =
-                tokio::sync::watch::channel(crate::isolation::IsolationStatus::Starting);
+            let (quiet, _) = watch::channel(IsolationStatus::Starting);
             self.isolation.prepare(&quiet).await.ok();
         }
         let recipes = vec![recipe.clone()];
