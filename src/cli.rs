@@ -40,6 +40,37 @@ pub enum Command {
     Serve(ServeArgs),
     #[command(long_about = POSTER_MODE)]
     Poster,
+    #[command(long_about = PROBE_MODE)]
+    Probe(ProbeArgs),
+}
+
+const PROBE_MODE: &str = "Send one intent to a project on a remote and print every change it makes, until it stops. The exit code is the verdict: nothing running and nothing wrong is a success.";
+
+#[derive(Debug, Args)]
+pub struct ProbeArgs {
+    #[arg(long, value_name = "JSON", display_order = 1)]
+    pub master: String,
+
+    #[arg(long, value_name = "PATH", display_order = 2)]
+    pub settings: PathBuf,
+
+    #[arg(long, value_name = "NAME", default_value = "canary", display_order = 3)]
+    pub host: String,
+
+    #[arg(long, value_name = "PATH", display_order = 4)]
+    pub data_dir: PathBuf,
+
+    #[arg(long, value_name = "ID", display_order = 5)]
+    pub project: Option<String>,
+
+    #[arg(long, value_name = "TEXT", display_order = 6)]
+    pub prompt: String,
+
+    #[arg(long, value_name = "NAME", default_value = "claude", display_order = 7)]
+    pub agent: String,
+
+    #[arg(long, value_name = "SECS", default_value_t = 1800, display_order = 8)]
+    pub patience: u64,
 }
 
 const SERVE_AFTER_HELP: &str = "\

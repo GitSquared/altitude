@@ -28,6 +28,7 @@ mod id;
 mod instance;
 mod isolation;
 mod logging;
+mod probe;
 mod project;
 mod remote;
 mod task;
@@ -58,6 +59,7 @@ async fn main() -> ExitCode {
     let result = match Cli::parse().command {
         Some(Command::Serve(args)) => remote::serve::run(args).await,
         Some(Command::Poster) => tui::poster().await.map_err(Into::into),
+        Some(Command::Probe(args)) => probe::run(args).await,
         None => client().await,
     };
     match result {
