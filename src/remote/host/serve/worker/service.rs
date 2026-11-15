@@ -323,7 +323,7 @@ impl WorkerService {
                 profiles,
                 snapshot,
                 vsock,
-                checks,
+                ask,
             } => {
                 if let Err(error) = write_profiles(&self.config, &profiles) {
                     return WorkerReply::Failed(error);
@@ -340,7 +340,7 @@ impl WorkerService {
                 };
                 match self
                     .engine
-                    .credential_reports(sandbox, checks, &Unwatched)
+                    .credential_reports(sandbox, ask, &Unwatched)
                     .await
                 {
                     Ok(reports) => WorkerReply::Reports(reports),

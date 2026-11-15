@@ -31,7 +31,6 @@ pub(crate) use relay::{PORT_RELAY_GUEST_PORT, install_script, with_port_relay};
 pub use relay::{PortNotice, PortRelays};
 pub(crate) use sandbox::guest_absolute;
 pub(crate) use sandbox::private_directory;
-pub(crate) use sandbox::renew_credential;
 pub use sandbox::{DefaultFile, GuestPath, PersistentDirectory, ProfileRecipe, SignInCommand};
 pub(crate) use sandbox::{run_collecting, shell_quote};
 
@@ -192,6 +191,21 @@ pub struct ProfileSummary {
 pub const CREDENTIAL_PREFIX: &str = "credentials-";
 
 pub const WATCHER_PREFIX: &str = "watcher-";
+
+// What a credential sandbox was asked: commands to run against a profile, and the files to
+// bring back out — a renewal is one of these with something to keep.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct CredentialAsk {
+    pub checks: Vec<CredentialCheck>,
+    pub keep: Vec<(String, String)>,
+}
+
+// What it answered: what each command said, and the files that were asked for.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct CredentialOutcome {
+    pub reports: Vec<(String, CredentialReport)>,
+    pub files: Vec<(String, Vec<u8>)>,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CredentialReport {
@@ -550,9 +564,9 @@ pub trait IsolationEngine: Send + Sync {
     fn credential_reports(
         &self,
         sandbox: CredentialSandbox,
-        checks: Vec<CredentialCheck>,
+        ask: CredentialAsk,
         progress: &dyn EnvironmentProgressSink,
-    ) -> impl Future<Output = Result<Option<Vec<(String, CredentialReport)>>, IsolationError>> + Send;
+    ) -> impl Future<Output = Result<Option<CredentialOutcome>, IsolationError>> + Send;
 
     fn remove_leftover_sandboxes(&self) -> impl Future<Output = ()> + Send;
 

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::isolation::{
-    Command, CommandEvent, CredentialCheck, CredentialReport, SandboxOptions, SandboxPurpose,
+    Command, CommandEvent, CredentialAsk, CredentialOutcome, SandboxOptions, SandboxPurpose,
     VsockRoute,
 };
 use crate::project::Project;
@@ -108,7 +108,7 @@ pub(crate) enum WorkerCall {
         profiles: Vec<WorkerProfile>,
         snapshot: Option<String>,
         vsock: Vec<VsockRoute>,
-        checks: Vec<CredentialCheck>,
+        ask: CredentialAsk,
     },
     Remove {
         id: String,
@@ -137,7 +137,7 @@ pub(crate) enum WorkerReply {
     // Bytes follow on the stream: a collected file or a tar of a collected tree,
     // and what the collecting machine counted.
     Blob { len: u64, files: u64, bytes: u64 },
-    Reports(Option<Vec<(String, CredentialReport)>>),
+    Reports(Option<CredentialOutcome>),
     Bool(bool),
     Text(String),
     Failed(String),

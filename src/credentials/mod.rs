@@ -16,7 +16,7 @@ use tokio::sync::watch;
 #[cfg(any(test, debug_assertions, feature = "testkit"))]
 use std::collections::HashMap;
 
-use crate::isolation::{GuestPath, IsolationStatus, guest_absolute, renew_credential};
+use crate::isolation::{CredentialAsk, GuestPath, IsolationStatus, guest_absolute};
 use crate::vcs;
 
 pub use model::{Credential, Service, Slot, agent_of, describe, new_id};
@@ -230,54 +230,58 @@ where
             snapshot,
             vsock: Vec::new(),
         };
-        // The session files the provider names are what a renewal has to keep: they come
-        // back out of the sandbox into the directory this machine owns the profile in.
-        let take_back = match recipe.directories.first() {
-            Some(directory) => {
-                let root = match directory.guest_path {
+        let keep = recipe
+            .session_keep
+            .iter()
+            .filter_map(|name| {
+                let root = recipe.directories.first()?;
+                let root = match root.guest_path {
                     GuestPath::Absolute(path) | GuestPath::HomeRelative(path) => path,
                 };
-                match guest_absolute(root) {
-                    Ok(root) => recipe
-                        .session_keep
-                        .iter()
-                        .map(|name| {
-                            (
-                                format!("{root}/{name}"),
-                                self.config.profile_dir(profile).join(name),
-                            )
-                        })
-                        .collect(),
-                    Err(_) => Vec::new(),
-                }
-            }
-            None => Vec::new(),
+                Some((
+                    format!("{}/{name}", guest_absolute(root).ok()?),
+                    (*name).to_owned(),
+                ))
+            })
+            .collect::<Vec<_>>();
+        let ask = CredentialAsk {
+            checks: vec![CredentialCheck {
+                profile: profile.to_owned(),
+                command: command.to_owned(),
+            }],
+            keep,
         };
-        // A session file is a file in its own profile: a name with a path in it would
-        // write somewhere else entirely, and that is worth stopping rather than logging.
-        let profile_dir = self.config.profile_dir(profile);
-        for (_, host) in &take_back {
-            debug_assert!(
-                host.starts_with(&profile_dir),
-                "a renewed credential must land inside {}",
-                profile_dir.display()
-            );
+        let outcome = self
+            .isolation
+            .credential_reports(sandbox, ask, &Unwatched)
+            .await
+            .map_err(CredentialsError::Isolation)?;
+        let Some(outcome) = outcome else {
+            return Ok(Renewal::Refused(
+                "no sandbox can be made for this credential here".to_owned(),
+            ));
+        };
+        if !outcome.reports.iter().any(|(_, report)| report.signed_in) {
+            return Ok(Renewal::Refused("its harness could not be used".to_owned()));
         }
-        let used = renew_credential(
-            &self.isolation,
-            &self.config,
-            sandbox,
-            command.to_owned(),
-            take_back,
-            &Unwatched,
-        )
-        .await
-        .map_err(CredentialsError::Isolation)?;
-        Ok(if used {
-            Renewal::Renewed
-        } else {
-            Renewal::Refused("its harness could not be used".to_owned())
-        })
+        let files = outcome.files;
+        // Whatever the provider says holds the session is what this machine keeps: the
+        // renewal happened somewhere else, and this is the only copy of it.
+        let profile_dir = self.config.profile_dir(profile);
+        if fs::create_dir_all(&profile_dir).is_err() {
+            return Err(CredentialsError::Refused(
+                "could not keep a renewed session".to_owned(),
+            ));
+        }
+        for (name, bytes) in files {
+            debug_assert!(
+                !name.contains('/'),
+                "a session file is a file in its profile, not a path"
+            );
+            fs::write(profile_dir.join(&name), bytes)
+                .map_err(|error| CredentialsError::Refused(error.to_string()))?;
+        }
+        Ok(Renewal::Renewed)
     }
 
     async fn answer_batch(
@@ -311,10 +315,18 @@ where
         };
         let reports = self
             .isolation
-            .credential_reports(sandbox, checks, &Unwatched)
+            .credential_reports(
+                sandbox,
+                CredentialAsk {
+                    checks,
+                    keep: Vec::new(),
+                },
+                &Unwatched,
+            )
             .await
             .map_err(CredentialsError::Isolation)?
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .reports;
         Ok(reports
             .into_iter()
             .map(|(profile, report)| {

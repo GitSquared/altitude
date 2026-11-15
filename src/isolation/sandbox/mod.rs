@@ -10,10 +10,10 @@ use std::{
 use crate::{config::Config, project::Project};
 
 use super::{
-    BaseSandboxRecipe, BaseSandboxSnapshot, CommandEvent, CredentialCheck, CredentialReport,
-    CredentialSandbox, EnvironmentProgressSink, IsolationEngine, IsolationError, LayerView,
-    OutputStream, PORT_RELAY_GUEST_PORT, PROJECT_CACHE_QUOTA_MIB, STORE_QUOTA_MIB, SandboxMount,
-    SandboxOptions, SandboxPurpose, SetupStep, VsockRoute, environment_identity,
+    BaseSandboxRecipe, BaseSandboxSnapshot, CommandEvent, CredentialReport, CredentialSandbox,
+    EnvironmentProgressSink, IsolationEngine, IsolationError, LayerView, OutputStream,
+    PORT_RELAY_GUEST_PORT, PROJECT_CACHE_QUOTA_MIB, STORE_QUOTA_MIB, SandboxMount, SandboxOptions,
+    SandboxPurpose, SetupStep, VsockRoute, environment_identity,
 };
 
 mod guest;
@@ -30,8 +30,7 @@ pub(crate) use plan::{
 };
 pub use profile::{DefaultFile, GuestPath, PersistentDirectory, ProfileRecipe, SignInCommand};
 pub(crate) use run::{
-    add_commits_env, create, credential_reports, credential_shell, ensure_project,
-    renew_credential, watcher,
+    add_commits_env, create, credential_reports, credential_shell, ensure_project, watcher,
 };
 
 pub(super) const GUEST_HOME: &str = "/root";
