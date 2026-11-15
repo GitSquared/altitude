@@ -425,6 +425,10 @@ impl AgentEngine for ClaudeCode {
         Some(".credentials.json")
     }
 
+    fn session_files(&self) -> &'static [&'static str] {
+        &[".credentials.json", ".claude.json"]
+    }
+
     fn session_expiry(&self, contents: &str) -> Option<SessionExpiry> {
         let file: serde_json::Value = serde_json::from_str(contents).ok()?;
         let oauth = file.get("claudeAiOauth")?;

@@ -212,6 +212,11 @@ pub trait AgentEngine: Send + Sync {
     fn session_file(&self) -> Option<&'static str> {
         None
     }
+    // Every file that holds or describes the session, so a renewal made inside a sandbox
+    // can be carried back to the copy this machine owns.
+    fn session_files(&self) -> &'static [&'static str] {
+        &[]
+    }
     fn session_expiry(&self, contents: &str) -> Option<SessionExpiry> {
         let _ = contents;
         None

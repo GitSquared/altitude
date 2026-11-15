@@ -12,7 +12,7 @@ use tokio::sync::watch;
 #[cfg(any(test, debug_assertions, feature = "testkit"))]
 use std::collections::HashMap;
 
-use crate::isolation::{IsolationStatus, renew_credential};
+use crate::isolation::{GuestPath, IsolationStatus, guest_absolute, renew_credential};
 use crate::vcs;
 
 pub use model::{Credential, Service, Slot, agent_of, describe, new_id};
@@ -237,9 +237,41 @@ where
             snapshot,
             vsock: Vec::new(),
         };
-        let used = renew_credential(&self.isolation, &self.config, sandbox, command, &Unwatched)
-            .await
-            .map_err(CredentialsError::Isolation)?;
+        // The session files the provider names are what a renewal has to keep: they come
+        // back out of the sandbox into the directory this machine owns the profile in.
+        let take_back = match (Service::from_id(profile), recipe.directories.first()) {
+            (Some(Service::Agent(kind)), Some(directory)) => {
+                let root = match directory.guest_path {
+                    GuestPath::Absolute(path) | GuestPath::HomeRelative(path) => path,
+                };
+                match guest_absolute(root) {
+                    Ok(root) => self
+                        .agents
+                        .engine(kind)
+                        .session_files()
+                        .iter()
+                        .map(|name| {
+                            (
+                                format!("{root}/{name}"),
+                                self.config.profile_dir(profile).join(name),
+                            )
+                        })
+                        .collect(),
+                    Err(_) => Vec::new(),
+                }
+            }
+            _ => Vec::new(),
+        };
+        let used = renew_credential(
+            &self.isolation,
+            &self.config,
+            sandbox,
+            command,
+            take_back,
+            &Unwatched,
+        )
+        .await
+        .map_err(CredentialsError::Isolation)?;
         Ok(if used {
             Renewal::Renewed
         } else {

@@ -36,6 +36,7 @@ pub(crate) async fn renew_credential(
     config: &Config,
     sandbox: CredentialSandbox,
     command: String,
+    take_back: Vec<(String, PathBuf)>,
     progress: &dyn EnvironmentProgressSink,
 ) -> Result<bool, IsolationError> {
     let CredentialSandbox {
@@ -62,6 +63,18 @@ pub(crate) async fn renew_credential(
             return Err(error);
         }
     };
+    // The renewal happened inside the sandbox, so the file holding it has to come out
+    // before the sandbox goes, or the machine renews a copy it is about to throw away.
+    if used {
+        for (guest, host) in take_back {
+            match engine.collect_file(id.clone(), guest, host).await {
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(%error, "a renewed credential could not be taken back")
+                }
+            }
+        }
+    }
     if let Err(error) = engine.remove(id.clone()).await {
         tracing::warn!(sandbox_id = %id, %error, "could not remove a sandbox after a renewal");
     }
