@@ -1,6 +1,7 @@
 mod files;
 pub mod freshness;
 pub mod host;
+pub mod keeper;
 mod model;
 mod shell;
 

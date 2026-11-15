@@ -97,7 +97,7 @@ fn span(millis: i64) -> String {
     }
 }
 
-fn now_ms() -> i64 {
+pub fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|since| since.as_millis() as i64)

@@ -191,6 +191,31 @@ where
         )
         .with_trackers(trackers)
         .with_issue_reader(issue_reader);
+        // A session that is close to running out is renewed here, while this machine is
+        // running, and the next sync carries the renewal to whatever remote holds a copy.
+        // Nothing else keeps a credential alive: the sandbox it needs is the one the
+        // credential check already builds, and the renewal happens because the harness
+        // was used, not because a clock said so.
+        {
+            let keeping = tasks.clone();
+            tokio::spawn(async move {
+                loop {
+                    let profiles = Config::load()
+                        .ok()
+                        .and_then(|config| config.load_or_create_settings().ok())
+                        .map(|file| {
+                            file.settings()
+                                .credentials()
+                                .iter()
+                                .map(|credential| credential.id.clone())
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    credentials::keeper::refresh_due(keeping.credentials(), &profiles).await;
+                    tokio::time::sleep(credentials::keeper::LOOK_EVERY).await;
+                }
+            });
+        }
         // The scripted harness answers for this machine's version control too, so a
         // task can be provisioned and run without a client being installed here.
         #[cfg(any(debug_assertions, feature = "testkit"))]
