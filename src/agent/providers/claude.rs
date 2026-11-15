@@ -442,7 +442,10 @@ impl AgentEngine for ClaudeCode {
             session_file: Some(".credentials.json"),
             session_deadline: Some(claude_deadline_ms),
             session_renew: Some(RENEW_COMMAND),
-            session_keep: &[".credentials.json", ".claude.json"],
+            // The session is the credential file. The rest of a Claude profile is history
+            // and configuration the sandbox was given anyway, and sending it back costs a
+            // frame nobody needs.
+            session_keep: &[".credentials.json"],
             label: "installing Claude Code",
             setup_command: Self::install_command(),
             directories: vec![
