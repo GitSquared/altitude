@@ -344,10 +344,19 @@ impl WorkerFleet {
                 time::sleep(provision_backoff(attempt)).await;
             }
         }
-        tracing::error!(worker = %name, "gave up on a worker after {PROVISION_ATTEMPTS} attempts");
-        let mut state = self.state.lock().expect("worker fleet lock poisoned");
-        state.provisioning.remove(&name);
-        state.retry_after = Some(Instant::now() + AFTER_FAILURE);
+        // A host this master cannot reach is a host that is not doing anything for it —
+        // often because it stopped its own worker when nothing claimed it. Leaving the
+        // machine behind is how a fleet leaks addresses it cannot use.
+        tracing::error!(
+            worker = %name,
+            "gave up on a worker after {PROVISION_ATTEMPTS} attempts; removing it"
+        );
+        {
+            let mut state = self.state.lock().expect("worker fleet lock poisoned");
+            state.provisioning.remove(&name);
+            state.retry_after = Some(Instant::now() + AFTER_FAILURE);
+        }
+        self.deprovision(&name).await;
     }
 
     async fn wait_until_joined(&self, name: &str) -> bool {
