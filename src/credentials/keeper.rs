@@ -1,6 +1,6 @@
 use std::{fs, time::Duration};
 
-use crate::isolation::IsolationEngine;
+use crate::{config::Config, isolation::IsolationEngine};
 
 use super::freshness::{self, Freshness};
 use super::{Credentials, Renewal};
@@ -16,13 +16,13 @@ const RENEW_WITHIN: Duration = Duration::from_secs(60 * 60);
 pub const LOOK_EVERY: Duration = Duration::from_secs(15 * 60);
 
 pub fn due(credentials: &Credentials<impl IsolationEngine>, profile: &str) -> Option<Freshness> {
-    let path = credentials
-        .config()
-        .data_dir()
-        .join(profile)
-        .join("profile")
-        .join(freshness::CREDENTIAL_FILE);
-    let contents = fs::read_to_string(path).ok()?;
+    let contents = fs::read_to_string(
+        credentials
+            .config()
+            .profile_dir(profile)
+            .join(freshness::CREDENTIAL_FILE),
+    )
+    .ok()?;
     match freshness::of_file(&contents)? {
         Freshness::Fresh { expires_at_ms }
             if expires_at_ms > freshness::now_ms() + RENEW_WITHIN.as_millis() as i64 =>
@@ -31,6 +31,27 @@ pub fn due(credentials: &Credentials<impl IsolationEngine>, profile: &str) -> Op
         }
         due => Some(due),
     }
+}
+
+// The profiles this machine can renew: the ones whose directory actually holds a session.
+// Read from the disk rather than from a settings list, so a machine renews what it has
+// whether or not anything remembered to name it.
+pub fn profiles(config: &Config) -> Vec<String> {
+    let root = config.scoped_data_dir();
+    let Ok(entries) = fs::read_dir(root) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter(|entry| entry.path().is_dir())
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter(|id| {
+            root.join(id)
+                .join("profile")
+                .join(freshness::CREDENTIAL_FILE)
+                .is_file()
+        })
+        .collect()
 }
 
 // One pass over the profiles this machine holds. A profile that is not due is not

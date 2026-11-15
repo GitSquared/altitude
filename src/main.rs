@@ -202,15 +202,7 @@ where
             tokio::spawn(async move {
                 loop {
                     let profiles = Config::load()
-                        .ok()
-                        .and_then(|config| config.load_or_create_settings().ok())
-                        .map(|file| {
-                            file.settings()
-                                .credentials()
-                                .iter()
-                                .map(|credential| credential.id.clone())
-                                .collect::<Vec<_>>()
-                        })
+                        .map(|config| credentials::keeper::profiles(&config))
                         .unwrap_or_default();
                     credentials::keeper::refresh_due(keeping.credentials(), &profiles).await;
                     time::sleep(credentials::keeper::LOOK_EVERY).await;

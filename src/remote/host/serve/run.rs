@@ -253,17 +253,7 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
                     let Ok(inner) = isolation.for_operator(&owner) else {
                         continue;
                     };
-                    let profiles = scoped
-                        .load_or_create_settings()
-                        .ok()
-                        .map(|file| {
-                            file.settings()
-                                .credentials()
-                                .iter()
-                                .map(|credential| credential.id.clone())
-                                .collect::<Vec<_>>()
-                        })
-                        .unwrap_or_default();
+                    let profiles = keeper::profiles(&scoped);
                     if profiles.is_empty() {
                         continue;
                     }
