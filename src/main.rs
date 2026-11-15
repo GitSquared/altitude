@@ -3,6 +3,7 @@ use std::{error::Error, io, process::ExitCode, sync::Arc};
 use tokio::{
     signal::unix::{SignalKind, signal},
     sync::{Notify, mpsc},
+    time,
 };
 
 use clap::Parser;
@@ -130,11 +131,11 @@ where
         };
         println!("{profile}: {}; renewing", state.describe());
         match credentials.renew(&profile).await {
-            Ok(credentials::Renewed::Renewed) => println!("{profile}: renewed"),
-            Ok(credentials::Renewed::NothingToRenew) => {
+            Ok(credentials::Renewal::Renewed) => println!("{profile}: renewed"),
+            Ok(credentials::Renewal::NothingToRenew) => {
                 println!("{profile}: nothing in it renews itself")
             }
-            Ok(credentials::Renewed::Refused(output)) => {
+            Ok(credentials::Renewal::Refused(output)) => {
                 println!("{profile}: could not renew it — {output}")
             }
             Err(error) => println!("{profile}: could not renew it — {error}"),
@@ -274,7 +275,7 @@ where
                         })
                         .unwrap_or_default();
                     credentials::keeper::refresh_due(keeping.credentials(), &profiles).await;
-                    tokio::time::sleep(crate::credentials::keeper::LOOK_EVERY).await;
+                    time::sleep(credentials::keeper::LOOK_EVERY).await;
                 }
             });
         }

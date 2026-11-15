@@ -17,7 +17,7 @@ pub use model::{Credential, Service, Slot, agent_of, describe, new_id};
 // What came of trying to renew a profile: the harness was used and its session is
 // newer, there was nothing for it to renew, or it refused and said why.
 #[derive(Clone, Debug)]
-pub enum Renewed {
+pub enum Renewal {
     Renewed,
     NothingToRenew,
     Refused(String),
@@ -203,10 +203,10 @@ where
     // Using the harness is the only thing that renews its session: the status check
     // reads a file and cannot. So a profile close to running out is renewed by running
     // the harness once, in the same kind of sandbox its checks use.
-    pub async fn renew(&self, profile: &str) -> Result<Renewed, CredentialsError> {
+    pub async fn renew(&self, profile: &str) -> Result<Renewal, CredentialsError> {
         let recipe = self.recipe(profile)?;
         if recipe.renew_command.trim().is_empty() {
-            return Ok(Renewed::NothingToRenew);
+            return Ok(Renewal::NothingToRenew);
         }
         let recipes = vec![recipe.clone()];
         let check = CredentialCheck {
@@ -234,9 +234,9 @@ where
             .map_err(CredentialsError::Isolation)?
             .unwrap_or_default();
         Ok(match reports.into_iter().next() {
-            Some((_, report)) if report.signed_in => Renewed::Renewed,
-            Some((_, report)) => Renewed::Refused(report.output.trim().to_owned()),
-            None => Renewed::Refused("the harness said nothing".to_owned()),
+            Some((_, report)) if report.signed_in => Renewal::Renewed,
+            Some((_, report)) => Renewal::Refused(report.output.trim().to_owned()),
+            None => Renewal::Refused("the harness said nothing".to_owned()),
         })
     }
 

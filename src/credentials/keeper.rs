@@ -3,7 +3,7 @@ use std::{fs, time::Duration};
 use crate::isolation::IsolationEngine;
 
 use super::freshness::{self, Freshness};
-use super::{Credentials, Renewed};
+use super::{Credentials, Renewal};
 
 // A session is kept alive by the only thing that can keep it alive: using it. The check
 // that asks a profile whether it still signs in runs the harness in a sandbox, and the
@@ -47,11 +47,11 @@ where
         };
         tracing::info!(profile, "{}; renewing it", state.describe());
         match credentials.renew(profile).await {
-            Ok(Renewed::Renewed) => tracing::info!(profile, "renewed"),
-            Ok(Renewed::NothingToRenew) => {
+            Ok(Renewal::Renewed) => tracing::info!(profile, "renewed"),
+            Ok(Renewal::NothingToRenew) => {
                 tracing::info!(profile, "nothing in this profile renews itself")
             }
-            Ok(Renewed::Refused(output)) => tracing::warn!(
+            Ok(Renewal::Refused(output)) => tracing::warn!(
                 profile,
                 %output,
                 "could not renew this credential; it needs a sign-in"
