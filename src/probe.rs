@@ -110,10 +110,14 @@ pub async fn probe(probe: Probe) -> Result<(), Boxed> {
                 .find(|summary| Some(&summary.id) == ours.as_ref()),
             WatchEvent::Changed(summary) => {
                 // The task this probe made is the one that was not here when it started.
+                // The master holds every task its operators ever made, and a watch reports
+                // them all: the task this probe made is the one in the project it brought
+                // with it, made after it asked.
                 let is_ours = ours.as_deref() == Some(&summary.id)
                     || (ours.is_none()
                         && !known.contains(&summary.id)
-                        && summary.created_at_ms >= sent_at_ms);
+                        && (summary.project_id.as_deref() == Some(project.as_str())
+                            || summary.created_at_ms >= sent_at_ms));
                 if !is_ours {
                     None
                 } else {
