@@ -37,21 +37,32 @@ pub fn due(credentials: &Credentials<impl IsolationEngine>, profile: &str) -> Op
 // Read from the disk rather than from a settings list, so a machine renews what it has
 // whether or not anything remembered to name it.
 pub fn profiles(config: &Config) -> Vec<String> {
-    let root = config.scoped_data_dir();
-    let Ok(entries) = fs::read_dir(root) else {
-        return Vec::new();
-    };
-    entries
-        .flatten()
-        .filter(|entry| entry.path().is_dir())
-        .filter_map(|entry| entry.file_name().into_string().ok())
-        .filter(|id| {
-            root.join(id)
-                .join("profile")
-                .join(freshness::CREDENTIAL_FILE)
-                .is_file()
-        })
-        .collect()
+    let root = config.scoped_data_dir().to_path_buf();
+    let mut found = Vec::new();
+    let mut pending = vec![root.clone()];
+    while let Some(directory) = pending.pop() {
+        let Ok(entries) = fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            // A profile is a directory named "profile" holding a session, wherever in the
+            // tree an operator's copy happens to sit: ids carry slashes.
+            if path.file_name().is_some_and(|name| name == "profile") {
+                if path.join(freshness::CREDENTIAL_FILE).is_file()
+                    && let Some(id) = path.parent().and_then(|dir| dir.strip_prefix(&root).ok())
+                {
+                    found.push(id.to_string_lossy().into_owned());
+                }
+                continue;
+            }
+            pending.push(path);
+        }
+    }
+    found
 }
 
 // One pass over the profiles this machine holds. A profile that is not due is not
