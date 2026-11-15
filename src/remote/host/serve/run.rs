@@ -237,6 +237,18 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
     if reports_through_pushed_logins {
         tasks = tasks.with_trackers(Arc::new(PushedTrackers::new(config.clone())));
     }
+    // A remote with no tracker app of its own still reports task status, through
+    // the login the task's own peer synced here. When the app is configured,
+    // agent sessions own reporting and this would be a second voice.
+    let reports_through_pushed_logins = tracker_integration.is_none();
+    let mut tasks = tasks.with_issue_reader(
+        tracker_integration
+            .as_ref()
+            .and_then(|integration| integration.issue_reader()),
+    );
+    if reports_through_pushed_logins {
+        tasks = tasks.with_trackers(Arc::new(PushedTrackers::new(config.clone())));
+    }
     // A credential is renewed by whichever machine is up, and this one is up even when the
     // operator's own machine is not: the same keeper the client runs, over the profiles
     // this remote holds for its operators. The renewal is written back into the copy a
