@@ -246,17 +246,21 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
         let isolation = keeper_isolation;
         tokio::spawn(async move {
             loop {
-                for owner in config.operator_ids() {
+                let owners = config.operator_ids();
+                tracing::debug!(owners = owners.len(), "the credential keeper is looking");
+                for owner in owners {
                     let Ok(scoped) = config.for_operator(&owner) else {
                         continue;
                     };
                     let Ok(inner) = isolation.for_operator(&owner) else {
+                        tracing::warn!(%owner, "this remote cannot renew for an operator");
                         continue;
                     };
                     let profiles = keeper::profiles(&scoped);
                     if profiles.is_empty() {
                         continue;
                     }
+                    tracing::debug!(%owner, profiles = profiles.len(), "renewing what is due");
                     let credentials = Credentials::new(
                         inner,
                         scoped.clone(),
