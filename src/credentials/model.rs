@@ -16,9 +16,8 @@ pub enum Service {
 }
 
 impl Service {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 3] = [
         Self::Agent(AgentKind::Claude),
-        Self::Agent(AgentKind::Pi),
         Self::VersionControl(VcsProviderKind::GitHub),
         Self::Tracker(TrackerKind::Linear),
     ];

@@ -60,10 +60,6 @@ fn host_login(service: Service) -> Option<HostLogin> {
             let directory = tool_dir("CLAUDE_CONFIG_DIR", ".claude")?;
             (directory.join(".credentials.json"), ".credentials.json")
         }
-        Service::Agent(AgentKind::Pi) => {
-            let directory = tool_dir("PI_CODING_AGENT_DIR", ".pi/agent")?;
-            (directory.join("auth.json"), "auth.json")
-        }
         Service::VersionControl(VcsProviderKind::GitHub) => {
             let directory = dir_from_env("GH_CONFIG_DIR")
                 .or_else(|| config_home().map(|home| home.join("gh")))?;

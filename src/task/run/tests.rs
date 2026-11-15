@@ -54,7 +54,7 @@ async fn a_task_runs_a_scripted_turn() {
                 identity_id: "test-install".to_owned(),
                 identity_label: "test".to_owned(),
                 host: "test-host".to_owned(),
-                agent_kind: Some(AgentKind::Pi),
+                agent_kind: Some(AgentKind::Claude),
                 agent_conversation_id: Some("scripted-conversation".to_owned()),
             },
             None,

@@ -47,6 +47,26 @@ impl LinkClient {
         }
     }
 
+    pub async fn read_session(
+        &self,
+        peer: impl Into<EndpointAddr>,
+        profile: &str,
+    ) -> LinkResult<Option<String>> {
+        match self
+            .say(
+                peer,
+                &LinkRequest::ReadSession {
+                    profile: profile.to_owned(),
+                },
+            )
+            .await?
+        {
+            LinkResponse::Session { contents, .. } => Ok(contents),
+            LinkResponse::Rejected { reason } => Err(reason.into()),
+            other => Err(format!("unexpected answer: {other:?}").into()),
+        }
+    }
+
     pub async fn held_profiles(
         &self,
         peer: impl Into<EndpointAddr>,

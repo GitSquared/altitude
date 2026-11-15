@@ -39,7 +39,7 @@ pub fn config(root: &Path) -> Config {
 // turn loop with nothing to clone and nothing to install.
 pub fn project(name: &str) -> Project {
     let mut project = Project::new(name);
-    project.agent = Some(AgentKind::Pi);
+    project.agent = Some(AgentKind::Claude);
     project
 }
 
@@ -70,7 +70,7 @@ pub struct ScriptedAgent;
 impl AgentEngine for ScriptedAgent {
     fn profile_recipe(&self) -> ProfileRecipe {
         ProfileRecipe {
-            profile: AgentKind::Pi.profile().to_owned(),
+            profile: AgentKind::Claude.profile().to_owned(),
             display: "Scripted",
             sign_in: "Nothing to sign in.",
             sign_in_command: SignInCommand::Direct("true"),
@@ -197,7 +197,7 @@ impl TaskStreamDecoder for ScriptedStream {
 }
 
 pub fn engines() -> AgentEngines {
-    AgentEngines::new().with(AgentKind::Pi, Arc::new(ScriptedAgent))
+    AgentEngines::new().with(AgentKind::Claude, Arc::new(ScriptedAgent))
 }
 
 // Whether this run was asked for a scripted harness. A debug build, or one with the

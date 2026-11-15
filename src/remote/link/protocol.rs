@@ -111,6 +111,11 @@ pub enum LinkRequest {
     ReadPicture {
         id: String,
     },
+    // The session this machine holds for a profile, so a client that has been away can
+    // take the copy that outlasts its own.
+    ReadSession {
+        profile: String,
+    },
     Signal {
         command: SignalCommand,
     },
@@ -240,6 +245,10 @@ pub enum LinkResponse {
     },
     HeldProfiles {
         profiles: Vec<ProfileDigest>,
+    },
+    Session {
+        profile: String,
+        contents: Option<String>,
     },
     Removed,
     Handover {

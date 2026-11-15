@@ -6,6 +6,7 @@ pub(crate) mod host;
 pub(crate) mod identity;
 pub(crate) mod layers;
 mod link;
+pub(crate) mod sync;
 pub(crate) mod transfer;
 
 pub(crate) use acting::send;

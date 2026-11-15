@@ -171,12 +171,19 @@ impl App {
                     .insert(address.clone(), RemoteStatus::Syncing);
                 let keys = self.remote_keys.clone();
                 let client = self.link.clone();
+                let config = self.config.clone();
                 let replies = replies.clone();
                 let take_tracker = self.taking_over.contains(&address);
                 tokio::spawn(async move {
-                    let result =
-                        deliver_config(&address, (*bundle).clone(), &keys, &client, take_tracker)
-                            .await;
+                    let result = deliver_config(
+                        &address,
+                        (*bundle).clone(),
+                        &keys,
+                        &client,
+                        &config,
+                        take_tracker,
+                    )
+                    .await;
                     let _ = replies
                         .send(ConfigPushReply {
                             address,

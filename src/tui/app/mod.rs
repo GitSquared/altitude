@@ -32,6 +32,8 @@ use crate::{
     vcs::Repository,
 };
 
+use crate::remote::sync::reconcile_sessions;
+
 use super::Pictures;
 
 use super::background::terrain::Terrain;
@@ -703,6 +705,7 @@ async fn deliver_config(
     mut bundle: ConfigBundle,
     keys: &RemoteKeys,
     client: &LinkClient,
+    config: &Config,
     take_tracker: bool,
 ) -> Result<ConfigPush, String> {
     let remembered = keys.remembered(address).await.ok().flatten();
@@ -722,6 +725,10 @@ async fn deliver_config(
         ));
     }
     let peer: EndpointAddr = sighting.ticket.into();
+    // Before this machine offers its copies, it takes any the remote kept: a client that
+    // has been away is the one holding the spent session, and sending it would undo what
+    // the remote refreshed while nobody was looking.
+    reconcile_sessions(client, peer.clone(), config).await;
     // What it already holds is asked over the authenticated link, not read off the
     // unauthenticated announcement: a login is not something to send again because
     // a stranger said it was missing.

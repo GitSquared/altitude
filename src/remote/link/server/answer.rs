@@ -1,5 +1,8 @@
 use super::*;
 
+use crate::agent::AgentEngines;
+use crate::credentials::profile_recipe;
+
 pub(super) async fn answer(
     handler: &LinkHandler,
     peer: EndpointId,
@@ -61,6 +64,33 @@ pub(super) async fn answer(
                 write_frame(&mut send, &response).await?;
             }
             return Ok(());
+        }
+        LinkRequest::ReadSession { profile } => {
+            let response = if !is_allowed_profile(&profile) {
+                LinkResponse::Rejected {
+                    reason: "this machine knows no such credential".into(),
+                }
+            } else {
+                let agents = AgentEngines::new();
+                let file = profile_recipe(&profile, &agents)
+                    .ok()
+                    .and_then(|recipe| recipe.session_file);
+                let contents = match file {
+                    Some(file) => {
+                        let path = handler
+                            .operator_dir(peer)
+                            .join(&profile)
+                            .join("profile")
+                            .join(file);
+                        async_fs::read_to_string(path).await.ok()
+                    }
+                    None => None,
+                };
+                LinkResponse::Session { profile, contents }
+            };
+            write_frame(&mut send, &response).await.map_err(|error| {
+                io::Error::other(format!("could not answer a session request: {error}"))
+            })?;
         }
         LinkRequest::ReadPicture { id } => {
             let store = attachments_dir(&handler.data_dir);

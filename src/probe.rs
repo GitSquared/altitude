@@ -42,7 +42,6 @@ pub async fn run(args: ProbeArgs) -> Result<(), Boxed> {
         project: args.project,
         agent: match args.agent.as_str() {
             "claude" => AgentKind::Claude,
-            "pi" => AgentKind::Pi,
             other => return Err(format!("no agent called {other}").into()),
         },
         prompt: args.prompt,
