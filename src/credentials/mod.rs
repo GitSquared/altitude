@@ -7,6 +7,8 @@ mod shell;
 
 use std::time::Duration;
 
+use tokio::sync::watch;
+
 use std::{
     error::Error,
     fmt, fs,
@@ -38,7 +40,8 @@ use crate::{
     agent::{AgentChannels, AgentEngines},
     config::Config,
     isolation::{
-        IsolationEngine, IsolationError, PortRelays, ProfileRecipe, ProfileSummary, mounts,
+        CredentialSandbox, GuestPath, IsolationEngine, IsolationError, IsolationStatus, PortRelays,
+        ProfileRecipe, ProfileSummary, Unwatched, mounts, renew_session,
     },
     project::Project,
 };
@@ -200,10 +203,11 @@ where
         Ok(answers)
     }
 
-    // A session is renewed by the harness that owns it, on the machine that holds it: the
-    // provider names the command, and running it where the profile lives is what makes the
-    // result the session this machine will hand out. No sandbox is involved, because a
-    // sandbox is where an agent works and a refresh is not work.
+    // A session is renewed by the harness that owns it. Where this machine has that
+    // harness it could run it here, but altitude does not ask an operator's machine to
+    // provide one: the renewal runs in a sandbox, which is where a harness lives when the
+    // machine has none — and on a remote whose isolation is workers, that sandbox is a
+    // worker, spawned for this and gone after.
     pub async fn renew(&self, profile: &str) -> Result<Renewal, CredentialsError> {
         let recipe = self.recipe(profile)?;
         // Whether a credential can renew itself is the harness's business, not this
@@ -213,39 +217,66 @@ where
             return Ok(Renewal::NothingToRenew);
         };
         let before = self.session_expiry(profile);
-        let directory = self.config.profile_dir(profile);
-        let renewal = Command::new("/bin/sh")
-            .arg("-c")
-            .arg(command)
-            .current_dir(&directory)
-            .env("HOME", &directory)
-            .env("CLAUDE_CONFIG_DIR", &directory)
-            .output();
-        let ran = match timeout(RENEW_PATIENCE, renewal).await {
-            Err(_) => return Ok(Renewal::Refused("its harness did not finish".to_owned())),
-            Ok(Err(error)) => {
-                return Ok(Renewal::Refused(format!(
-                    "its harness could not be run: {error}"
-                )));
-            }
-            Ok(Ok(output)) => output,
+        let recipes = vec![recipe.clone()];
+        // A sandbox is only handed out for a layer that exists, so a machine that has
+        // never built this profile's harness gets one built first.
+        let mut snapshot = self
+            .isolation
+            .project_snapshot(Project::profile_build(), recipes.clone());
+        if snapshot.is_none() {
+            let (quiet, _) = watch::channel(IsolationStatus::Starting);
+            self.isolation.prepare(&quiet).await.ok();
+            snapshot = self
+                .isolation
+                .project_snapshot(Project::profile_build(), recipes.clone());
+        }
+        // The session files the provider names are what a renewal has to keep: they come
+        // back out of the sandbox into the directory this machine owns the profile in.
+        let take_back = recipes
+            .first()
+            .and_then(|recipe| recipe.directories.first())
+            .map(|directory| match directory.guest_path {
+                GuestPath::Absolute(root) | GuestPath::HomeRelative(root) => root.to_owned(),
+            })
+            .map(|root| {
+                recipe
+                    .session_keep
+                    .iter()
+                    .map(|name| {
+                        (
+                            format!("{root}/{name}"),
+                            self.config.profile_dir(profile).join(name),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let sandbox = CredentialSandbox {
+            id: renewal_id(profile),
+            recipes,
+            snapshot,
+            vsock: Vec::new(),
         };
+        renew_session(
+            &self.isolation,
+            &self.config,
+            sandbox,
+            command.to_owned(),
+            take_back,
+            &Unwatched,
+        )
+        .await
+        .map_err(CredentialsError::Isolation)?;
         // What the command said about itself is not the question. The profile's own file
         // is: a renewal that leaves the deadline where it was has not renewed anything.
-        let after = self.session_expiry(profile);
-        if after == before {
-            let said = String::from_utf8_lossy(&ran.stderr);
-            return Ok(Renewal::Refused(format!(
-                "its harness ran and the session did not change: {}",
-                said.trim().lines().last().unwrap_or("no output")
-            )));
+        if self.session_expiry(profile) == before {
+            return Ok(Renewal::Refused(
+                "its harness ran and the session did not change".to_owned(),
+            ));
         }
         Ok(Renewal::Renewed)
     }
 
-    // A check is the provider's own command, run where the profile lives. It is a file test
-    // or a version probe — nothing an agent would need — so it costs a process, not a
-    // sandbox, and the answer is the same one an agent's first turn would give.
     async fn answer_batch(
         &self,
         profiles: Vec<String>,
@@ -400,7 +431,12 @@ pub fn stored_outlasts(
     here.outlasts(arriving)
 }
 
-// A harness that refreshes a token is one call, so a command still running after this has
-// failed in a way a second run will not fix.
+// Prefixed like every throwaway profile sandbox, so one left by a crash is recognisable and
+// swept.
+fn renewal_id(profile: &str) -> String {
+    format!("credentials-renew-{}", profile.replace('/', "-"))
+}
+
+// A status command is a file test or a version probe: one that has not answered by now has
+// told us what it is going to.
 const CHECK_PATIENCE: Duration = Duration::from_secs(30);
-const RENEW_PATIENCE: Duration = Duration::from_secs(120);

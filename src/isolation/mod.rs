@@ -31,6 +31,7 @@ pub(crate) use relay::{PORT_RELAY_GUEST_PORT, install_script, with_port_relay};
 pub use relay::{PortNotice, PortRelays};
 pub(crate) use sandbox::guest_absolute;
 pub(crate) use sandbox::private_directory;
+pub(crate) use sandbox::renew_session;
 pub use sandbox::{DefaultFile, GuestPath, PersistentDirectory, ProfileRecipe, SignInCommand};
 pub(crate) use sandbox::{run_collecting, shell_quote};
 

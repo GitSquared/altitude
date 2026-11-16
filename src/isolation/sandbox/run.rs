@@ -12,6 +12,8 @@ use crate::{
     project::{Project, ProjectCommits},
 };
 
+use std::path::PathBuf;
+
 use super::{
     BaseSandboxSnapshot, CredentialSandbox, EnvironmentProgressSink, IsolationEngine,
     IsolationError, PORT_RELAY_GUEST_PORT,
@@ -86,6 +88,48 @@ pub(crate) async fn credential_shell(
         return Ok(command.to_owned());
     }
     Ok(with_port_relay(command))
+}
+
+// A session is renewed by the harness that owns it, and a harness lives in a sandbox when
+// the machine holding the profile has none: a normal remote builds one, a workers remote
+// spawns a worker, and only the session files come back out. Nothing is mounted in, so the
+// refresh runs against the profile the sandbox already carries.
+pub(crate) async fn renew_session(
+    engine: &impl IsolationEngine,
+    config: &Config,
+    sandbox: CredentialSandbox,
+    command: String,
+    take_back: Vec<(String, PathBuf)>,
+    progress: &dyn EnvironmentProgressSink,
+) -> Result<(), IsolationError> {
+    let CredentialSandbox {
+        id,
+        recipes,
+        snapshot,
+        vsock,
+    } = sandbox;
+    let mut plan = SandboxPlan::compose(config, Project::profile_build(), recipes)?;
+    plan.options.vsock = vsock;
+    create(
+        engine,
+        config,
+        id.clone(),
+        plan,
+        SandboxKind::Shell,
+        snapshot.map(SnapshotSource::Environment),
+        progress,
+    )
+    .await?;
+    let used = run_to_end(engine, id.clone(), command).await;
+    if used.is_err() {
+        tracing::warn!(%id, "the harness could not be used to renew its session");
+    }
+    for (guest, host) in take_back {
+        if let Err(error) = engine.collect_file(id.clone(), guest, host.clone()).await {
+            tracing::warn!(%error, path = %host.display(), "a session file did not come back out");
+        }
+    }
+    engine.remove(id).await
 }
 
 pub(crate) async fn watcher(
