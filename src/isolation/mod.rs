@@ -193,18 +193,6 @@ pub const CREDENTIAL_PREFIX: &str = "credentials-";
 pub const WATCHER_PREFIX: &str = "watcher-";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct CredentialReport {
-    pub output: String,
-    pub signed_in: bool,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct CredentialCheck {
-    pub profile: String,
-    pub command: String,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EnvironmentDescription {
     pub os_release: String,
     pub packages: Vec<String>,
@@ -545,13 +533,6 @@ pub trait IsolationEngine: Send + Sync {
     ) -> impl Future<Output = Result<CommandSession, IsolationError>> + Send;
 
     fn project_snapshot(&self, project: Project, recipes: Vec<ProfileRecipe>) -> Option<String>;
-
-    fn credential_reports(
-        &self,
-        sandbox: CredentialSandbox,
-        checks: Vec<CredentialCheck>,
-        progress: &dyn EnvironmentProgressSink,
-    ) -> impl Future<Output = Result<Option<Vec<(String, CredentialReport)>>, IsolationError>> + Send;
 
     fn remove_leftover_sandboxes(&self) -> impl Future<Output = ()> + Send;
 

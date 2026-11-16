@@ -4,11 +4,10 @@ use tokio::sync::watch;
 
 use crate::{
     isolation::{
-        BaseSandboxRecipe, BaseSandboxSnapshot, CommandSession, CredentialCheck, CredentialReport,
-        CredentialSandbox, EnvironmentDescription, EnvironmentProgressSink, FileTally,
-        FileTransferSink, IsolationEngine, IsolationError, IsolationStatus, LayerView,
-        MicrosandboxIsolation, Pressure, ProfileRecipe, SandboxOptions, SandboxPurpose,
-        SandboxRoom, VsockRoute,
+        BaseSandboxRecipe, BaseSandboxSnapshot, CommandSession, CredentialSandbox,
+        EnvironmentDescription, EnvironmentProgressSink, FileTally, FileTransferSink,
+        IsolationEngine, IsolationError, IsolationStatus, LayerView, MicrosandboxIsolation,
+        Pressure, ProfileRecipe, SandboxOptions, SandboxPurpose, SandboxRoom, VsockRoute,
     },
     project::Project,
 };
@@ -206,23 +205,6 @@ impl IsolationEngine for ServeIsolation {
         match self {
             Self::Microsandbox(engine) => engine.project_snapshot(project, recipes),
             Self::Workers(engine) => engine.project_snapshot(project, recipes),
-        }
-    }
-
-    fn credential_reports(
-        &self,
-        sandbox: CredentialSandbox,
-        checks: Vec<CredentialCheck>,
-        progress: &dyn EnvironmentProgressSink,
-    ) -> impl Future<Output = Result<Option<Vec<(String, CredentialReport)>>, IsolationError>> + Send
-    {
-        async move {
-            match self {
-                Self::Microsandbox(engine) => {
-                    engine.credential_reports(sandbox, checks, progress).await
-                }
-                Self::Workers(engine) => engine.credential_reports(sandbox, checks, progress).await,
-            }
         }
     }
 

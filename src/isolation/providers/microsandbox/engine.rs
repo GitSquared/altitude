@@ -12,11 +12,10 @@ use crate::project::Project;
 
 use crate::isolation::{
     BaseSandboxRecipe, BaseSandboxSnapshot, CREDENTIAL_PREFIX, Command, CommandEvent,
-    CommandSession, CredentialCheck, CredentialReport, CredentialSandbox, EnvironmentDescription,
-    EnvironmentProgressSink, FileTally, FileTransferSink, ImagePull, IsolationEngine,
-    IsolationError, IsolationStatus, LayerView, OutputStream, PackageInstall, PackageInstallSink,
-    Pressure, ProfileRecipe, SandboxCeiling, SandboxOptions, SandboxPurpose, SandboxRoom,
-    VsockRoute, WATCHER_PREFIX,
+    CommandSession, CredentialSandbox, EnvironmentDescription, EnvironmentProgressSink, FileTally,
+    FileTransferSink, ImagePull, IsolationEngine, IsolationError, IsolationStatus, LayerView,
+    OutputStream, PackageInstall, PackageInstallSink, Pressure, ProfileRecipe, SandboxCeiling,
+    SandboxOptions, SandboxPurpose, SandboxRoom, VsockRoute, WATCHER_PREFIX,
     sandbox::{self, REFRESH_AFTER, private_directory},
 };
 
@@ -145,15 +144,6 @@ impl IsolationEngine for MicrosandboxIsolation {
             .ok()
             .flatten()?;
         Some(snapshot.path.to_string_lossy().into_owned())
-    }
-
-    async fn credential_reports(
-        &self,
-        sandbox: CredentialSandbox,
-        checks: Vec<CredentialCheck>,
-        progress: &dyn EnvironmentProgressSink,
-    ) -> Result<Option<Vec<(String, CredentialReport)>>, IsolationError> {
-        sandbox::credential_reports(self, &self.config, sandbox, checks, progress).await
     }
 
     async fn remove_leftover_sandboxes(&self) {

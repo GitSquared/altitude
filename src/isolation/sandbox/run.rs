@@ -13,8 +13,8 @@ use crate::{
 };
 
 use super::{
-    BaseSandboxSnapshot, CredentialCheck, CredentialReport, CredentialSandbox,
-    EnvironmentProgressSink, IsolationEngine, IsolationError, PORT_RELAY_GUEST_PORT,
+    BaseSandboxSnapshot, CredentialSandbox, EnvironmentProgressSink, IsolationEngine,
+    IsolationError, PORT_RELAY_GUEST_PORT,
 };
 
 pub async fn ensure_project(
@@ -47,59 +47,6 @@ pub(crate) async fn stop_work(
     .await;
     time::sleep(Duration::from_secs(2)).await;
     Ok(())
-}
-
-pub(crate) async fn credential_reports(
-    engine: &impl IsolationEngine,
-    config: &Config,
-    sandbox: CredentialSandbox,
-    checks: Vec<CredentialCheck>,
-    progress: &dyn EnvironmentProgressSink,
-) -> Result<Option<Vec<(String, CredentialReport)>>, IsolationError> {
-    let CredentialSandbox {
-        id,
-        recipes,
-        snapshot,
-        vsock: _,
-    } = sandbox;
-    let Some(snapshot) = snapshot else {
-        return Ok(None);
-    };
-    let plan = SandboxPlan::compose(config, Project::profile_build(), recipes)?;
-    // One command and nothing else, so it is sized like the provider watcher
-    // rather than like a task.
-    create(
-        engine,
-        config,
-        id.clone(),
-        plan,
-        SandboxKind::Shell,
-        Some(SnapshotSource::Environment(snapshot)),
-        progress,
-    )
-    .await?;
-    let mut reports = Vec::with_capacity(checks.len());
-    for check in checks {
-        match run_to_end(engine, id.clone(), check.command).await {
-            Ok((status, output)) => reports.push((
-                check.profile.clone(),
-                CredentialReport {
-                    output,
-                    signed_in: status == 0,
-                },
-            )),
-            Err(error) => {
-                if let Err(error) = engine.remove(id.clone()).await {
-                    tracing::warn!(sandbox_id = %id, %error, "could not remove a sandbox after a check");
-                }
-                return Err(error);
-            }
-        }
-    }
-    if let Err(error) = engine.remove(id.clone()).await {
-        tracing::warn!(sandbox_id = %id, %error, "could not remove a sandbox after a check");
-    }
-    Ok(Some(reports))
 }
 
 pub(crate) async fn credential_shell(

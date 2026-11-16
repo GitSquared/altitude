@@ -15,11 +15,11 @@ use tokio::sync::watch;
 use crate::{
     config::Config,
     isolation::{
-        BaseSandboxRecipe, BaseSandboxSnapshot, CommandSession, CredentialCheck, CredentialReport,
-        CredentialSandbox, EnvironmentDescription, EnvironmentProgress, EnvironmentProgressSink,
-        FileTally, FileTransferSink, IsolationEngine, IsolationError, IsolationStatus, LayerView,
-        Pressure, ProfileRecipe, SandboxCeiling, SandboxOptions, SandboxPurpose, SandboxRoom,
-        VsockRoute, guest_absolute,
+        BaseSandboxRecipe, BaseSandboxSnapshot, CommandSession, CredentialSandbox,
+        EnvironmentDescription, EnvironmentProgress, EnvironmentProgressSink, FileTally,
+        FileTransferSink, IsolationEngine, IsolationError, IsolationStatus, LayerView, Pressure,
+        ProfileRecipe, SandboxCeiling, SandboxOptions, SandboxPurpose, SandboxRoom, VsockRoute,
+        guest_absolute,
         worker_protocol::{WorkerCall, WorkerProfile, WorkerReply, WorkerRequest},
     },
     project::Project,
@@ -573,36 +573,6 @@ impl IsolationEngine for WorkersIsolation {
 
     fn project_snapshot(&self, _project: Project, _recipes: Vec<ProfileRecipe>) -> Option<String> {
         None
-    }
-
-    async fn credential_reports(
-        &self,
-        sandbox: CredentialSandbox,
-        checks: Vec<CredentialCheck>,
-        _progress: &dyn EnvironmentProgressSink,
-    ) -> Result<Option<Vec<(String, CredentialReport)>>, IsolationError> {
-        let worker = self.provision_host(&sandbox.id).await?;
-        let profiles = self.profile_bundles(&sandbox.recipes)?;
-        let call = WorkerCall::CredentialReports {
-            id: sandbox.id.clone(),
-            profiles,
-            snapshot: sandbox.snapshot,
-            vsock: sandbox.vsock,
-            checks,
-        };
-        match self.call_on(&worker, call).await? {
-            WorkerReply::Reports(reports) => Ok(reports),
-            WorkerReply::Failed(reason) => {
-                self.deprovision_host(&sandbox.id).await;
-                Err(IsolationError::new(reason))
-            }
-            other => {
-                self.deprovision_host(&sandbox.id).await;
-                Err(IsolationError::new(format!(
-                    "unexpected answer from an isolation worker: {other:?}"
-                )))
-            }
-        }
     }
 
     async fn remove_leftover_sandboxes(&self) {

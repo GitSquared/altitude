@@ -319,35 +319,6 @@ impl WorkerService {
                     Err(error) => WorkerReply::Failed(error.to_string()),
                 }
             }
-            WorkerCall::CredentialReports {
-                id,
-                profiles,
-                snapshot,
-                vsock,
-                checks,
-            } => {
-                if let Err(error) = write_profiles(&self.config, &profiles) {
-                    return WorkerReply::Failed(error);
-                }
-                let recipes = match rebuild_recipes(&profiles, &self.agents) {
-                    Ok(recipes) => recipes,
-                    Err(error) => return WorkerReply::Failed(error),
-                };
-                let sandbox = CredentialSandbox {
-                    id,
-                    recipes,
-                    snapshot,
-                    vsock,
-                };
-                match self
-                    .engine
-                    .credential_reports(sandbox, checks, &Unwatched)
-                    .await
-                {
-                    Ok(reports) => WorkerReply::Reports(reports),
-                    Err(error) => WorkerReply::Failed(error.to_string()),
-                }
-            }
             WorkerCall::Provision { .. }
             | WorkerCall::RunCommand { .. }
             | WorkerCall::DeliverFile { .. }

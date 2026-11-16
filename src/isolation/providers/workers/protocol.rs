@@ -1,9 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::isolation::{
-    Command, CommandEvent, CredentialCheck, CredentialReport, SandboxOptions, SandboxPurpose,
-    VsockRoute,
-};
+use crate::isolation::{Command, CommandEvent, SandboxOptions, SandboxPurpose, VsockRoute};
 use crate::project::Project;
 
 // The ALPN a master dials a worker on. It is not the link's: the link is clients
@@ -103,13 +100,6 @@ pub(crate) enum WorkerCall {
         profiles: Vec<WorkerProfile>,
         project: Project,
     },
-    CredentialReports {
-        id: String,
-        profiles: Vec<WorkerProfile>,
-        snapshot: Option<String>,
-        vsock: Vec<VsockRoute>,
-        checks: Vec<CredentialCheck>,
-    },
     Remove {
         id: String,
     },
@@ -137,7 +127,6 @@ pub(crate) enum WorkerReply {
     // Bytes follow on the stream: a collected file or a tar of a collected tree,
     // and what the collecting machine counted.
     Blob { len: u64, files: u64, bytes: u64 },
-    Reports(Option<Vec<(String, CredentialReport)>>),
     Bool(bool),
     Text(String),
     Failed(String),
