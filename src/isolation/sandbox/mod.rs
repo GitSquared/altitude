@@ -122,16 +122,13 @@ impl SandboxPlan {
             ));
         }
         let commits = project.commits.clone();
-        let mut environment = vec![
+        let environment = vec![
             ("HOME".into(), GUEST_HOME.into()),
             ("SHELL".into(), "/bin/bash".into()),
             // So that a tool which asks a browser to open something uses the
             // opener altitude answers, not a browser that is not there.
             ("BROWSER".into(), OPENER.into()),
         ];
-        if let Some(commits) = &commits {
-            add_commits_env(&mut environment, commits);
-        }
         let mut plan = Self {
             project,
             layers,
@@ -231,6 +228,9 @@ impl SandboxPlan {
                 }
                 plan.options.environment.push((name.into(), value.into()));
             }
+        }
+        if let Some(commits) = &commits {
+            add_commits_env(&mut plan.options.environment, commits);
         }
         // Caches are mounts, not build steps: adding or removing one changes what
         // a task finds warm without invalidating a single built snapshot.

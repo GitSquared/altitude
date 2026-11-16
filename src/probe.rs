@@ -114,6 +114,7 @@ pub async fn probe(probe: Probe) -> Result<(), Boxed> {
                 let is_ours = ours.as_deref() == Some(&summary.id)
                     || (ours.is_none()
                         && !known.contains(&summary.id)
+                        && summary.project_id.as_deref() == Some(project.as_str())
                         && summary.created_at_ms >= sent_at_ms);
                 if !is_ours {
                     None
