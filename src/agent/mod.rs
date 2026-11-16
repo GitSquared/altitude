@@ -15,17 +15,18 @@ mod providers;
 pub mod tool;
 mod usage;
 pub use limits::{AgentRefusal, AgentStanding, AgentWindow, AgentWindowReading};
-use providers::ClaudeCode;
+use providers::{ClaudeCode, PiCode};
 pub use usage::{AgentUsage, TaskUsage};
 
-pub const AGENTS: [AgentKind; 1] = [AgentKind::Claude];
+pub const AGENTS: [AgentKind; 2] = [AgentKind::Pi, AgentKind::Claude];
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Type, Serialize, Deserialize)]
 #[sqlx(type_name = "TEXT", rename_all = "lowercase")]
 #[serde(rename_all = "lowercase")]
 pub enum AgentKind {
-    #[default]
     Claude,
+    #[default]
+    Pi,
 }
 
 impl fmt::Display for AgentKind {
@@ -40,8 +41,9 @@ impl FromStr for AgentKind {
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value.trim().to_ascii_lowercase().as_str() {
             "claude" => Ok(Self::Claude),
+            "pi" => Ok(Self::Pi),
             _ => Err(AgentError::new(format!(
-                "unknown agent harness {value:?}; this build runs claude"
+                "unknown agent harness {value:?}; use claude or pi"
             ))),
         }
     }
@@ -250,18 +252,21 @@ pub trait TaskProgressDecoder: Send {
 #[derive(Clone)]
 pub struct AgentEngines {
     claude: Arc<dyn AgentEngine>,
+    pi: Arc<dyn AgentEngine>,
 }
 
 impl AgentEngines {
     pub fn new() -> Self {
         Self {
             claude: Arc::new(ClaudeCode),
+            pi: Arc::new(PiCode),
         }
     }
 
     pub fn engine(&self, kind: AgentKind) -> &dyn AgentEngine {
         match kind {
             AgentKind::Claude => &*self.claude,
+            AgentKind::Pi => &*self.pi,
         }
     }
 
@@ -269,6 +274,7 @@ impl AgentEngines {
     pub fn with(mut self, kind: AgentKind, engine: Arc<dyn AgentEngine>) -> Self {
         match kind {
             AgentKind::Claude => self.claude = engine,
+            AgentKind::Pi => self.pi = engine,
         }
         self
     }
