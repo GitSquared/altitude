@@ -221,11 +221,26 @@ where
             let service = self.clone();
             let reason = reason.clone();
             async move {
-                let sandbox_id = task
-                    .facts
-                    .sandbox_id
-                    .clone()
-                    .expect("suspendable tasks have a sandbox");
+                // A task that says it has a sandbox and cannot name one has none to stop.
+                // Recording the pause without a snapshot is what the engine's own answer
+                // means, and it is not worth taking the process down for: this runs while
+                // an operator is closing the window, when the work being saved matters
+                // more than the invariant being right.
+                let Some(sandbox_id) = task.facts.sandbox_id.clone() else {
+                    service
+                        .record(
+                            &task.id,
+                            &[TaskHistoryEvent::ExecutionPaused {
+                                execution_status: TaskExecutionStatus::Paused,
+                                sandbox_available: false,
+                                snapshot_available: task.facts.snapshot_available,
+                                execution_pause_reason: reason.clone(),
+                                snapshot_path: task.facts.snapshot_path.clone().unwrap_or_default(),
+                            }],
+                        )
+                        .await?;
+                    return Ok(());
+                };
                 if let Err(error) = service.isolation.stop_work(sandbox_id.clone()).await {
                     tracing::warn!(%error, "could not stop the sandbox before archiving it");
                 }
