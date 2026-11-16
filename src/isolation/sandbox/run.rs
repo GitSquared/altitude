@@ -241,9 +241,35 @@ pub(crate) fn add_commits_env(environment: &mut Vec<(String, String)>, commits: 
         // login's signing setting by accident.
         pairs.push(("commit.gpgsign", "false"));
     }
+    // The credential helper configures git through the same variables, and there is one
+    // count for all of them: a second writer has to add to what is there, or the
+    // environment carries GIT_CONFIG_COUNT twice and the sandbox refuses to start.
+    let mut configured: Vec<(String, String)> = Vec::new();
+    let count: usize = environment
+        .iter()
+        .find(|(name, _)| name == "GIT_CONFIG_COUNT")
+        .and_then(|(_, value)| value.parse().ok())
+        .unwrap_or(0);
+    for index in 0..count {
+        let key = format!("GIT_CONFIG_KEY_{index}");
+        let value = format!("GIT_CONFIG_VALUE_{index}");
+        let pair = environment.iter().find(|(name, _)| *name == key);
+        let Some((_, key)) = pair else { continue };
+        let Some((_, value)) = environment.iter().find(|(name, _)| *name == value) else {
+            continue;
+        };
+        configured.push((key.clone(), value.clone()));
+    }
+    environment.retain(|(name, _)| !name.starts_with("GIT_CONFIG_"));
+    configured.extend(
+        pairs
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string())),
+    );
+    let pairs = configured;
     environment.push(("GIT_CONFIG_COUNT".to_owned(), pairs.len().to_string()));
     for (index, (key, value)) in pairs.into_iter().enumerate() {
-        environment.push((format!("GIT_CONFIG_KEY_{index}"), key.to_owned()));
-        environment.push((format!("GIT_CONFIG_VALUE_{index}"), value.to_owned()));
+        environment.push((format!("GIT_CONFIG_KEY_{index}"), key));
+        environment.push((format!("GIT_CONFIG_VALUE_{index}"), value));
     }
 }
