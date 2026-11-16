@@ -36,6 +36,10 @@ const SUPERVISE_INTERVAL: Duration = Duration::from_secs(10);
 // seconds forever.
 const PROVISION_ATTEMPTS: usize = 3;
 const AFTER_FAILURE: Duration = Duration::from_secs(60);
+// A host with no spares to hand is a cold machine: it boots, runs its startup script and
+// only then dials. A minute was the wait for a warm spare that no longer exists, and it
+// declared a healthy boot dead while leaving the instance holding its own name.
+const JOIN_PATIENCE: Duration = Duration::from_secs(300);
 
 struct ConnectedWorker {
     peer: EndpointAddr,
@@ -360,7 +364,7 @@ impl WorkerFleet {
     }
 
     async fn wait_until_joined(&self, name: &str) -> bool {
-        let deadline = Instant::now() + Duration::from_secs(60);
+        let deadline = Instant::now() + JOIN_PATIENCE;
         loop {
             if self
                 .state
