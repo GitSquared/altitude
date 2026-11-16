@@ -32,6 +32,10 @@ pub(super) struct IssueData {
     pub(super) id: String,
     #[serde(default)]
     pub(super) state_id: Option<String>,
+    // Linear's own "delegate" action: the issue is handed to an app without its state
+    // moving, which is the gesture an operator actually makes.
+    #[serde(default)]
+    pub(super) delegate: Option<String>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -39,6 +43,8 @@ pub(super) struct IssueData {
 pub(super) struct IssueUpdatedFrom {
     #[serde(default)]
     pub(super) state_id: Option<String>,
+    #[serde(default)]
+    pub(super) delegate_id: Option<String>,
 }
 
 pub(super) fn parse_issue_event(body: &[u8]) -> Result<IssueEvent, serde_json::Error> {
@@ -59,8 +65,15 @@ impl IssueEvent {
             return None;
         }
         let state_id = self.data.state_id?;
-        let previous_state_id = self.updated_from?.state_id?;
-        if previous_state_id == state_id {
+        let updated_from = self.updated_from?;
+        let was_delegated = updated_from.delegate_id.is_some();
+        let is_delegated = self.data.delegate.is_some();
+        let state_moved = updated_from
+            .state_id
+            .is_some_and(|previous| previous != state_id);
+        // A person delegating the issue to this app is a request for work, whether or not
+        // the state moved with it.
+        if !state_moved && !(is_delegated && !was_delegated) {
             return None;
         }
         let occurred_at_ms = chrono::DateTime::parse_from_rfc3339(&self.created_at)
