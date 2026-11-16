@@ -1,6 +1,7 @@
 use crate::{
     agent::{AgentKind, mcp},
     config::InstallationIdentity,
+    credentials,
     isolation::{
         CommandEvent, CommandSession, FileTransferSink, IsolationEngine, SandboxOptions,
         SandboxPurpose, VsockRoute, guest_absolute, mounts,
@@ -269,6 +270,13 @@ where
                     .credentials
                     .recipe(&vcs_id)
                     .map_err(TaskServiceError::Credentials)?;
+                // The session this task is about to be handed is renewed first, here, by the
+                // machine handing it out: a credential is refreshed because work is waiting on
+                // it, not because a clock said so, and a machine holding a session has the
+                // harness that refreshes it.
+                for profile in [&agent_id, &vcs_id] {
+                    credentials::keeper::renew_if_due(&self.credentials, profile).await;
+                }
                 isolation
                     .provision(
                         sandbox_id.clone(),

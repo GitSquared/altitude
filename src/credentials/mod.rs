@@ -5,18 +5,19 @@ pub mod keeper;
 mod model;
 mod shell;
 
+use std::time::Duration;
+
 use std::{
     error::Error,
     fmt, fs,
     path::{Path, PathBuf},
 };
-
-use tokio::sync::watch;
+use tokio::process::Command;
+use tokio::time::timeout;
 
 #[cfg(any(test, debug_assertions, feature = "testkit"))]
 use std::collections::HashMap;
 
-use crate::isolation::{GuestPath, IsolationStatus, guest_absolute, renew_credential};
 use crate::vcs;
 
 pub use model::{Credential, Service, Slot, agent_of, describe, new_id};
@@ -37,8 +38,7 @@ use crate::{
     agent::{AgentChannels, AgentEngines},
     config::Config,
     isolation::{
-        CREDENTIAL_PREFIX, CredentialCheck, CredentialSandbox, IsolationEngine, IsolationError,
-        PortRelays, ProfileRecipe, ProfileSummary, Unwatched, mounts,
+        IsolationEngine, IsolationError, PortRelays, ProfileRecipe, ProfileSummary, mounts,
     },
     project::Project,
 };
@@ -200,9 +200,10 @@ where
         Ok(answers)
     }
 
-    // Using the harness is the only thing that renews its session: the status check
-    // reads a file and cannot. So a profile close to running out is renewed by running
-    // the harness once, in the same kind of sandbox its checks use.
+    // A session is renewed by the harness that owns it, on the machine that holds it: the
+    // provider names the command, and running it where the profile lives is what makes the
+    // result the session this machine will hand out. No sandbox is involved, because a
+    // sandbox is where an agent works and a refresh is not work.
     pub async fn renew(&self, profile: &str) -> Result<Renewal, CredentialsError> {
         let recipe = self.recipe(profile)?;
         // Whether a credential can renew itself is the harness's business, not this
@@ -211,123 +212,68 @@ where
         let Some(command) = recipe.session_renew else {
             return Ok(Renewal::NothingToRenew);
         };
-        // A sandbox is only handed out for a layer that exists, so a machine that has
-        // never built this profile's harness gets one built first.
-        let recipes = vec![recipe.clone()];
-        let mut snapshot = self
-            .isolation
-            .project_snapshot(Project::profile_build(), recipes.clone());
-        if snapshot.is_none() {
-            let (quiet, _) = watch::channel(IsolationStatus::Starting);
-            self.isolation.prepare(&quiet).await.ok();
-            snapshot = self
-                .isolation
-                .project_snapshot(Project::profile_build(), recipes.clone());
-        }
-        let sandbox = CredentialSandbox {
-            id: check_id(&[profile.to_owned()]),
-            recipes,
-            snapshot,
-            vsock: Vec::new(),
-        };
-        // The session files the provider names are what a renewal has to keep: they come
-        // back out of the sandbox into the directory this machine owns the profile in.
-        let take_back = match recipe.directories.first() {
-            Some(directory) => {
-                let root = match directory.guest_path {
-                    GuestPath::Absolute(path) | GuestPath::HomeRelative(path) => path,
-                };
-                match guest_absolute(root) {
-                    Ok(root) => recipe
-                        .session_keep
-                        .iter()
-                        .map(|name| {
-                            (
-                                format!("{root}/{name}"),
-                                self.config.profile_dir(profile).join(name),
-                            )
-                        })
-                        .collect(),
-                    Err(_) => Vec::new(),
-                }
+        let before = self.session_expiry(profile);
+        let directory = self.config.profile_dir(profile);
+        let renewal = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(command)
+            .current_dir(&directory)
+            .env("HOME", &directory)
+            .env("CLAUDE_CONFIG_DIR", &directory)
+            .output();
+        let ran = match timeout(RENEW_PATIENCE, renewal).await {
+            Err(_) => return Ok(Renewal::Refused("its harness did not finish".to_owned())),
+            Ok(Err(error)) => {
+                return Ok(Renewal::Refused(format!(
+                    "its harness could not be run: {error}"
+                )));
             }
-            None => Vec::new(),
+            Ok(Ok(output)) => output,
         };
-        // A session file is a file in its own profile: a name with a path in it would
-        // write somewhere else entirely, and that is worth stopping rather than logging.
-        let profile_dir = self.config.profile_dir(profile);
-        for (_, host) in &take_back {
-            debug_assert!(
-                host.starts_with(&profile_dir),
-                "a renewed credential must land inside {}",
-                profile_dir.display()
-            );
+        // What the command said about itself is not the question. The profile's own file
+        // is: a renewal that leaves the deadline where it was has not renewed anything.
+        let after = self.session_expiry(profile);
+        if after == before {
+            let said = String::from_utf8_lossy(&ran.stderr);
+            return Ok(Renewal::Refused(format!(
+                "its harness ran and the session did not change: {}",
+                said.trim().lines().last().unwrap_or("no output")
+            )));
         }
-        let used = renew_credential(
-            &self.isolation,
-            &self.config,
-            sandbox,
-            command.to_owned(),
-            take_back,
-            &Unwatched,
-        )
-        .await
-        .map_err(CredentialsError::Isolation)?;
-        Ok(if used {
-            Renewal::Renewed
-        } else {
-            Renewal::Refused("its harness could not be used".to_owned())
-        })
+        Ok(Renewal::Renewed)
     }
 
+    // A check is the provider's own command, run where the profile lives. It is a file test
+    // or a version probe — nothing an agent would need — so it costs a process, not a
+    // sandbox, and the answer is the same one an agent's first turn would give.
     async fn answer_batch(
         &self,
         profiles: Vec<String>,
     ) -> Result<Vec<(String, CredentialAnswer)>, CredentialsError> {
-        let mut recipes = Vec::new();
-        let mut checks = Vec::new();
-        for profile in &profiles {
-            let recipe = self.recipe(profile)?;
-            checks.push(CredentialCheck {
-                profile: profile.clone(),
-                command: recipe.status_command.to_owned(),
-            });
-            recipes.push(recipe);
+        let mut answers = Vec::new();
+        for profile in profiles {
+            let recipe = self.recipe(&profile)?;
+            let directory = self.profile_directory(&profile);
+            let check = Command::new("/bin/sh")
+                .arg("-c")
+                .arg(recipe.status_command)
+                .current_dir(&directory)
+                .env("HOME", &directory)
+                .env("CLAUDE_CONFIG_DIR", &directory)
+                .output();
+            let answer = match timeout(CHECK_PATIENCE, check).await {
+                Ok(Ok(output)) => CredentialAnswer {
+                    signed_in: output.status.success(),
+                    output: String::from_utf8_lossy(&output.stdout).trim().to_owned(),
+                    is_verified: true,
+                },
+                // A check that will not run says nothing about the files it was meant to
+                // read, so the answer falls back to what they are.
+                _ => self.saved_login(&profile),
+            };
+            answers.push((profile, answer));
         }
-        let Some(snapshot) = self
-            .isolation
-            .project_snapshot(Project::profile_build(), recipes.clone())
-        else {
-            return Ok(profiles
-                .into_iter()
-                .map(|profile| (profile.clone(), self.saved_login(&profile)))
-                .collect());
-        };
-        let sandbox = CredentialSandbox {
-            id: check_id(&profiles),
-            recipes,
-            snapshot: Some(snapshot),
-            vsock: Vec::new(),
-        };
-        let reports = self
-            .isolation
-            .credential_reports(sandbox, checks, &Unwatched)
-            .await
-            .map_err(CredentialsError::Isolation)?
-            .unwrap_or_default();
-        Ok(reports
-            .into_iter()
-            .map(|(profile, report)| {
-                (
-                    profile,
-                    CredentialAnswer {
-                        signed_in: report.signed_in,
-                        output: report.output,
-                        is_verified: true,
-                    },
-                )
-            })
-            .collect())
+        Ok(answers)
     }
 
     pub fn forget(&self, profile: &str) -> Result<(), CredentialsError> {
@@ -395,11 +341,6 @@ pub fn can_renew(profile: &str, agents: &AgentEngines) -> bool {
     profile_recipe(profile, agents).is_ok_and(|recipe| recipe.session_renew.is_some())
 }
 
-fn check_id(profiles: &[String]) -> String {
-    let first = profiles.first().map(String::as_str).unwrap_or("profiles");
-    format!("{CREDENTIAL_PREFIX}check-{}", first.replace('/', "-"))
-}
-
 impl<E: IsolationEngine> Credentials<E> {
     pub(crate) fn recipe(&self, profile: &str) -> Result<ProfileRecipe, CredentialsError> {
         #[cfg(any(test, debug_assertions, feature = "testkit"))]
@@ -458,3 +399,8 @@ pub fn stored_outlasts(
     };
     here.outlasts(arriving)
 }
+
+// A harness that refreshes a token is one call, so a command still running after this has
+// failed in a way a second run will not fix.
+const CHECK_PATIENCE: Duration = Duration::from_secs(30);
+const RENEW_PATIENCE: Duration = Duration::from_secs(120);

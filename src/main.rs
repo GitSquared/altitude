@@ -3,7 +3,6 @@ use std::{error::Error, io, process::ExitCode, sync::Arc};
 use tokio::{
     signal::unix::{SignalKind, signal},
     sync::{Notify, mpsc},
-    time,
 };
 
 use clap::Parser;
@@ -192,21 +191,17 @@ where
         )
         .with_trackers(trackers)
         .with_issue_reader(issue_reader);
-        // A session that is close to running out is renewed here, while this machine is
-        // running, and the next sync carries the renewal to whatever remote holds a copy.
-        // Nothing else keeps a credential alive: the sandbox it needs is the one the
-        // credential check already builds, and the renewal happens because the harness
-        // was used, not because a clock said so.
+        // A client that starts renews what it holds, so the copies it pushes are as fresh
+        // as this machine can make them. One pass, not a loop: the next renewal is the next
+        // start, or the moment a task needs the session.
         {
             let keeping = tasks.clone();
             tokio::spawn(async move {
-                loop {
-                    let profiles = Config::load()
-                        .map(|config| credentials::keeper::profiles(&config))
-                        .unwrap_or_default();
-                    credentials::keeper::refresh_due(keeping.credentials(), &profiles).await;
-                    time::sleep(credentials::keeper::LOOK_EVERY).await;
-                }
+                let Ok(config) = Config::load() else {
+                    return;
+                };
+                let profiles = credentials::keeper::profiles(&config);
+                credentials::keeper::refresh_due(keeping.credentials(), &profiles).await;
             });
         }
         // The scripted harness answers for this machine's version control too, so a

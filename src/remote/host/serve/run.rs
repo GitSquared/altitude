@@ -28,11 +28,8 @@ use crate::{
     agent::{AgentEngines, AgentKind},
     cli::{ServeArgs, ServeCommand, Tracker},
     config::{Config, DEFAULT_PORT},
-    credentials::{Credentials, keeper},
     db::Database,
-    isolation::{
-        self, IsolationEngine, IsolationStatus, MicrosandboxIsolation, PortRelays, Unwatched,
-    },
+    isolation::{self, IsolationStatus, MicrosandboxIsolation, Unwatched},
     logging,
     project::Project,
     remote::protocol::TaskSummary,
@@ -248,42 +245,6 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
     );
     if reports_through_pushed_logins {
         tasks = tasks.with_trackers(Arc::new(PushedTrackers::new(config.clone())));
-    }
-    // A credential is renewed by whichever machine is up, and this one is up even when the
-    // operator's own machine is not: the same keeper the client runs, over the profiles
-    // this remote holds for its operators. The renewal is written back into the copy a
-    // host is given, so the next task on any host starts with a working session.
-    {
-        let config = config.clone();
-        let isolation = keeper_isolation;
-        tokio::spawn(async move {
-            loop {
-                let owners = config.operator_ids();
-                tracing::debug!(owners = owners.len(), "the credential keeper is looking");
-                for owner in owners {
-                    let Ok(scoped) = config.for_operator(&owner) else {
-                        continue;
-                    };
-                    let Ok(inner) = isolation.for_operator(&owner) else {
-                        tracing::warn!(%owner, "this remote cannot renew for an operator");
-                        continue;
-                    };
-                    let profiles = keeper::profiles(&scoped);
-                    if profiles.is_empty() {
-                        continue;
-                    }
-                    tracing::debug!(%owner, profiles = profiles.len(), "renewing what is due");
-                    let credentials = Credentials::new(
-                        inner,
-                        scoped.clone(),
-                        AgentEngines::new(),
-                        PortRelays::new(scoped.agent_channel_dir()),
-                    );
-                    keeper::refresh_due(&credentials, &profiles).await;
-                }
-                time::sleep(keeper::LOOK_EVERY).await;
-            }
-        });
     }
     let (task_loop, mut updates) = TaskEventLoop::waiting_for_runtime(tasks);
     let task_loop = Arc::new(task_loop);

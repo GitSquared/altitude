@@ -438,7 +438,7 @@ impl AgentEngine for ClaudeCode {
             // Claude Code writes this file when it is signed in, and its own CLI has
             // no way to be asked. Existence and size only: the contents are the
             // credential, and altitude does not read it.
-            status_command: "test -s /altitude/claude/.credentials.json && echo a login is here",
+            status_command: "test -s .credentials.json && echo a login is here",
             session_file: Some(".credentials.json"),
             session_deadline: Some(claude_deadline_ms),
             session_renew: Some(RENEW_COMMAND),

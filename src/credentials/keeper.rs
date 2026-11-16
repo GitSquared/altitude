@@ -1,14 +1,13 @@
-use std::{fs, time::Duration};
+use std::fs;
 
 use crate::{config::Config, isolation::IsolationEngine};
 
 use super::freshness::Standing;
 use super::{Credentials, Renewal};
 
-// A session is kept alive by the only thing that can keep it alive: using it.
-// How often a running machine looks. Nothing is refreshed because this fired; it fired
-// to look at what the profile's own files say.
-pub const LOOK_EVERY: Duration = Duration::from_secs(15 * 60);
+// A session is kept alive by the only thing that can keep it alive: using it. Nothing here
+// fires on its own — `refresh_due` is called where a session is about to be needed, so a
+// credential is renewed because someone is waiting for it and not because time passed.
 
 pub fn due(credentials: &Credentials<impl IsolationEngine>, profile: &str) -> Option<Standing> {
     let standing = standing(credentials, profile)?;
@@ -85,5 +84,25 @@ where
             ),
             Err(error) => tracing::warn!(profile, %error, "could not renew this credential"),
         }
+    }
+}
+
+// One profile, renewed only if its own files say it is close to running out: the caller is
+// about to use it, which is the reason, and the profile's deadline is the condition.
+pub async fn renew_if_due<E>(credentials: &Credentials<E>, profile: &str)
+where
+    E: IsolationEngine + Clone + 'static,
+{
+    let Some(standing) = due(credentials, profile) else {
+        return;
+    };
+    tracing::info!(profile, standing = %standing.describe(true), "renewing a session that is due");
+    match credentials.renew(profile).await {
+        Ok(Renewal::Renewed) => tracing::info!(profile, "the session is renewed"),
+        Ok(Renewal::NothingToRenew) => {}
+        Ok(Renewal::Refused(reason)) => {
+            tracing::warn!(profile, %reason, "a session that is due could not be renewed")
+        }
+        Err(error) => tracing::warn!(profile, %error, "a session that is due could not be renewed"),
     }
 }
