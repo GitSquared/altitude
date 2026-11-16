@@ -1,3 +1,4 @@
+use std::os::unix::fs::PermissionsExt;
 use std::{fs, net::Ipv4Addr, path::PathBuf, process::Command, time::Instant};
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
@@ -550,6 +551,10 @@ fn write_profiles(config: &Config, profiles: &[WorkerProfile]) -> Result<(), Str
                 fs::create_dir_all(parent).map_err(|error| error.to_string())?;
             }
             fs::write(&target, bytes).map_err(|error| error.to_string())?;
+            // A profile is credentials: a key the umask leaves world-readable is a key git
+            // refuses to sign with, and one anybody on the host could have copied.
+            fs::set_permissions(&target, fs::Permissions::from_mode(0o600))
+                .map_err(|error| error.to_string())?;
         }
     }
     Ok(())
