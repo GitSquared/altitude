@@ -66,57 +66,41 @@ impl TaskHost for OwnTasks {
     ) -> BoxFuture<Result<(), String>> {
         let tasks = self.tasks.clone();
         Box::pin(async move {
-            let task = match &command {
-                SignalCommand::Reply {
-                    task_id, signal_id, ..
-                }
-                | SignalCommand::Resolve {
-                    task_id, signal_id, ..
-                }
-                | SignalCommand::Accept { task_id, signal_id } => tasks
-                    .service()
-                    .task_for_signal(task_id, signal_id)
-                    .await
-                    .map_err(|error| error.to_string())?,
-            }
-            .ok_or("this task is no longer active")?;
-            if task.operator_id() != Some(peer.to_string().as_str()) {
-                return Err("this task belongs to another operator".into());
-            }
-            if !tasks
-                .list()
-                .await
-                .map_err(|error| error.to_string())?
-                .iter()
-                .any(|active| active.id == task.id)
-            {
-                return Err("this task is no longer active".into());
-            }
+            let operator = peer.to_string();
             match command {
                 SignalCommand::Reply {
                     task_id,
                     signal_id,
                     body,
                 } => tasks
-                    .reply(&task_id, &signal_id, body)
+                    .reply_for_operator(&operator, &task_id, &signal_id, body)
                     .await
-                    .map_err(|error| error.to_string())?,
+                    .map_err(|error| error.to_string()),
                 SignalCommand::Resolve {
                     task_id,
                     signal_id,
                     resolved,
-                } => tasks
-                    .close_signal(&task_id, &signal_id, resolved)
-                    .await
-                    .map_err(|error| error.to_string())?,
+                } => {
+                    tasks
+                        .task_for_operator_signal(&operator, &task_id, &signal_id)
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    tasks
+                        .close_signal(&task_id, &signal_id, resolved)
+                        .await
+                        .map_err(|error| error.to_string())
+                }
                 SignalCommand::Accept { task_id, signal_id } => {
+                    tasks
+                        .task_for_operator_signal(&operator, &task_id, &signal_id)
+                        .await
+                        .map_err(|error| error.to_string())?;
                     tasks
                         .accept(&task_id, &signal_id)
                         .await
-                        .map_err(|error| error.to_string())?;
+                        .map_err(|error| error.to_string())
                 }
             }
-            Ok(())
         })
     }
 

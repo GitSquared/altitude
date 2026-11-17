@@ -13,7 +13,7 @@ use crate::{
     isolation::{Command, IsolationEngine, OutputStream},
     task::mirror::review::{ReviewWaits, Watchers},
     task::{
-        QueueStanding, Start, Task, TaskExecutionMode, TaskHistoryEvent, TaskService,
+        QueueStanding, Start, Task, TaskError, TaskExecutionMode, TaskHistoryEvent, TaskService,
         TaskServiceError, tasks_waiting_for_room,
     },
 };
@@ -222,6 +222,49 @@ where
             .await?;
         self.admit();
         Ok(())
+    }
+
+    // The operator's reply, proven against the task's owner. A transport says who is
+    // asking; the task says whether they may, so the rule lives below any one link.
+    pub async fn reply_for_operator(
+        &self,
+        operator: &str,
+        task_id: &str,
+        signal_id: &str,
+        answer: String,
+    ) -> Result<(), TaskServiceError> {
+        self.task_for_operator_signal(operator, task_id, signal_id)
+            .await?;
+        self.reply(task_id, signal_id, answer).await
+    }
+
+    // The task a signal belongs to, proven to be the operator's and still in play. A
+    // removed task keeps its signals readable, so being in the list is the check that
+    // it is still active.
+    pub async fn task_for_operator_signal(
+        &self,
+        operator: &str,
+        task_id: &str,
+        signal_id: &str,
+    ) -> Result<Task, TaskServiceError> {
+        let task = self
+            .service
+            .task_for_signal(task_id, signal_id)
+            .await?
+            .ok_or(TaskServiceError::Task(TaskError::OperationRejected(
+                "this task is no longer active",
+            )))?;
+        if task.operator_id() != Some(operator) {
+            return Err(TaskServiceError::Task(TaskError::OperationRejected(
+                "this task belongs to another operator",
+            )));
+        }
+        if !self.list().await?.iter().any(|active| active.id == task.id) {
+            return Err(TaskServiceError::Task(TaskError::OperationRejected(
+                "this task is no longer active",
+            )));
+        }
+        Ok(task)
     }
 
     // Closing or reopening a thread is the same act whether it frees the task to work
