@@ -7,8 +7,8 @@ use sqlx::types::Json;
 use crate::id;
 use crate::task::{
     AskTransition, ProjectProposal, Task, TaskAsk, TaskAskAuthor, TaskAskKind, TaskAskMessage,
-    TaskAskQuestion, TaskError, TaskExecutionStatus, TaskHistoryEvent, TaskInput, TaskInputAuthor,
-    TaskInputSource, TaskPlanStep,
+    TaskAskQuestion, TaskError, TaskExecutionPauseReason, TaskExecutionStatus, TaskHistoryEvent,
+    TaskInput, TaskInputAuthor, TaskInputSource, TaskPlanStep,
 };
 
 impl TaskStore {
@@ -210,14 +210,52 @@ impl TaskStore {
     // reads it from there. Recording it only as a task input put their words in front
     // of the agent and nowhere the operator could see them: the thread still ended
     // with the agent's question, so the task read as unanswered after being answered.
-    pub async fn message_operator_signal(
+    // The message and the work it sets moving are one write: apart, a process that
+    // stopped between them left the task visible as answered while still paused, with
+    // nothing to wake it. Whether the reply steers a run that is going or queues the
+    // turn that is not is decided from the state read under the same lock that records
+    // it.
+    pub async fn reply_operator_signal(
         &self,
         task_id: &str,
         signal_id: &str,
         body: &str,
+        wake_news: String,
     ) -> Result<Task, TaskError> {
-        self.message_signal_as(task_id, signal_id, TaskAskAuthor::Operator, body)
+        self.thread_of(task_id, signal_id).await?;
+        let mut transaction = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
             .await
+            .map_err(TaskError::Database)?;
+        let task = Self::read_task(&mut transaction, task_id).await?;
+        let mut events = vec![TaskHistoryEvent::OperatorSignalMessage {
+            signal_id: signal_id.to_owned(),
+            author: TaskAskAuthor::Operator,
+            body: body.to_owned(),
+        }];
+        // An accepted task and one being handed to another machine still show the
+        // reply in their thread, but neither is this machine's to wake.
+        let may_wake = !task.facts.accepted
+            && task.facts.execution_pause_reason != Some(TaskExecutionPauseReason::Transfer);
+        if may_wake {
+            if matches!(
+                task.facts.execution_status,
+                TaskExecutionStatus::Running | TaskExecutionStatus::Pending
+            ) {
+                events.push(TaskHistoryEvent::Steer);
+            } else {
+                events.push(TaskHistoryEvent::Wake);
+                events.push(TaskHistoryEvent::ExecutionQueued {
+                    execution_status: TaskExecutionStatus::Pending,
+                    wake: Some(wake_news),
+                });
+            }
+        }
+        Self::write_events(&mut transaction, task_id, &events).await?;
+        let task = Self::read_task(&mut transaction, task_id).await?;
+        transaction.commit().await.map_err(TaskError::Database)?;
+        Ok(task)
     }
 
     pub(super) async fn message_signal_as(

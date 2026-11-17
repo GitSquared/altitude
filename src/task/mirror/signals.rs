@@ -194,37 +194,16 @@ where
         signal_id: &str,
         reply: String,
     ) -> Result<(), TaskServiceError> {
-        // Re-read rather than trusting a caller-held task: the operator may have
-        // opened the signal list some time before replying.
-        let task = self
-            .store
-            .message_operator_signal(task_id, signal_id, &reply)
-            .await
-            .map_err(TaskServiceError::Task)?;
-        if task.facts.accepted
-            || task.facts.execution_pause_reason == Some(TaskExecutionPauseReason::Transfer)
-        {
-            return Ok(());
-        }
-        let awake = matches!(
-            task.facts.execution_status,
-            TaskExecutionStatus::Running | TaskExecutionStatus::Pending
-        );
-        let taken = if awake {
-            TaskHistoryEvent::Steer
-        } else {
-            TaskHistoryEvent::Wake
-        };
-        let task = self.record(&task.id, &[taken]).await?;
-        if awake {
-            return Ok(());
-        }
         // The turn reads the whole task and the thread; it does not receive a
         // pre-digested command.
-        let prompt = format!(
+        let wake_news = format!(
             "The operator replied on signal {signal_id}. Read the thread and the task, answer in the thread, and do the work the reply asks for. Continue autonomously if there is more to do."
         );
-        self.queue_wake(&task, prompt).await
+        self.store
+            .reply_operator_signal(task_id, signal_id, &reply, wake_news)
+            .await
+            .map_err(TaskServiceError::Task)?;
+        Ok(())
     }
 
     // Every way a person or a pull request puts a task back to work ends here: the
