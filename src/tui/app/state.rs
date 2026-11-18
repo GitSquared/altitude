@@ -1,4 +1,4 @@
-use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
 use crate::{
     agent::AgentKind,
@@ -8,6 +8,7 @@ use crate::{
 };
 
 use crate::tui::widgets::alert::Alert;
+use crate::tui::widgets::select::Pointer;
 use screens::settings::{Depth, Focus, Section, SettingsHit};
 
 use super::*;
@@ -150,10 +151,18 @@ impl App {
                 return;
             }
             // A click on a list row is a choice, and it goes to the list before
-            // it goes to whatever the row is drawn over.
+            // it goes to whatever the row is drawn over. Taking the row, and what
+            // taking it means, is the key's: the click says where the cursor is
+            // and then presses it.
             if let Some(form) = self.panel.form.as_mut()
-                && form.pill_mouse(mouse)
+                && let Some(pointer) = form.pill_pointer(mouse)
             {
+                let key = match pointer {
+                    Pointer::Row => KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                    Pointer::Wheel => return,
+                    Pointer::Away => KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+                };
+                form.list_key(key);
                 return;
             }
             let target = self

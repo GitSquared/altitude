@@ -1,6 +1,6 @@
 use std::{mem, slice};
 
-use crossterm::event::{KeyCode, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyCode, MouseEvent};
 use ratatui::layout::Rect;
 
 use crate::{
@@ -12,7 +12,7 @@ use crate::{
         widgets::{
             chrome::Hint,
             focus::FocusRing,
-            select::{self, Menu, Offer, Select},
+            select::{self, Menu, Offer, Pointer, Select},
             text::Field,
         },
     },
@@ -267,25 +267,10 @@ impl GetStarted {
             self.list_rows = rows;
             return None;
         };
-        let key = match mouse.kind {
-            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-                list.scroll(mouse.kind == MouseEventKind::ScrollDown);
-                None
-            }
-            MouseEventKind::Down(MouseButton::Left) => {
-                let pointed = rows.iter().find_map(|(area, index)| {
-                    (mouse.column >= area.x
-                        && mouse.column < area.right()
-                        && mouse.row >= area.y
-                        && mouse.row < area.bottom())
-                    .then_some(*index)
-                });
-                match pointed {
-                    Some(index) => list.point_at(index).then_some(KeyCode::Enter),
-                    None => Some(KeyCode::Esc),
-                }
-            }
-            _ => None,
+        let key = match list.pointer(mouse, &rows) {
+            Pointer::Row => Some(KeyCode::Enter),
+            Pointer::Wheel => None,
+            Pointer::Away => Some(KeyCode::Esc),
         };
         self.list_rows = rows;
         key
