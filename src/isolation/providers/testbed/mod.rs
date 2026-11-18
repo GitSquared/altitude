@@ -441,6 +441,12 @@ impl TestbedIsolation {
                 }
                 _ => continue,
             };
+            // `pack_home` writes files without their directories, and `Entry::unpack`
+            // does not make them: a transcript nested under `projects/-/` or a git
+            // object under `.git/objects/` is the first entry whose parents are absent.
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent).map_err(io_error)?;
+            }
             entry.unpack(&target).map_err(io_error)?;
         }
         Ok(())
