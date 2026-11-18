@@ -87,6 +87,13 @@ where
             let service = self.clone();
             async move {
                 let mut task = task;
+                // A claim belongs to the process that made it, and every process but
+                // this one is gone at recovery: whatever recovery decides below, the
+                // claim is given back at the end so the task can be admitted again.
+                let previous_claim = task
+                    .facts
+                    .active_start_claim()
+                    .map(|claim| (claim.id.clone(), claim.owner.clone()));
                 if let Some(sandbox_id) = &task.facts.sandbox_id
                     && task.facts.sandbox_available
                 {
@@ -196,6 +203,28 @@ where
                     }];
                     events.extend(restart_events(&task, &woke_up_saying(&task, false)));
                     task = service.record(&task.id, &events).await?;
+                }
+                if let Some((claim_id, owner)) = previous_claim {
+                    // A start was claimed and the process that claimed it is gone.
+                    // Recovery runs once at startup, before this process claims
+                    // anything, and a task database has one live writer — the client
+                    // holds its lock and a remote is alone in its own data directory —
+                    // so a claim found here belongs to a previous life of this
+                    // database and is given back to the queue.
+                    tracing::info!(
+                        task = %task.id,
+                        claim = %claim_id,
+                        owner = %owner,
+                        "releasing a start claim left by a previous run"
+                    );
+                    if let Some(released) = service
+                        .store
+                        .relinquish_start(&task.id, &claim_id)
+                        .await
+                        .map_err(TaskServiceError::Task)?
+                    {
+                        task = released;
+                    }
                 }
                 Ok(task)
             }

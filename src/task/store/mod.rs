@@ -17,6 +17,7 @@ mod events;
 mod memory;
 mod reports;
 mod signals;
+mod starts;
 
 // SQL returns the latest recorded properties without interpreting task lifecycle.
 #[derive(FromRow)]
@@ -274,15 +275,24 @@ impl TaskStore {
         transaction: &mut Transaction<'_, Sqlite>,
         task_id: &str,
     ) -> Result<Task, TaskError> {
+        Self::read_task_optional(transaction, task_id)
+            .await?
+            .ok_or(TaskError::Database(sqlx::Error::RowNotFound))
+    }
+
+    async fn read_task_optional(
+        transaction: &mut Transaction<'_, Sqlite>,
+        task_id: &str,
+    ) -> Result<Option<Task>, TaskError> {
         sqlx::query_as::<_, TaskRow>(concat!(
             include_str!("read_task.sql"),
             " WHERE tasks.id = ?"
         ))
         .bind(task_id)
-        .fetch_one(&mut **transaction)
+        .fetch_optional(&mut **transaction)
         .await
         .map_err(TaskError::Database)
-        .map(Task::from)
+        .map(|row| row.map(Task::from))
     }
 
     pub async fn request_control(

@@ -74,6 +74,11 @@ pub struct TaskFacts {
     pub leading_ask: Option<LeadingAsk>,
     #[sqlx(json(nullable))]
     pub deferred_review: Option<DeferredReview>,
+    // The start claim a task is holding while its sandbox is prepared. A task that is
+    // not Pending holds no claim even when one is recorded, because the run that
+    // claim produced is what moved it on.
+    #[sqlx(json(nullable))]
+    pub start_claim: Option<StartClaim>,
     // What the run that is starting opens with, said by whatever queued the task. The
     // second is the last thing said about this task's pull requests, which is what a
     // review poll compares itself against: saying it again unchanged is a wake loop.
@@ -88,6 +93,14 @@ impl TaskFacts {
     // machine is this machine's to schedule.
     pub fn is_borrowed(&self) -> bool {
         self.arrived_from.is_some()
+    }
+
+    pub fn active_start_claim(&self) -> Option<&StartClaim> {
+        if self.execution_status == TaskExecutionStatus::Pending {
+            self.start_claim.as_ref()
+        } else {
+            None
+        }
     }
 }
 

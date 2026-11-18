@@ -38,13 +38,7 @@ where
         if is_staged && !task.facts.sandbox_available {
             return Ok(task);
         }
-        if !is_staged
-            && !self
-                .starting
-                .lock()
-                .expect("starting lock poisoned")
-                .insert(task.id.clone())
-        {
+        if !is_staged && task.facts.active_start_claim().is_some() {
             return Err(TaskServiceError::Task(TaskError::OperationRejected(
                 "the task is still starting",
             )));

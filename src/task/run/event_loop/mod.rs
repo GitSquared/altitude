@@ -1,8 +1,10 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     sync::atomic::AtomicBool,
     sync::{Arc, Mutex, MutexGuard},
 };
+
+use uuid::Uuid;
 
 use crate::remote::Watching;
 use crate::task::{ProjectMemoryFile, SendsTasksHome, TaskAsk};
@@ -79,7 +81,9 @@ pub struct TaskEventLoop<E> {
     // The newest line each running agent produced. Read by the interface and by a
     // tracker reporting on this machine, which is the same fact told twice.
     current_activity: Arc<Mutex<HashMap<String, Activity>>>,
-    starting: Arc<Mutex<HashSet<String>>>,
+    // What this process calls itself on a claim it records. It is the one thing that
+    // lets a claim left behind be attributed to the run that made it.
+    start_owner: Arc<str>,
     watchers: Arc<Watchers<E>>,
     review_waits: Arc<ReviewWaits>,
     sends_home: Arc<Mutex<Option<Arc<dyn SendsTasksHome>>>>,
@@ -125,7 +129,7 @@ where
             terminal_output: Arc::new(Mutex::new(HashMap::new())),
             shells: TaskShells::default(),
             current_activity: Arc::new(Mutex::new(HashMap::new())),
-            starting: Arc::new(Mutex::new(HashSet::new())),
+            start_owner: Arc::from(Uuid::new_v4().to_string()),
             watchers,
             review_waits: Arc::new(ReviewWaits::default()),
             sends_home: Arc::new(Mutex::new(None)),
@@ -152,7 +156,7 @@ where
             .into_iter()
             .enumerate()
             .map(|(ahead, task)| {
-                let start = self.is_starting(&task.id).then(|| {
+                let start = task.facts.active_start_claim().is_some().then(|| {
                     match self.service.environment_step(&task.id) {
                         Some(progress) => Start::Building(progress),
                         None => Start::Provisioning,

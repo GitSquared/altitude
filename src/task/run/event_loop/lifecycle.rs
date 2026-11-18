@@ -282,10 +282,6 @@ where
         if let Err(error) = self.service.release_resources(&task).await {
             tracing::warn!(task = %task.id, %error, "transferred task storage needs cleanup");
         }
-        self.starting
-            .lock()
-            .expect("starting lock poisoned")
-            .remove(&task.id);
         let _ = self
             .events
             .send(TaskExecutionUpdate::Removed(task.id, Ok(())));
