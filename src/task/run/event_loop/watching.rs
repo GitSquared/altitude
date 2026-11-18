@@ -101,11 +101,15 @@ where
                         // reason are taken together: all three describe the run
                         // that is ending now and mean nothing to the next one.
                         let suspending = event_loop
-                            .take_active_run(&task.id)
+                            .take_active_run(&task.id, &run.id)
                             .is_some_and(|active| active.suspending);
                         let control = event_loop.take_control_request(&task.id, &run.id);
-                        service.release_ports(&task);
                         if suspending {
+                            // The run taken above is this task's current one, and a
+                            // suspension is tearing its sandbox down, so its ports go
+                            // with it. A superseded run never reaches here and never
+                            // releases a sandbox a newer turn is still using.
+                            service.release_ports(&task);
                             tracing::debug!(task_id = %task.id, "command ended during intentional suspension");
                             return;
                         }
@@ -209,6 +213,31 @@ where
         mut stream: Option<Box<dyn TaskStreamDecoder>>,
         event: CommandEvent,
     ) -> Result<(), TaskServiceError> {
+        // The run that is ending must still be the task's current one and must not
+        // have ended already. A callback can be delivered after a later attempt has
+        // begun — a takeover, or a continuation launched from an earlier callback — or
+        // a duplicate can arrive for the same attempt, and everything below would then
+        // be recorded against the newer run or a second time: its account, its cost, a
+        // pause the task is not in, a failure it recovered from, or one more attempt
+        // stacked on a live one. The outcome writes repeat this check under their own
+        // lock; this read is what keeps the sandbox and the record from being touched
+        // at all.
+        let task = match self.service.store.get(&task.id).await {
+            Ok(Some(current)) => current,
+            Ok(None) => return Ok(()),
+            Err(error) => return Err(TaskServiceError::Task(error)),
+        };
+        if !self.service.run_can_settle(run).await? {
+            tracing::info!(
+                task = %task.id,
+                run = %run.id,
+                "ignoring a superseded or already-settled run's ending"
+            );
+            return Ok(());
+        }
+        // The run is the one that owns the sandbox, so its ports are this ending's
+        // to release; a refused ending never gets here.
+        self.service.release_ports(&task);
         // What the account looks like is recorded before the run is judged, because
         // the judgement reads it: a refusal is a spent window, not a sentence.
         let task = match stream.as_mut().and_then(|decoder| decoder.take_standing()) {
@@ -261,7 +290,9 @@ where
             None => task,
         };
         if let Some(target) = control {
-            self.service.continue_turn(run).await?;
+            if !self.service.continue_turn(run).await? {
+                return Ok(());
+            }
             // Handing control back ends the take over: the terminal closes before the
             // next run starts, so what the agent says next goes to the signals rather
             // than into a terminal the operator has already left.
@@ -376,14 +407,18 @@ where
                         "a message arrived mid-turn; the next turn reads it"
                     );
                 }
-                self.service.continue_turn(run).await?;
+                if !self.service.continue_turn(run).await? {
+                    return Ok(());
+                }
                 self.watch_agent_run(self.service.continue_autopilot(task).await);
             }
             // An operator's terminal ending is dropping the task off their desk,
             // which is the same thing as handing it back deliberately: the work
             // carries on under autopilot rather than the task being closed out.
             TaskExecutionMode::Operator => {
-                self.service.continue_turn(run).await?;
+                if !self.service.continue_turn(run).await? {
+                    return Ok(());
+                }
                 // Exiting the harness is leaving the terminal: the take over is over,
                 // so the shell that was the operator's closes and the task carries on
                 // headless. Without this the autopilot run that follows paints its

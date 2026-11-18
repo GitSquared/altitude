@@ -125,6 +125,35 @@ where
             .await
             .map_err(TaskServiceError::Task)
     }
+
+    // The ending of a run is written only while that run may still settle: it is
+    // the task's newest run and has no ending recorded yet. Every caller that ends a
+    // run goes through here, so a superseded or replayed ending writes nothing and
+    // is told so with None.
+    pub(crate) async fn record_run_outcome(
+        &self,
+        agent_run: &TaskAgentRun,
+        events: &[TaskHistoryEvent],
+    ) -> Result<Option<Task>, TaskServiceError> {
+        self.store
+            .record_run_outcome(&agent_run.task_id, &agent_run.id, events)
+            .await
+            .map_err(TaskServiceError::Task)
+    }
+
+    // Whether this run may still settle: the task names it as its newest run and has
+    // no ending of its own recorded for it. The outcome write asks again under its
+    // own lock; this read is here so a duplicate or superseded run does not touch
+    // its sandbox.
+    pub(crate) async fn run_can_settle(
+        &self,
+        agent_run: &TaskAgentRun,
+    ) -> Result<bool, TaskServiceError> {
+        self.store
+            .run_can_settle(&agent_run.task_id, &agent_run.id)
+            .await
+            .map_err(TaskServiceError::Task)
+    }
     pub async fn start(
         &self,
         task: Task,
@@ -416,7 +445,12 @@ where
         let error = diagnostic.map_or(error.clone(), |detail| format!("{error}: {detail}"));
         let mut events = vec![run_ended(agent_run, TaskAgentRunOutcome::Failed, exit_code)];
         events.extend(self.stopped_events(error));
-        self.record(&task.id, &events).await
+        match self.record_run_outcome(agent_run, &events).await? {
+            Some(task) => Ok(task),
+            // The task moved on while this ending was in flight, so the newer run's
+            // record stands and this one is left as it was read.
+            None => Ok(task.clone()),
+        }
     }
     pub async fn remove(&self, task: Task) -> Result<(), TaskServiceError> {
         // Record cancellation before cleanup so a concurrent provision cannot resume the work.
