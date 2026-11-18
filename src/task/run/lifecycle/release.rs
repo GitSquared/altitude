@@ -207,10 +207,10 @@ where
                 if let Some((claim_id, owner)) = previous_claim {
                     // A start was claimed and the process that claimed it is gone.
                     // Recovery runs once at startup, before this process claims
-                    // anything, and a task database has one live writer — the client
-                    // holds its lock and a remote is alone in its own data directory —
-                    // so a claim found here belongs to a previous life of this
-                    // database and is given back to the queue.
+                    // anything, and the host that runs it holds the database's
+                    // `Instance` lock — the standalone client and a remote both take
+                    // it before recovery — so a claim found here belongs to a previous
+                    // life of this database and is given back to the queue.
                     tracing::info!(
                         task = %task.id,
                         claim = %claim_id,
