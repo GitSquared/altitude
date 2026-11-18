@@ -125,6 +125,37 @@ where
             .await
             .map_err(TaskServiceError::Task)
     }
+
+    // The ending of a run is written only while that run is still the task's current
+    // one. Every caller that ends a run goes through here, so a callback for a run
+    // the task has moved past writes nothing and is told so with None.
+    pub(crate) async fn record_run_outcome(
+        &self,
+        agent_run: &TaskAgentRun,
+        events: &[TaskHistoryEvent],
+    ) -> Result<Option<Task>, TaskServiceError> {
+        self.store
+            .record_run_outcome(&agent_run.task_id, &agent_run.id, events)
+            .await
+            .map_err(TaskServiceError::Task)
+    }
+
+    // Whether the task still names this run as its current one. The outcome write
+    // asks again under its own lock; this read is here so a run the task has moved
+    // past does not touch its sandbox before being refused.
+    pub(crate) async fn run_is_current(
+        &self,
+        agent_run: &TaskAgentRun,
+    ) -> Result<bool, TaskServiceError> {
+        Ok(self
+            .store
+            .get(&agent_run.task_id)
+            .await
+            .map_err(TaskServiceError::Task)?
+            .is_some_and(|task| {
+                task.facts.current_agent_run_id.as_deref() == Some(agent_run.id.as_str())
+            }))
+    }
     pub async fn start(
         &self,
         task: Task,
@@ -416,7 +447,12 @@ where
         let error = diagnostic.map_or(error.clone(), |detail| format!("{error}: {detail}"));
         let mut events = vec![run_ended(agent_run, TaskAgentRunOutcome::Failed, exit_code)];
         events.extend(self.stopped_events(error));
-        self.record(&task.id, &events).await
+        match self.record_run_outcome(agent_run, &events).await? {
+            Some(task) => Ok(task),
+            // The task moved on while this ending was in flight, so the newer run's
+            // record stands and this one is left as it was read.
+            None => Ok(task.clone()),
+        }
     }
     pub async fn remove(&self, task: Task) -> Result<(), TaskServiceError> {
         // Record cancellation before cleanup so a concurrent provision cannot resume the work.

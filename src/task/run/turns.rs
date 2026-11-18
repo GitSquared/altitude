@@ -401,23 +401,24 @@ where
         agent_run: &TaskAgentRun,
         reason: TaskExecutionPauseReason,
     ) -> Result<Task, TaskServiceError> {
+        if !self.run_is_current(agent_run).await? {
+            return Ok(task.clone());
+        }
         let snapshot_path = self.suspend_capsule(task).await?;
-        let task = self
-            .record_snapshot(
-                task,
-                &[
-                    run_ended(agent_run, TaskAgentRunOutcome::AwaitingOperator, Some(0)),
-                    TaskHistoryEvent::ExecutionPaused {
-                        execution_status: TaskExecutionStatus::Paused,
-                        sandbox_available: false,
-                        snapshot_available: true,
-                        execution_pause_reason: reason,
-                        snapshot_path,
-                    },
-                ],
-            )
+        let events = [
+            run_ended(agent_run, TaskAgentRunOutcome::AwaitingOperator, Some(0)),
+            TaskHistoryEvent::ExecutionPaused {
+                execution_status: TaskExecutionStatus::Paused,
+                sandbox_available: false,
+                snapshot_available: true,
+                execution_pause_reason: reason,
+                snapshot_path,
+            },
+        ];
+        let updated = self
+            .record_run_outcome_snapshot(task, agent_run, &events)
             .await?;
-        Ok(task)
+        Ok(updated.unwrap_or_else(|| task.clone()))
     }
 
     // The account's limit is a wait, not a loss: the capsule is given back so the
@@ -430,27 +431,28 @@ where
         clears_at_ms: i64,
         exit_code: Option<i32>,
     ) -> Result<Task, TaskServiceError> {
+        if !self.run_is_current(agent_run).await? {
+            return Ok(task.clone());
+        }
         let snapshot_path = self.suspend_capsule(task).await?;
-        let task = self
-            .record_snapshot(
-                task,
-                &[
-                    run_ended(agent_run, TaskAgentRunOutcome::Limited, exit_code),
-                    TaskHistoryEvent::ExecutionPaused {
-                        execution_status: TaskExecutionStatus::Paused,
-                        sandbox_available: false,
-                        snapshot_available: true,
-                        execution_pause_reason: TaskExecutionPauseReason::AwaitingLimit,
-                        snapshot_path,
-                    },
-                    TaskHistoryEvent::LimitHeld {
-                        window,
-                        clears_at_ms,
-                    },
-                ],
-            )
+        let events = [
+            run_ended(agent_run, TaskAgentRunOutcome::Limited, exit_code),
+            TaskHistoryEvent::ExecutionPaused {
+                execution_status: TaskExecutionStatus::Paused,
+                sandbox_available: false,
+                snapshot_available: true,
+                execution_pause_reason: TaskExecutionPauseReason::AwaitingLimit,
+                snapshot_path,
+            },
+            TaskHistoryEvent::LimitHeld {
+                window,
+                clears_at_ms,
+            },
+        ];
+        let updated = self
+            .record_run_outcome_snapshot(task, agent_run, &events)
             .await?;
-        Ok(task)
+        Ok(updated.unwrap_or_else(|| task.clone()))
     }
 
     pub(crate) async fn hold_review_checks(
@@ -458,6 +460,11 @@ where
         task: &Task,
         agent_run: Option<&TaskAgentRun>,
     ) -> Result<Task, TaskServiceError> {
+        if let Some(agent_run) = agent_run
+            && !self.run_is_current(agent_run).await?
+        {
+            return Ok(task.clone());
+        }
         let snapshot_path = self.suspend_capsule(task).await?;
         let mut events = Vec::new();
         if let Some(agent_run) = agent_run {
@@ -474,8 +481,15 @@ where
             execution_pause_reason: TaskExecutionPauseReason::AwaitingReviewChecks,
             snapshot_path,
         });
-        let task = self.record_snapshot(task, &events).await?;
-        Ok(task)
+        match agent_run {
+            Some(agent_run) => {
+                let updated = self
+                    .record_run_outcome_snapshot(task, agent_run, &events)
+                    .await?;
+                Ok(updated.unwrap_or_else(|| task.clone()))
+            }
+            None => self.record_snapshot(task, &events).await,
+        }
     }
 
     async fn suspend_capsule(&self, task: &Task) -> Result<String, TaskServiceError> {
@@ -547,16 +561,17 @@ where
             .await
             .map_err(TaskServiceError::Isolation)
     }
-    pub async fn continue_turn(&self, agent_run: &TaskAgentRun) -> Result<(), TaskServiceError> {
-        self.record(
-            &agent_run.task_id,
-            &[run_ended(
+    pub async fn continue_turn(&self, agent_run: &TaskAgentRun) -> Result<bool, TaskServiceError> {
+        Ok(self
+            .record_run_outcome(
                 agent_run,
-                TaskAgentRunOutcome::Continued,
-                Some(0),
-            )],
-        )
-        .await?;
-        Ok(())
+                &[run_ended(
+                    agent_run,
+                    TaskAgentRunOutcome::Continued,
+                    Some(0),
+                )],
+            )
+            .await?
+            .is_some())
     }
 }

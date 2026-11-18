@@ -368,6 +368,28 @@ where
         events: &[TaskHistoryEvent],
     ) -> Result<Task, TaskServiceError> {
         let updated = self.record(&task.id, events).await?;
+        self.remove_superseded_snapshot(task, &updated).await;
+        Ok(updated)
+    }
+
+    // The same write as `record_snapshot`, guarded by the run it ends: pausing for a
+    // review, a limit or the operator is a terminal outcome like any other, so it is
+    // refused once the task has moved past the run and the snapshot it named is never
+    // left behind for a pause that was not recorded.
+    pub(crate) async fn record_run_outcome_snapshot(
+        &self,
+        task: &Task,
+        agent_run: &TaskAgentRun,
+        events: &[TaskHistoryEvent],
+    ) -> Result<Option<Task>, TaskServiceError> {
+        let Some(updated) = self.record_run_outcome(agent_run, events).await? else {
+            return Ok(None);
+        };
+        self.remove_superseded_snapshot(task, &updated).await;
+        Ok(Some(updated))
+    }
+
+    async fn remove_superseded_snapshot(&self, task: &Task, updated: &Task) {
         if let Some(previous) = &task.facts.snapshot_path
             && task.facts.snapshot_available
             && updated.facts.snapshot_path.as_ref() != Some(previous)
@@ -378,7 +400,6 @@ where
         {
             tracing::warn!(task_id = %task.id, %error, "could not remove superseded task snapshot");
         }
-        Ok(updated)
     }
 
     pub(crate) async fn fail(&self, task: &Task, error: String) -> Result<Task, TaskServiceError> {

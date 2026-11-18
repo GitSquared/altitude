@@ -59,6 +59,15 @@ SELECT tasks.id, tasks.agent_kind, tasks.host,
      WHERE task_id = tasks.id
        AND json_type(payload, '$.data.execution_mode') IS NOT NULL
      ORDER BY sequence DESC LIMIT 1) AS execution_mode,
+    -- The run a task is on now: the newest one it started, which is the run its
+    -- next terminal outcome must name. A callback for an earlier run can be
+    -- delivered after a later attempt began, and what it would record — a pause,
+    -- a failure, a continuation — belongs to the record's past.
+    (SELECT payload ->> '$.data.agent_run_id'
+     FROM task_event_logs
+     WHERE task_id = tasks.id
+       AND event_type = 'agent_run_started'
+     ORDER BY sequence DESC LIMIT 1) AS current_agent_run_id,
     (SELECT payload ->> '$.data.sandbox_id'
      FROM task_event_logs
      WHERE task_id = tasks.id

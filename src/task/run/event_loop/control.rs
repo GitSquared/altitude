@@ -80,11 +80,22 @@ where
         true
     }
 
-    pub(super) fn take_active_run(&self, task_id: &str) -> Option<ActiveRun> {
-        self.runs
-            .lock()
-            .expect("task run lock poisoned")
-            .remove(task_id)
+    // Remove the entry only if it is this run's. A callback for a run the task has
+    // moved past must not evict the newer run's entry, or the machine would forget a
+    // run it is still holding.
+    pub(super) fn take_active_run(&self, task_id: &str, agent_run_id: &str) -> Option<ActiveRun> {
+        let mut runs = self.runs.lock().expect("task run lock poisoned");
+        match runs.get(task_id) {
+            Some(active) if active.agent_run_id == agent_run_id => runs.remove(task_id),
+            Some(_) => {
+                tracing::debug!(
+                    task_id = %task_id,
+                    "leaving a newer run in place for an earlier run's ending"
+                );
+                None
+            }
+            None => None,
+        }
     }
 
     pub(super) fn take_control_request(
