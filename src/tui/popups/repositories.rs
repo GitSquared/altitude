@@ -1,4 +1,4 @@
-use crossterm::event::{KeyCode, KeyEvent, MouseEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
 use ratatui::{
     Frame,
     layout::Rect,
@@ -12,7 +12,7 @@ use crate::{
         keys::is_secondary,
         widgets::{
             palette,
-            select::{Offer, Select},
+            select::{Offer, Pointer, Select},
             shimmer::shimmer,
         },
     },
@@ -93,15 +93,17 @@ impl Repositories {
 
     pub fn mouse(&mut self, mouse: MouseEvent) -> Option<Repository> {
         let rows = mem::take(&mut self.rows);
-        if !self.select.mouse(mouse, &rows) {
-            self.rows = rows;
-            return None;
+        let pointer = self.select.pointer(mouse, &rows);
+        self.rows = rows;
+        // A click on a row is that row's press, so it takes what was under the
+        // pointer the way enter does rather than by a second road.
+        match pointer {
+            Pointer::Row => match self.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)) {
+                Key::Chosen(repository) => Some(repository),
+                _ => None,
+            },
+            Pointer::Wheel | Pointer::Away => None,
         }
-        if self.select.is_open() {
-            self.rows = rows;
-            return None;
-        }
-        self.select.chosen_value().cloned()
     }
 
     pub fn draw(&mut self, frame: &mut Frame, area: Rect, anchor: Rect, tick: Option<usize>) {

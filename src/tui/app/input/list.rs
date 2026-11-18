@@ -1,9 +1,10 @@
 use std::{io, mem};
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use tokio::sync::mpsc;
 
 use crate::{
+    credentials::CredentialShellEvent,
     isolation::IsolationEngine,
     task::TaskService,
     tui::keys::{is_remove, is_secondary},
@@ -239,20 +240,59 @@ impl App {
         Ok(false)
     }
 
-    pub(in crate::tui) fn started_mouse(&mut self, mouse: MouseEvent) {
+    pub(in crate::tui) async fn started_mouse<E>(
+        &mut self,
+        mouse: MouseEvent,
+        task_service: &TaskService<E>,
+        events: &mpsc::UnboundedSender<CredentialShellEvent>,
+        repository_lists: &mpsc::UnboundedSender<RepositoryListReply>,
+        tracker_connects: &mpsc::UnboundedSender<TrackerConnectReply>,
+    ) where
+        E: IsolationEngine + Clone + 'static,
+    {
         let Foreground::GetStarted(mut panel) = mem::take(&mut self.foreground) else {
             return;
         };
-        let Some(browser) = panel.repositories.as_mut() else {
+        let clicked = matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left));
+        // A shell being prepared and the commits form hold the card the way they
+        // hold the keys: what the pointer is over is not what the card shows.
+        let held = matches!(self.credential_shell, CredentialShellState::Opening { .. })
+            || panel.commits.open;
+        if held {
             self.foreground = Foreground::GetStarted(panel);
             return;
-        };
-        if let Some(repository) = browser.mouse(mouse) {
-            panel.repositories = None;
-            self.bind_project_repository(&repository.url);
-            panel.choose_repository(&repository);
-            panel.focus = SetupFocus::Ready;
+        }
+        let mut press = None;
+        if let Some(browser) = panel.repositories.as_mut() {
+            if let Some(repository) = browser.mouse(mouse) {
+                panel.repositories = None;
+                self.bind_project_repository(&repository.url);
+                panel.choose_repository(&repository);
+                panel.focus = SetupFocus::Ready;
+            }
+        } else if let Some(key) = panel.list_mouse(mouse) {
+            press = Some(key);
+        } else if clicked && let Some(target) = panel.hit(mouse.column, mouse.row) {
+            // A name being typed is spent by a click elsewhere, the way tab
+            // spends it, so one click leaves the row and opens the next.
+            if panel.name_editing && target != SetupFocus::Name {
+                self.finish_name(&mut panel);
+            }
+            panel.focus = target;
+            press = Some(KeyCode::Enter);
         }
         self.foreground = Foreground::GetStarted(panel);
+        // What a row means is stated once, in the keys: a click says which row it
+        // is on and then presses it.
+        if let Some(key) = press {
+            self.started_key(
+                KeyEvent::new(key, KeyModifiers::NONE),
+                task_service,
+                events,
+                repository_lists,
+                tracker_connects,
+            )
+            .await;
+        }
     }
 }

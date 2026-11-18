@@ -121,7 +121,14 @@ where
             return Ok(false);
         }
         if matches!(app.foreground, Foreground::GetStarted(_)) {
-            app.started_mouse(mouse);
+            app.started_mouse(
+                mouse,
+                task_service,
+                credential_events,
+                repositories,
+                tracker_connects,
+            )
+            .await;
             return Ok(false);
         }
         if let Some(id) = app.open_shell().cloned() {

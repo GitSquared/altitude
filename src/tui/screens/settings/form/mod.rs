@@ -13,7 +13,7 @@ use crate::{
         widgets::{
             chrome,
             focus::FocusRing,
-            select::Select,
+            select::{Pointer, Select},
             text::{Field, TextBox},
         },
     },
@@ -542,18 +542,24 @@ impl Form {
         }
     }
 
-    pub fn pill_mouse(&mut self, mouse: MouseEvent) -> bool {
+    // What a click or a wheel said to the pill's own list, if one is open. The row
+    // is pointed at rather than taken, because taking it is a press and the press is
+    // where what a choice means is said.
+    pub fn pill_pointer(&mut self, mouse: MouseEvent) -> Option<Pointer> {
+        if !self.list_open() {
+            return None;
+        }
         let rows = mem::take(&mut self.pill_rows);
-        let taken = match self.focus {
-            Focus::Agent => self.agent.mouse(mouse, &rows),
-            Focus::VcsIdentity => self.vcs.mouse(mouse, &rows),
-            Focus::TrackerIdentity => self.tracker.mouse(mouse, &rows),
-            Focus::Identity => self.identity.mouse(mouse, &rows),
-            Focus::Host => self.host.mouse(mouse, &rows),
-            _ => false,
+        let pointer = match self.focus {
+            Focus::Agent => self.agent.pointer(mouse, &rows),
+            Focus::VcsIdentity => self.vcs.pointer(mouse, &rows),
+            Focus::TrackerIdentity => self.tracker.pointer(mouse, &rows),
+            Focus::Identity => self.identity.pointer(mouse, &rows),
+            Focus::Host => self.host.pointer(mouse, &rows),
+            _ => Pointer::Away,
         };
         self.pill_rows = rows;
-        taken
+        Some(pointer)
     }
 
     fn draw_list(&self, frame: &mut Frame, area: Rect, anchor: Rect) -> Vec<(Rect, usize)> {

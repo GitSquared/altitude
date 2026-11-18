@@ -44,12 +44,22 @@ fn pill_in(buffer: &mut Buffer, area: Rect, spans: &[Span<'static>], focused: bo
         .render(area, buffer);
 }
 
+// What the pointer said to a list. A row is not taken here: taking it is a press,
+// and what a press means belongs to the screen that drew the list.
+pub enum Pointer {
+    Row,
+    Wheel,
+    Away,
+}
+
 // A list that opens over the thing it changes. It owns every key while it is open,
 // escape included, and that is one rule for every menu however it is drawn, so it is
 // stated here rather than in each screen that draws one.
 pub trait Menu {
     fn is_open(&self) -> bool;
     fn key(&mut self, key: KeyEvent);
+    // The same question as a key, in the terms a pointer speaks.
+    fn pointer(&mut self, mouse: MouseEvent, rows: &[(Rect, usize)]) -> Pointer;
 }
 
 impl<T> Menu for Select<T> {
@@ -59,6 +69,10 @@ impl<T> Menu for Select<T> {
 
     fn key(&mut self, key: KeyEvent) {
         Select::handle_key(self, key);
+    }
+
+    fn pointer(&mut self, mouse: MouseEvent, rows: &[(Rect, usize)]) -> Pointer {
+        Select::pointer(self, mouse, rows)
     }
 }
 
@@ -143,33 +157,39 @@ impl<T> Select<T> {
         self.offers.is_empty()
     }
 
-    pub fn mouse(&mut self, mouse: MouseEvent, rows: &[(Rect, usize)]) -> bool {
+    pub fn pointer(&mut self, mouse: MouseEvent, rows: &[(Rect, usize)]) -> Pointer {
         if !self.open {
-            return false;
+            return Pointer::Away;
         }
         match mouse.kind {
             MouseEventKind::ScrollUp => {
                 self.scroll(true);
-                true
+                Pointer::Wheel
             }
             MouseEventKind::ScrollDown => {
                 self.scroll(false);
-                true
+                Pointer::Wheel
             }
             MouseEventKind::Down(MouseButton::Left) => {
-                let Some((_, index)) = rows.iter().find(|(area, _)| {
-                    mouse.column >= area.x
+                let Some(row) = rows.iter().find_map(|(area, index)| {
+                    (mouse.column >= area.x
                         && mouse.column < area.right()
                         && mouse.row >= area.y
-                        && mouse.row < area.bottom()
+                        && mouse.row < area.bottom())
+                    .then_some(*index)
                 }) else {
-                    return false;
+                    return Pointer::Away;
                 };
-                self.choose(*index);
-                self.close();
-                true
+                let matches = self.matches();
+                // The row the pointer is on, in the terms a list speaks: the
+                // offer's index, which is the same number however it is filtered.
+                let Some(at) = matches.iter().position(|offer| *offer == row) else {
+                    return Pointer::Away;
+                };
+                self.at = at;
+                Pointer::Row
             }
-            _ => false,
+            _ => Pointer::Away,
         }
     }
 
