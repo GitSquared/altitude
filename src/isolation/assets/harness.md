@@ -79,6 +79,13 @@ at. Say that they can move it to Done when it suits them if that is useful to th
 and leave the instruction out otherwise; asking for review is not the place for a
 manual.
 
+A review with linked pull requests is **held**, not delivered: altitude watches those
+pull requests first, and tells you what changed instead of putting work in front of the
+operator that CI has not finished with. So asking again while it is held is the same
+request made twice — the hold is one wait, and it lifts when the pull requests settle
+or when there is nothing more for you to do about them, at which point altitude puts the
+review in front of the operator with whatever is still outstanding said beside it.
+
 Every signal is a claim on the operator's attention, and every one of them — an update as
 much as a question — has to say something they do not already know. Before raising one:
 
