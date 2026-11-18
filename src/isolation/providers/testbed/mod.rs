@@ -412,6 +412,11 @@ impl TestbedIsolation {
         Ok(())
     }
 
+    // A checkpoint carries two trees — the sandbox's own disk under `root/` and the
+    // project checkout under `checkout/` — and each entry goes back to the destination
+    // it came from. The entry's name is not trusted: it may climb out of its section,
+    // or lie beneath a directory that is a link pointing elsewhere, so the destination
+    // is worked out and checked before anything is written through it.
     pub(crate) fn restore_sandbox(
         &self,
         id: &str,
@@ -432,19 +437,90 @@ impl TestbedIsolation {
             let mut entry = entry.map_err(io_error)?;
             let path = entry.path().map_err(io_error)?.into_owned();
             let mut components = path.components();
-            let base = components.next();
-            let rest = components.as_path();
-            let target = match base {
-                Some(Component::Normal(name)) if name == "root" => root.join(rest),
+            let base = match components.next() {
+                Some(Component::Normal(name)) if name == "root" => &root,
                 Some(Component::Normal(name)) if name == "checkout" && checkout_host.is_some() => {
-                    checkout_host.as_ref().expect("checked above").join(rest)
+                    checkout_host.as_ref().expect("checked above")
                 }
                 _ => continue,
             };
+            let rest = components.as_path();
+            // What is carried is a tree, so an entry that climbs out of it is not one.
+            // The handover archive is read by the same rule.
+            let climbs_out = rest.components().any(|part| {
+                matches!(
+                    part,
+                    Component::ParentDir | Component::RootDir | Component::Prefix(_)
+                )
+            });
+            if climbs_out {
+                return Err(IsolationError::new(format!(
+                    "a checkpoint entry escapes its destination: {}",
+                    path.display()
+                )));
+            }
+            // The section's own directory is already there; no entry names it.
+            if rest.as_os_str().is_empty() {
+                continue;
+            }
+            let target = base.join(rest);
+            ensure_parent_within(base, &target)?;
             entry.unpack(&target).map_err(io_error)?;
         }
         Ok(())
     }
+}
+
+// The chain of directories a restored entry lives beneath. `pack_home` writes files
+// without their directories, so a transcript under `projects/-/` or a git object
+// under `.git/objects/` has none of its parents, and tar's `Entry::unpack` will not
+// make them. Each step is created shallowest first, and a step's parent is
+// canonicalized — which follows a link — and checked before anything is made, and the
+// entry's parent is checked once more before it is written through, so a link the
+// checkpoint carried cannot redirect a restore out of its destination.
+fn ensure_parent_within(base: &Path, target: &Path) -> Result<(), IsolationError> {
+    if !base.exists() {
+        fs::create_dir_all(base).map_err(io_error)?;
+    }
+    let base = base.canonicalize().map_err(io_error)?;
+    let parent = target.parent().ok_or_else(|| {
+        IsolationError::new(format!(
+            "a checkpoint entry has no destination to restore into: {}",
+            target.display()
+        ))
+    })?;
+    let mut missing = Vec::new();
+    let mut ancestor = parent;
+    while ancestor.symlink_metadata().is_err() {
+        missing.push(ancestor.to_path_buf());
+        ancestor = ancestor.parent().ok_or_else(|| {
+            IsolationError::new(format!(
+                "a checkpoint entry reaches outside its destination: {}",
+                target.display()
+            ))
+        })?;
+    }
+    for directory in missing.iter().rev() {
+        if let Some(parent) = directory.parent() {
+            ensure_inside(&base, parent)?;
+        }
+        fs::create_dir(directory).map_err(io_error)?;
+    }
+    ensure_inside(&base, parent)
+}
+
+// Whether a path a restore is about to write through still resolves inside its
+// destination. Canonicalizing follows a link, so an entry beneath one the checkpoint
+// carried is refused instead of followed out of the tree.
+fn ensure_inside(base: &Path, path: &Path) -> Result<(), IsolationError> {
+    let resolved = path.canonicalize().map_err(io_error)?;
+    if !resolved.starts_with(base) {
+        return Err(IsolationError::new(format!(
+            "a checkpoint entry would restore outside its destination: {}",
+            path.display()
+        )));
+    }
+    Ok(())
 }
 
 fn pack_home(builder: &mut Builder<fs::File>, entry: &str, home: &Path) -> Result<(), String> {
