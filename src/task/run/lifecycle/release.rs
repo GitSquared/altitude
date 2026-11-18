@@ -374,8 +374,8 @@ where
 
     // The same write as `record_snapshot`, guarded by the run it ends: pausing for a
     // review, a limit or the operator is a terminal outcome like any other, so it is
-    // refused once the task has moved past the run and the snapshot it named is never
-    // left behind for a pause that was not recorded.
+    // refused once the run has ended or the task has moved past it, and no snapshot
+    // is left behind for a pause that was not recorded.
     pub(crate) async fn record_run_outcome_snapshot(
         &self,
         task: &Task,

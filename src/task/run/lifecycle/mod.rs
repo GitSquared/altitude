@@ -126,9 +126,10 @@ where
             .map_err(TaskServiceError::Task)
     }
 
-    // The ending of a run is written only while that run is still the task's current
-    // one. Every caller that ends a run goes through here, so a callback for a run
-    // the task has moved past writes nothing and is told so with None.
+    // The ending of a run is written only while that run may still settle: it is
+    // the task's newest run and has no ending recorded yet. Every caller that ends a
+    // run goes through here, so a superseded or replayed ending writes nothing and
+    // is told so with None.
     pub(crate) async fn record_run_outcome(
         &self,
         agent_run: &TaskAgentRun,
@@ -140,21 +141,18 @@ where
             .map_err(TaskServiceError::Task)
     }
 
-    // Whether the task still names this run as its current one. The outcome write
-    // asks again under its own lock; this read is here so a run the task has moved
-    // past does not touch its sandbox before being refused.
-    pub(crate) async fn run_is_current(
+    // Whether this run may still settle: the task names it as its newest run and has
+    // no ending of its own recorded for it. The outcome write asks again under its
+    // own lock; this read is here so a duplicate or superseded run does not touch
+    // its sandbox.
+    pub(crate) async fn run_can_settle(
         &self,
         agent_run: &TaskAgentRun,
     ) -> Result<bool, TaskServiceError> {
-        Ok(self
-            .store
-            .get(&agent_run.task_id)
+        self.store
+            .run_can_settle(&agent_run.task_id, &agent_run.id)
             .await
-            .map_err(TaskServiceError::Task)?
-            .is_some_and(|task| {
-                task.facts.current_agent_run_id.as_deref() == Some(agent_run.id.as_str())
-            }))
+            .map_err(TaskServiceError::Task)
     }
     pub async fn start(
         &self,

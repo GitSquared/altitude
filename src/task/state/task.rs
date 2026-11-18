@@ -36,9 +36,6 @@ pub struct TaskFacts {
     pub execution_status: TaskExecutionStatus,
     pub execution_pause_reason: Option<TaskExecutionPauseReason>,
     pub execution_mode: TaskExecutionMode,
-    // The run a terminal outcome has to name to be accepted. None before the task's
-    // first run, and a newer run replaces it the moment it starts.
-    pub current_agent_run_id: Option<String>,
     pub sandbox_id: Option<String>,
     pub sandbox_available: bool,
     pub snapshot_path: Option<String>,

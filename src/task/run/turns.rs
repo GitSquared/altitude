@@ -401,7 +401,7 @@ where
         agent_run: &TaskAgentRun,
         reason: TaskExecutionPauseReason,
     ) -> Result<Task, TaskServiceError> {
-        if !self.run_is_current(agent_run).await? {
+        if !self.run_can_settle(agent_run).await? {
             return Ok(task.clone());
         }
         let snapshot_path = self.suspend_capsule(task).await?;
@@ -431,7 +431,7 @@ where
         clears_at_ms: i64,
         exit_code: Option<i32>,
     ) -> Result<Task, TaskServiceError> {
-        if !self.run_is_current(agent_run).await? {
+        if !self.run_can_settle(agent_run).await? {
             return Ok(task.clone());
         }
         let snapshot_path = self.suspend_capsule(task).await?;
@@ -461,7 +461,7 @@ where
         agent_run: Option<&TaskAgentRun>,
     ) -> Result<Task, TaskServiceError> {
         if let Some(agent_run) = agent_run
-            && !self.run_is_current(agent_run).await?
+            && !self.run_can_settle(agent_run).await?
         {
             return Ok(task.clone());
         }

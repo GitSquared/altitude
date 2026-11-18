@@ -104,8 +104,12 @@ where
                             .take_active_run(&task.id, &run.id)
                             .is_some_and(|active| active.suspending);
                         let control = event_loop.take_control_request(&task.id, &run.id);
-                        service.release_ports(&task);
                         if suspending {
+                            // The run taken above is this task's current one, and a
+                            // suspension is tearing its sandbox down, so its ports go
+                            // with it. A superseded run never reaches here and never
+                            // releases a sandbox a newer turn is still using.
+                            service.release_ports(&task);
                             tracing::debug!(task_id = %task.id, "command ended during intentional suspension");
                             return;
                         }
@@ -209,26 +213,31 @@ where
         mut stream: Option<Box<dyn TaskStreamDecoder>>,
         event: CommandEvent,
     ) -> Result<(), TaskServiceError> {
-        // The run that is ending must still be the task's current one. A callback can
-        // be delivered after a later attempt has begun — a takeover, or a continuation
-        // launched from an earlier callback — and everything below would then be
-        // recorded against the newer run: its account, its cost, a pause the task is
-        // not in, a failure it recovered from, or one more attempt stacked on a live
-        // one. The outcome writes repeat this check under their own lock; this read is
-        // what keeps the sandbox and the record from being touched at all.
+        // The run that is ending must still be the task's current one and must not
+        // have ended already. A callback can be delivered after a later attempt has
+        // begun — a takeover, or a continuation launched from an earlier callback — or
+        // a duplicate can arrive for the same attempt, and everything below would then
+        // be recorded against the newer run or a second time: its account, its cost, a
+        // pause the task is not in, a failure it recovered from, or one more attempt
+        // stacked on a live one. The outcome writes repeat this check under their own
+        // lock; this read is what keeps the sandbox and the record from being touched
+        // at all.
         let task = match self.service.store.get(&task.id).await {
             Ok(Some(current)) => current,
             Ok(None) => return Ok(()),
             Err(error) => return Err(TaskServiceError::Task(error)),
         };
-        if task.facts.current_agent_run_id.as_deref() != Some(run.id.as_str()) {
+        if !self.service.run_can_settle(run).await? {
             tracing::info!(
                 task = %task.id,
                 run = %run.id,
-                "ignoring a superseded run's ending"
+                "ignoring a superseded or already-settled run's ending"
             );
             return Ok(());
         }
+        // The run is the one that owns the sandbox, so its ports are this ending's
+        // to release; a refused ending never gets here.
+        self.service.release_ports(&task);
         // What the account looks like is recorded before the run is judged, because
         // the judgement reads it: a refusal is a spent window, not a sentence.
         let task = match stream.as_mut().and_then(|decoder| decoder.take_standing()) {
