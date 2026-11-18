@@ -20,7 +20,7 @@ impl TaskStore {
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(TaskError::Database)?;
-        let Some(task) = Self::read_task_optional(&mut transaction, task_id).await? else {
+        let Some(task) = Self::read_task_if_kept(&mut transaction, task_id).await? else {
             transaction.commit().await.map_err(TaskError::Database)?;
             return Ok(None);
         };
@@ -110,7 +110,7 @@ impl TaskStore {
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(TaskError::Database)?;
-        let Some(task) = Self::read_task_optional(&mut transaction, task_id).await? else {
+        let Some(task) = Self::read_task_if_kept(&mut transaction, task_id).await? else {
             transaction.commit().await.map_err(TaskError::Database)?;
             return Ok(TransferStaging::Missing);
         };

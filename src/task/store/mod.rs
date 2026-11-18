@@ -310,6 +310,24 @@ impl TaskStore {
         .map(|row| row.map(Task::from))
     }
 
+    // A row that is still in play. A claim or a staging picks its candidate from a
+    // list that already hid removed tasks, so the candidate has to be re-checked
+    // against removal under the write lock rather than trusted from the list.
+    async fn read_task_if_kept(
+        transaction: &mut Transaction<'_, Sqlite>,
+        task_id: &str,
+    ) -> Result<Option<Task>, TaskError> {
+        sqlx::query_as::<_, TaskRow>(concat!(
+            include_str!("read_task.sql"),
+            " WHERE tasks.id = ? AND tasks.removed_at_ms IS NULL"
+        ))
+        .bind(task_id)
+        .fetch_optional(&mut **transaction)
+        .await
+        .map_err(TaskError::Database)
+        .map(|row| row.map(Task::from))
+    }
+
     pub async fn request_control(
         &self,
         task_id: &str,
