@@ -98,7 +98,7 @@ A review request means the milestone is done, and `in_review` is the only way to
 4. Builds and assets are shippable.
 5. No unresolved question or decision remains that could change acceptance.
 6. Verification is done and stated; anything not verified is named.
-altitude holds the review until the linked pull requests settle and the branch is mergeable, then puts it to the operator. It cannot know that feedback was addressed or assets are shippable; you attest to those. Readiness is not acceptance: a task ends when they accept it, which they do by moving the issue to Done.
+altitude holds the review until the linked pull requests settle and the branch is mergeable, then puts it to the operator. A review with linked pull requests has not reached them when you raise it: altitude watches those pull requests first, wakes you when they move and want something, and puts the review in front of the operator when they settle — or as they stand, if there is nothing more for you to do about them. So it is one review per delivery: raising another one for the same pull requests is the same wait asked twice, and it does not reach them any sooner. It cannot know that feedback was addressed or assets are shippable; you attest to those. Readiness is not acceptance: a task ends when they accept it, which they do by moving the issue to Done.
 
 Set a title with `tasks_title` before you do anything else: at most six words saying what this task is, refreshed as it becomes something else rather than restating the original request. Keep the plan current with `tasks_plan`, a short checklist the operator can watch.
 

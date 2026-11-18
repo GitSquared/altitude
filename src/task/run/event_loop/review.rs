@@ -9,9 +9,12 @@ use crate::{
         DeferredReview, Task, TaskAskAuthor, TaskAskQuestion, TaskExecutionPauseReason,
         TaskExecutionStatus, TaskHistoryEvent, TaskInput, TaskInputAuthor, TaskInputSource,
     },
-    vcs::{ContributionObservation, ContributionOutlook, ContributionReadiness, now_ms},
+    vcs::{
+        ContributionObservation, ContributionOutlook, ContributionReadiness, LatestComment, now_ms,
+    },
 };
 
+use super::super::lifecycle::notice_event;
 use super::{TaskEventLoop, TaskExecutionUpdate, watcher_key};
 
 impl<E> TaskEventLoop<E>
@@ -137,21 +140,30 @@ where
         deferred: &DeferredReview,
         observations: &[ContributionObservation],
     ) {
+        // A hold is only ever looked at for a task that has stopped, and that is
+        // what makes "the agent was already told this" mean "the agent is done
+        // with it": there is no turn of its own still coming.
+        debug_assert_eq!(
+            task.facts.execution_status,
+            TaskExecutionStatus::Paused,
+            "a held review is watched for a task that has stopped"
+        );
         let outlook = ContributionOutlook::of(observations, now_ms());
         match outlook.readiness {
             ContributionReadiness::NeedsAction => {
                 let news = news(&outlook.needing_action);
                 let prompt = wake_prompt(&news);
-                // A wake says something. If it would say what the machine already
-                // said, and nothing on the pull requests has moved since, there is
-                // nothing to say: the hold stands, the poll keeps looking, and the
-                // next thing anybody hears is the change itself. Saying it again
-                // would spend a turn to get the same answer.
+                // The machine has said this and the agent has stopped without saying
+                // anything else about it. A hold that waits for a state which will not
+                // move is a task the operator never hears about, so the review goes to
+                // them now, with what is still outstanding said beside it.
                 if task.facts.last_wake_news.as_deref() == Some(news.as_str()) {
-                    tracing::debug!(
+                    tracing::info!(
                         task.id = %task.id,
-                        "a linked pull request still needs attention, and the machine has already said so"
+                        "a held review outlived the agent's answer; handing it to the operator"
                     );
+                    self.deliver_review(task, deferred.signal.clone(), Some(&outlook))
+                        .await;
                     return;
                 }
                 if self.wake_review(task, deferred, &news, &prompt).await {
@@ -161,7 +173,8 @@ where
                 }
             }
             ContributionReadiness::Ready => {
-                self.deliver_review(task, deferred.signal.clone()).await
+                self.deliver_review(task, deferred.signal.clone(), None)
+                    .await
             }
             // Checks are still running. The wait is already recorded, and the
             // review's own cadence decides when it is worth looking again.
@@ -181,21 +194,27 @@ where
             %reason,
             "giving up on linked contributions"
         );
-        self.deliver_review(task, unreadable(&deferred.signal, reason))
+        self.deliver_review(task, unreadable(&deferred.signal, reason), None)
             .await;
     }
 
-    pub(super) async fn deliver_review(&self, task: &Task, signal: TaskAskQuestion) {
-        let events = [
-            TaskHistoryEvent::OperatorSignalRaised { signal },
-            TaskHistoryEvent::ExecutionPaused {
-                execution_status: TaskExecutionStatus::Paused,
-                sandbox_available: false,
-                snapshot_available: task.facts.snapshot_available,
-                execution_pause_reason: TaskExecutionPauseReason::AwaitingOperator,
-                snapshot_path: task.facts.snapshot_path.clone().unwrap_or_default(),
-            },
-        ];
+    pub(super) async fn deliver_review(
+        &self,
+        task: &Task,
+        signal: TaskAskQuestion,
+        outstanding: Option<&ContributionOutlook>,
+    ) {
+        let mut events = vec![TaskHistoryEvent::OperatorSignalRaised { signal }];
+        if let Some(outlook) = outstanding {
+            events.extend(notice_event(task, &still_outstanding(task, outlook)));
+        }
+        events.push(TaskHistoryEvent::ExecutionPaused {
+            execution_status: TaskExecutionStatus::Paused,
+            sandbox_available: false,
+            snapshot_available: task.facts.snapshot_available,
+            execution_pause_reason: TaskExecutionPauseReason::AwaitingOperator,
+            snapshot_path: task.facts.snapshot_path.clone().unwrap_or_default(),
+        });
         let result = self.service.record(&task.id, &events).await;
         match &result {
             Ok(_) => tracing::info!(task_id = %task.id, "delivered a held review request"),
@@ -278,4 +297,42 @@ where
 // recorded have to be the same words for the comparison to mean anything.
 fn wake_prompt(news: &str) -> String {
     format!("altitude checked the pull requests linked to this task:\n\n{news}")
+}
+
+// The operator is being asked to review work whose pull requests are not ready, and
+// the agent's words say the work is finished: what is still outstanding is the
+// machine's to say, because only it looked. It says what the provider said rather
+// than judging it again, so the two accounts cannot disagree.
+fn still_outstanding(task: &Task, outlook: &ContributionOutlook) -> String {
+    let said: Vec<String> = outlook
+        .needing_action
+        .iter()
+        .map(|observation| {
+            let reference = task
+                .code_contributions
+                .iter()
+                .find(|contribution| contribution.id == observation.contribution_id)
+                .map(|contribution| format!("PR #{}", contribution.reference))
+                .unwrap_or_else(|| observation.contribution_id.clone());
+            let mut facts = vec![observation.summary.clone()];
+            if let Some(comment) = &observation.state.latest_comment {
+                facts.push(format!("newest comment by {}", who_wrote(comment)));
+            }
+            format!("{reference} — {}", facts.join(", "))
+        })
+        .collect();
+    format!(
+        "altitude put this task's review in front of the operator with its pull requests as they \
+         are: {}. Nothing here is waiting on the agent.",
+        said.join("; ")
+    )
+}
+
+fn who_wrote(comment: &LatestComment) -> String {
+    match (&comment.author, comment.is_bot) {
+        (Some(author), true) => format!("{author}, a bot"),
+        (Some(author), false) => author.clone(),
+        (None, true) => "a bot".to_owned(),
+        (None, false) => "someone".to_owned(),
+    }
 }

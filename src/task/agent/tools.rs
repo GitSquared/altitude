@@ -262,7 +262,7 @@ impl TaskAgentTools {
             json!({
                 "kind": "review",
                 "title": review.signal.title,
-                "held_until": "its pull requests settle",
+                "held_until": "its pull requests settle, or they stop moving and the operator decides",
             })
         });
         Ok(json!({
@@ -614,7 +614,7 @@ impl AgentToolProvider for TaskAgentTools {
                     "properties": {
                         "action": { "enum": ["list", "read", "open", "reply", "resolve"], "description": "list all threads; read one; open a blocking question or a review of finished work; reply in one; resolve or reopen one." },
                         "signal_id": { "type": "string", "description": "The thread for read, reply, or resolve." },
-                        "kind": { "enum": ["blocking_question", "ready_for_review"], "description": "For open: blocking_question stops the task until they answer, because you cannot proceed without their word; ready_for_review puts finished work to them to review." },
+                        "kind": { "enum": ["blocking_question", "ready_for_review"], "description": "For open: blocking_question stops the task until they answer, because you cannot proceed without their word; ready_for_review puts finished work to them to review, which with linked pull requests means after altitude has watched them settle." },
                         "title": { "type": "string", "description": "For open: one line the operator reads in the list." },
                         "body": { "type": "string", "description": "For open or reply: the message itself, as the operator reads it. Markdown: headings, lists, tables, `code`, quotes and links are drawn as such. A fenced ```mermaid block is drawn as a diagram in the operator's interface and in the task's issue. A picture from your workspace goes in as ordinary markdown, `![what it shows](/absolute/path/in/your/workspace.png)`, and the operator sees the picture where you put it: use one for what only pixels can show, such as the screen you changed or the failure you are explaining. Do not prefix the body with status or a summary heading." },
                         "resolved": { "type": "boolean", "description": "For resolve: true to resolve, false to reopen. Defaults to true." },
