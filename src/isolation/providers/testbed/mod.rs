@@ -445,6 +445,16 @@ impl TestbedIsolation {
                 _ => continue,
             };
             let rest = components.as_path();
+            // A hard link is unpacked by its link target, which `Entry::unpack` does not
+            // resolve against the destination, so it could name a file outside the
+            // section. A checkpoint carries regular files and symlinks and never one of
+            // these, so refuse it before any filesystem change.
+            if entry.header().entry_type().is_hard_link() {
+                return Err(IsolationError::new(format!(
+                    "a checkpoint entry is a hard link, which a restore does not carry: {}",
+                    path.display()
+                )));
+            }
             // What is carried is a tree, so an entry that climbs out of it is not one.
             // The handover archive is read by the same rule.
             let climbs_out = rest.components().any(|part| {
