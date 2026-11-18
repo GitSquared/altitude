@@ -56,13 +56,14 @@ pub struct TaskDraft {
 }
 
 // What a caller learns when it asks to reserve a task for a handover. The read that
-// decides this shares one write lock with the staged write, so the answer is the same
-// whichever of a start claim and a staging reached the lock first.
+// decides this shares one write lock with the staged write, so the task it carries is
+// the state the staging was decided from, not a read taken before the lock.
 pub enum TransferStaging {
-    // The staged pause is recorded; the caller may suspend the capsule.
-    Staged,
-    // The task is already staged and stopped; there is nothing to write.
-    AlreadyStopped,
+    // The staged pause is recorded; the task is the state read in that transaction,
+    // before the write, so the caller suspends what it decided from.
+    Staged(Task),
+    // The task is already staged and stopped, as read in the transaction.
+    AlreadyStopped(Task),
     // A start claim holds the task, so a handover may not begin.
     Starting,
     // The task is gone.

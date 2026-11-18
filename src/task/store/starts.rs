@@ -118,7 +118,7 @@ impl TaskStore {
             task.facts.execution_pause_reason == Some(TaskExecutionPauseReason::Transfer);
         if is_staged && !task.facts.sandbox_available {
             transaction.commit().await.map_err(TaskError::Database)?;
-            return Ok(TransferStaging::AlreadyStopped);
+            return Ok(TransferStaging::AlreadyStopped(task));
         }
         if !is_staged && task.facts.active_start_claim().is_some() {
             transaction.commit().await.map_err(TaskError::Database)?;
@@ -140,6 +140,9 @@ impl TaskStore {
         )
         .await?;
         transaction.commit().await.map_err(TaskError::Database)?;
-        Ok(TransferStaging::Staged)
+        // The task as read before the staged write: the sandbox it names is the one the
+        // staging was decided from, so the caller suspends it rather than a snapshot
+        // taken before the lock.
+        Ok(TransferStaging::Staged(task))
     }
 }
