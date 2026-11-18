@@ -79,13 +79,24 @@ impl IsolationEngine for TestbedIsolation {
                 readonly: mount.readonly,
             })
             .collect();
-        self.write_record(
-            &id,
-            &SandboxRecord {
-                mounts,
-                environment: options.environment,
-            },
-        )
+        let mut record = SandboxRecord {
+            mounts,
+            environment: options.environment,
+        };
+        // A task-local bind's source is a guest path on the sandbox's own disk, so it
+        // is resolved once here and stored beside the host mounts. Every command's
+        // namespace then re-applies it, which is what keeps the agent's transcript in
+        // the tree the checkpoint archives.
+        for bind in options.binds {
+            let source = self.host_path(&id, &record, &bind.source);
+            private_directory(&source)?;
+            record.mounts.push(MountRecord {
+                host_path: source,
+                guest_path: bind.target,
+                readonly: false,
+            });
+        }
+        self.write_record(&id, &record)
     }
 
     async fn run_command(

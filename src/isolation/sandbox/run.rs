@@ -5,7 +5,7 @@ use tokio::time;
 
 use super::guest::{opener_script, project_scripts, run_setup, run_to_end};
 use super::*;
-use crate::isolation::{install_script, with_port_relay};
+use crate::isolation::{SandboxBind, install_script, with_port_relay};
 
 use crate::{
     config::Config,
@@ -184,6 +184,24 @@ pub(crate) async fn create(
         .iter()
         .any(|route| route.guest_port == PORT_RELAY_GUEST_PORT);
     plan.options.snapshot_path = Some(path);
+    // The task-local binds travel with the sandbox's options, so a provider whose
+    // commands each run in a fresh mount namespace can re-apply them: the setup
+    // command runs once and its mounts are gone by the agent's first command. They
+    // are kept out of `mounts` because their source is a guest path, not a host one.
+    let state_root = kind.state_root();
+    let mut local_mounts = String::new();
+    for (source, target) in plan.local_mounts {
+        let source = Path::new(state_root).join(source);
+        plan.options.binds.push(SandboxBind {
+            source: source.to_string_lossy().into_owned(),
+            target: target.clone(),
+        });
+        let source = shell_quote(&source.to_string_lossy());
+        let target = shell_quote(&target);
+        local_mounts.push_str(&format!(
+            "mkdir -p {source} {target}\nmount --bind {source} {target}\n"
+        ));
+    }
     tracing::info!(sandbox = %id, "opening the sandbox");
     engine
         .create(id.clone(), plan.options, kind.purpose())
@@ -194,14 +212,7 @@ pub(crate) async fn create(
     if relay {
         command.push_str(&install_script());
     }
-    let root = kind.state_root();
-    for (source, target) in plan.local_mounts {
-        let source = shell_quote(&Path::new(root).join(source).to_string_lossy());
-        let target = shell_quote(&target);
-        command.push_str(&format!(
-            "mkdir -p {source} {target}\nmount --bind {source} {target}\n"
-        ));
-    }
+    command.push_str(&local_mounts);
     if kind == SandboxKind::Task {
         command.push_str(&project_scripts(&plan.project)?);
     }

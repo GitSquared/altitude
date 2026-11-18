@@ -205,8 +205,21 @@ pub struct SandboxOptions {
     pub snapshot_path: Option<String>,
     pub network_enabled: bool,
     pub mounts: Vec<SandboxMount>,
+    // Directories on the sandbox's own disk that must appear over other directories
+    // inside it: the task-local part of a profile, bound over the profile the agent
+    // writes to. A provider whose commands each run in a fresh mount namespace has to
+    // re-apply these for every command; one that keeps its guest applies them once.
+    pub binds: Vec<SandboxBind>,
     pub environment: Vec<(String, String)>,
     pub vsock: Vec<VsockRoute>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SandboxBind {
+    // A guest path under the sandbox's own disk, which holds the data.
+    pub source: String,
+    // The guest path it is bound over.
+    pub target: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -319,6 +332,7 @@ impl SandboxOptions {
             snapshot_path,
             network_enabled: false,
             mounts: Vec::new(),
+            binds: Vec::new(),
             environment: Vec::new(),
             vsock: Vec::new(),
         }

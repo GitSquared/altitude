@@ -136,6 +136,7 @@ impl SandboxPlan {
                 snapshot_path: None,
                 network_enabled: true,
                 mounts: Vec::new(),
+                binds: Vec::new(),
                 environment,
                 vsock: Vec::new(),
             },
