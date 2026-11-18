@@ -165,6 +165,23 @@ SELECT tasks.id, tasks.agent_kind, tasks.host,
      FROM task_deferred_reviews
      WHERE task_id = tasks.id
      ORDER BY sequence DESC LIMIT 1) AS deferred_review,
+    -- The claim a task holds while its sandbox is prepared. It is superseded by the
+    -- run it produces and by a deliberate release, and a newer claim replaces an
+    -- older one; what a task that is not Pending holds is decided when this is read,
+    -- not here.
+    (SELECT json_object(
+         'id', json_extract(claim.payload, '$.data.claim_id'),
+         'owner', json_extract(claim.payload, '$.data.owner'),
+         'at_ms', claim.recorded_at_ms)
+     FROM task_event_logs AS claim
+     WHERE claim.task_id = tasks.id
+       AND claim.event_type = 'start_claimed'
+       AND claim.sequence > COALESCE((
+           SELECT MAX(superseding.sequence) FROM task_event_logs AS superseding
+           WHERE superseding.task_id = tasks.id
+             AND superseding.event_type IN ('start_relinquished', 'agent_run_started')
+       ), 0)
+     ORDER BY claim.sequence DESC LIMIT 1) AS start_claim,
     -- What the run that is about to start opens with, said by whatever queued the task.
     (SELECT json_extract(queued.payload, '$.data.wake')
      FROM task_event_logs AS queued

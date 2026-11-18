@@ -122,6 +122,18 @@ pub struct TaskAgentRun {
     pub answering_signal_id: Option<String>,
 }
 
+// The durable fact that a start is in flight. It is read from the record rather than
+// remembered in the process, because the process that claimed a task is exactly what
+// a restart takes away. It carries its own identity so a caller can prove the claim
+// it holds is the one still recorded, and its owner so a claim left behind can be
+// attributed.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StartClaim {
+    pub id: String,
+    pub owner: String,
+    pub at_ms: i64,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskAgentRunOutcome {

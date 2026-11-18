@@ -17,6 +17,7 @@ mod events;
 mod memory;
 mod reports;
 mod signals;
+mod starts;
 
 // SQL returns the latest recorded properties without interpreting task lifecycle.
 #[derive(FromRow)]
@@ -52,6 +53,21 @@ pub struct TaskDraft {
     pub host: String,
     pub agent_kind: Option<AgentKind>,
     pub agent_conversation_id: Option<String>,
+}
+
+// What a caller learns when it asks to reserve a task for a handover. The read that
+// decides this shares one write lock with the staged write, so the task it carries is
+// the state the staging was decided from, not a read taken before the lock.
+pub enum TransferStaging {
+    // The staged pause is recorded; the task is the state read in that transaction,
+    // before the write, so the caller suspends what it decided from.
+    Staged(Task),
+    // The task is already staged and stopped, as read in the transaction.
+    AlreadyStopped(Task),
+    // A start claim holds the task, so a handover may not begin.
+    Starting,
+    // The task is gone.
+    Missing,
 }
 
 #[derive(Clone)]
@@ -274,15 +290,42 @@ impl TaskStore {
         transaction: &mut Transaction<'_, Sqlite>,
         task_id: &str,
     ) -> Result<Task, TaskError> {
+        Self::read_task_optional(transaction, task_id)
+            .await?
+            .ok_or(TaskError::Database(sqlx::Error::RowNotFound))
+    }
+
+    async fn read_task_optional(
+        transaction: &mut Transaction<'_, Sqlite>,
+        task_id: &str,
+    ) -> Result<Option<Task>, TaskError> {
         sqlx::query_as::<_, TaskRow>(concat!(
             include_str!("read_task.sql"),
             " WHERE tasks.id = ?"
         ))
         .bind(task_id)
-        .fetch_one(&mut **transaction)
+        .fetch_optional(&mut **transaction)
         .await
         .map_err(TaskError::Database)
-        .map(Task::from)
+        .map(|row| row.map(Task::from))
+    }
+
+    // A row that is still in play. A claim or a staging picks its candidate from a
+    // list that already hid removed tasks, so the candidate has to be re-checked
+    // against removal under the write lock rather than trusted from the list.
+    async fn read_task_if_kept(
+        transaction: &mut Transaction<'_, Sqlite>,
+        task_id: &str,
+    ) -> Result<Option<Task>, TaskError> {
+        sqlx::query_as::<_, TaskRow>(concat!(
+            include_str!("read_task.sql"),
+            " WHERE tasks.id = ? AND tasks.removed_at_ms IS NULL"
+        ))
+        .bind(task_id)
+        .fetch_optional(&mut **transaction)
+        .await
+        .map_err(TaskError::Database)
+        .map(|row| row.map(Task::from))
     }
 
     pub async fn request_control(

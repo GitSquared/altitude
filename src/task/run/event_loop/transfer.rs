@@ -11,7 +11,7 @@ use crate::{
     project::Project,
     task::{
         Task, TaskExecutionMode, TaskExecutionPauseReason, TaskExecutionStatus, TaskHistoryEvent,
-        TaskServiceError,
+        TaskServiceError, TransferStaging,
     },
 };
 
@@ -27,44 +27,33 @@ where
         transfer_id: &str,
         peer: &str,
     ) -> Result<Task, TaskServiceError> {
-        let task = self
-            .list()
-            .await?
-            .into_iter()
-            .find(|task| task.id == task_id)
-            .ok_or(TaskServiceError::Task(TaskError::MissingSandbox))?;
-        let is_staged =
-            task.facts.execution_pause_reason == Some(TaskExecutionPauseReason::Transfer);
-        if is_staged && !task.facts.sandbox_available {
-            return Ok(task);
-        }
-        if !is_staged
-            && !self
-                .starting
-                .lock()
-                .expect("starting lock poisoned")
-                .insert(task.id.clone())
+        // The store's transaction is authoritative: it reads the task and writes the
+        // first staged pause together, so the facts used to suspend come from the same
+        // read the staging was decided from. A read out here could be older than a
+        // start that finished between it and the transaction, and suspending a task
+        // whose sandbox was just made would miss the capsule the record now names.
+        let (mut capture, is_staged) = match self
+            .service
+            .store
+            .begin_transfer(task_id, transfer_id, peer)
+            .await
+            .map_err(TaskServiceError::Task)?
         {
-            return Err(TaskServiceError::Task(TaskError::OperationRejected(
-                "the task is still starting",
-            )));
-        }
-        self.service
-            .record(
-                task_id,
-                &[TaskHistoryEvent::TransferStaged {
-                    transfer_id: transfer_id.to_owned(),
-                    peer: peer.to_owned(),
-                    execution_status: TaskExecutionStatus::Paused,
-                    execution_pause_reason: TaskExecutionPauseReason::Transfer,
-                    execution_mode: task.facts.execution_mode,
-                    sandbox_available: task.facts.sandbox_available,
-                    snapshot_available: task.facts.snapshot_available,
-                    snapshot_path: task.facts.snapshot_path.clone(),
-                }],
-            )
-            .await?;
-        let mut capture = task;
+            TransferStaging::Staged(task) => {
+                let is_staged =
+                    task.facts.execution_pause_reason == Some(TaskExecutionPauseReason::Transfer);
+                (task, is_staged)
+            }
+            TransferStaging::AlreadyStopped(task) => return Ok(task),
+            TransferStaging::Starting => {
+                return Err(TaskServiceError::Task(TaskError::OperationRejected(
+                    "the task is still starting",
+                )));
+            }
+            TransferStaging::Missing => {
+                return Err(TaskServiceError::Task(TaskError::MissingSandbox));
+            }
+        };
         if is_staged {
             capture.facts.execution_status = TaskExecutionStatus::Running;
         }

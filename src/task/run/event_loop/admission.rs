@@ -1,7 +1,9 @@
+use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use tokio::time;
+use uuid::Uuid;
 
 use crate::isolation::capacity::SAMPLE_INTERVAL;
 use crate::isolation::{CommandSession, IsolationEngine, Pressure};
@@ -122,16 +124,6 @@ impl<E: IsolationEngine + Clone + 'static> TaskEventLoop<E> {
         }
     }
 
-    // A task being started has no capsule yet, so the queue still counts it as
-    // waiting for room. What separates it from the tasks behind it is that this
-    // machine is already working on it.
-    pub(crate) fn is_starting(&self, task_id: &str) -> bool {
-        self.starting
-            .lock()
-            .expect("starting lock poisoned")
-            .contains(task_id)
-    }
-
     pub fn enable_admission(&self) {
         self.admission_enabled.store(true, Ordering::Release);
         self.admit();
@@ -172,24 +164,24 @@ impl<E: IsolationEngine + Clone + 'static> TaskEventLoop<E> {
                 }
             }
         }
-        // The queue is the one the screens show: same order, same rule about who
-        // is waiting for room. Only the tasks already being started drop out.
-        let starting = self
-            .starting
-            .lock()
-            .expect("starting lock poisoned")
-            .clone();
+        // The tasks already claimed are being started. The claim is the durable fact
+        // that replaced the process-local set, so a restart and a second caller read
+        // the same answer.
+        let claimed: HashSet<&str> = tasks
+            .iter()
+            .filter(|task| task.facts.active_start_claim().is_some())
+            .map(|task| task.id.as_str())
+            .collect();
         // A machine busy with something that is not ours must not starve the queue, so
         // the valve only holds work back while the machine is carrying some of it.
-        let carrying =
-            tasks.iter().any(|task| task.facts.sandbox_available) || !starting.is_empty();
+        let carrying = tasks.iter().any(|task| task.facts.sandbox_available) || !claimed.is_empty();
         let stalled = self.service.isolation.pressure().filter(|_| carrying);
         // A start that has not booted yet is invisible in the load that would have said
         // no to it, so landings are counted rather than measured.
-        let mut landing = starting.len();
+        let mut landing = claimed.len();
         let waiting: Vec<&Task> = tasks_waiting_to_start(&tasks)
             .into_iter()
-            .filter(|task| !starting.contains(&task.id))
+            .filter(|task| !claimed.contains(task.id.as_str()))
             .collect();
         // Asked of the machine rather than taken from the last reading: what has been
         // promised changes when a sandbox is made, and a start admitted in the same
@@ -208,60 +200,81 @@ impl<E: IsolationEngine + Clone + 'static> TaskEventLoop<E> {
             "an admission pass is deciding"
         );
         for task in waiting {
-            if waits_for_room(task) {
-                if stalled.is_some() || landing >= may_land {
-                    continue;
-                }
-                landing += 1;
+            if waits_for_room(task) && (stalled.is_some() || landing >= may_land) {
+                continue;
             }
             if !self.admission_enabled.load(Ordering::Acquire) {
                 break;
             }
-            if !self
-                .starting
-                .lock()
-                .expect("starting lock poisoned")
-                .insert(task.id.clone())
+            // The bounded part: one atomic read-and-claim that re-checks the queue's
+            // own rule under a write lock, before any sandbox work. Losing the race is
+            // an ordinary answer, not an error.
+            let claim_id = Uuid::new_v4().to_string();
+            let claimed_task = match self
+                .service
+                .store
+                .claim_start(&task.id, &claim_id, &self.start_owner)
+                .await
             {
-                continue;
+                Ok(Some(claimed)) => claimed,
+                Ok(None) => continue,
+                Err(error) => {
+                    tracing::warn!(task = %task.id, %error, "could not claim a task to start");
+                    continue;
+                }
+            };
+            if waits_for_room(task) {
+                landing += 1;
             }
             let event_loop = self.clone();
-            let task = task.clone();
-            tokio::spawn(async move {
-                // A start is minutes of work with nothing to show for it until it is
-                // over, which is the state an operator and a log both need to see.
-                let began = Instant::now();
-                let task_id = task.id.clone();
-                // The first question asked of a machine that ran out of memory later.
-                let room = event_loop.service.isolation.sandbox_room();
+            tokio::spawn(async move { event_loop.advance(claimed_task, claim_id).await });
+        }
+    }
+
+    // The unbounded part: provision and launch, then give the claim back if the run did
+    // not spend it. A start that failed or was cancelled releases its claim here rather
+    // than leaving a restart to clean it up, and a start that ran out of progress still
+    // releases it before failing the task.
+    async fn advance(&self, task: Task, claim_id: String) {
+        // A start is minutes of work with nothing to show for it until it is over,
+        // which is the state an operator and a log both need to see.
+        let began = Instant::now();
+        let task_id = task.id.clone();
+        // The first question asked of a machine that ran out of memory later.
+        let room = self.service.isolation.sandbox_room();
+        tracing::info!(
+            task = %task_id,
+            claim = %claim_id,
+            ceiling_mib = ?room.offered.map(|offered| offered.memory_mib),
+            promised_mib = room.promised_mib,
+            pressure = ?self.service.isolation.pressure(),
+            "starting a task"
+        );
+        match self.start_unless_wedged(&task).await {
+            Some(started) => {
                 tracing::info!(
                     task = %task_id,
-                    ceiling_mib = ?room.offered.map(|offered| offered.memory_mib),
-                    promised_mib = room.promised_mib,
-                    pressure = ?event_loop.service.isolation.pressure(),
-                    "starting a task"
+                    elapsed_ms = began.elapsed().as_millis() as u64,
+                    started = started.is_ok(),
+                    "a task's start is over"
                 );
-                match event_loop.start_unless_wedged(&task).await {
-                    Some(started) => {
-                        tracing::info!(
-                            task = %task_id,
-                            elapsed_ms = began.elapsed().as_millis() as u64,
-                            started = started.is_ok(),
-                            "a task's start is over"
-                        );
-                        event_loop.watch_agent_run(started);
-                    }
-                    None => event_loop.give_up_starting(task).await,
-                }
-                event_loop
-                    .starting
-                    .lock()
-                    .expect("starting lock poisoned")
-                    .remove(&task_id);
-                // Provisioning may have freed or taken room for something else.
-                event_loop.admit();
-            });
+                self.watch_agent_run(started);
+            }
+            None => self.give_up_starting(task).await,
         }
+        // A start that produced a run has already spent the claim; one that failed,
+        // was cancelled, or ran out of progress gives it back so the next pass can try
+        // again.
+        if let Err(error) = self
+            .service
+            .store
+            .relinquish_start(&task_id, &claim_id)
+            .await
+        {
+            tracing::warn!(task = %task_id, %error, "could not release a start claim");
+        }
+        // Provisioning may have freed or taken room for something else.
+        self.admit();
     }
 
     // The start future was dropped where it stood, so nothing it was doing will

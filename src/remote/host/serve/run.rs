@@ -29,6 +29,7 @@ use crate::{
     cli::{ServeArgs, ServeCommand, Tracker},
     config::{Config, DEFAULT_PORT},
     db::Database,
+    instance,
     isolation::{self, IsolationStatus, MicrosandboxIsolation, Unwatched},
     logging,
     project::Project,
@@ -101,6 +102,13 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
             }
         }
     }
+
+    // One owner of this data directory. Recovery reads a start claim left behind as
+    // proof that the process that made it is gone, so a second live remote may not run
+    // it against the same database: take the same lock the standalone client takes,
+    // before the database is opened or anything is recovered. One database with more
+    // than one live owner needs a distributed decision this does not make.
+    let _instance = instance::Instance::claim(&config.database_path())?;
 
     let settings = ServeSettings::load_or_create(&settings_path)?;
     // An empty host is a script plus a token, and the fleet is what keeps the hosts

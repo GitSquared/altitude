@@ -46,7 +46,7 @@ mod progress;
 mod queue;
 pub(crate) mod store;
 pub use state::*;
-pub use store::{TaskDraft, TaskStore};
+pub use store::{TaskDraft, TaskStore, TransferStaging};
 
 pub(crate) use mirror::tracker;
 pub(crate) use tracker::{OwnTrackers, TrackerHost};
@@ -175,7 +175,7 @@ impl Error for TaskServiceError {}
 // Execution policy consumes recorded values; the store does not infer these decisions.
 
 pub use queue::{QueueStanding, Start};
-pub(crate) use queue::{place_in_queue, tasks_waiting_for_room, waits_for_room};
+pub(crate) use queue::{is_due, place_in_queue, tasks_waiting_for_room, waits_for_room};
 
 fn should_resume(task: &Task) -> bool {
     matches!(

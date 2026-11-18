@@ -28,6 +28,19 @@ pub enum TaskHistoryEvent {
         identity_label: String,
         agent_conversation_id: Option<String>,
     },
+    // A task chosen for a start is claimed before any sandbox work begins. The task
+    // stays Pending, so the claim — and not the execution status — is what says this
+    // machine is already preparing it and no other caller may. The claim is spent by
+    // the AgentRunStarted it produces, or given back by StartRelinquished.
+    StartClaimed {
+        claim_id: String,
+        owner: String,
+    },
+    // A claim whose preparation ended without a run: the machine holding it has given
+    // it back, and the next eligible caller may claim the task again.
+    StartRelinquished {
+        claim_id: String,
+    },
     SandboxProvisioned {
         sandbox_available: bool,
         sandbox_id: String,
