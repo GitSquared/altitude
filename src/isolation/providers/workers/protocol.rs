@@ -56,6 +56,12 @@ pub(crate) enum WorkerCall {
         id: String,
         command: String,
     },
+    // Stop what the sandbox is running. Which processes those are is the host's to say:
+    // on a host engine a sandbox is an account's processes on that machine, and the rule
+    // that signals everything the account may signal reaches the worker running it.
+    Stop {
+        id: String,
+    },
     // A tree or a file moves as a stream on the same connection: the request names
     // the sandbox side, the bytes follow, and the reply says how it went.
     DeliverFile {

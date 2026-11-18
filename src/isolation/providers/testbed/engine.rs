@@ -1,6 +1,6 @@
-use std::{fs, io, io::ErrorKind, path::PathBuf};
+use std::{fs, io, io::ErrorKind, path::PathBuf, process, time::Duration};
 
-use tokio::sync::watch;
+use tokio::{sync::watch, task::spawn_blocking, time::sleep};
 
 use crate::{
     isolation::{
@@ -208,6 +208,42 @@ impl IsolationEngine for TestbedIsolation {
         self.exists(&id)
     }
 
+    // The generic rule — signal every process this sandbox's uid may signal — is written
+    // for a sandbox that is its own machine. On this host the sandbox is one account's
+    // processes on this machine, and the worker running them is the same account: that
+    // signal reaches the worker, its service stops, and every sandbox on the host goes
+    // with it before the archive that was the point of stopping them can start. The
+    // processes that are the sandbox's are the ones whose root is its root.
+    //
+    // A signal is not a stop, so the answer is whether they are gone: what this is for is
+    // an archive of a tree nothing is writing, and a pause that cannot have that says so
+    // instead of archiving anyway.
+    async fn stop_work(&self, id: String) -> Result<(), IsolationError> {
+        let root =
+            fs::canonicalize(self.sandbox_root(&id)).unwrap_or_else(|_| self.sandbox_root(&id));
+        let mut left = self.sandbox_processes(root.clone()).await?;
+        if left.is_empty() {
+            return Ok(());
+        }
+        self.signal(&left, "-TERM").await?;
+        for _ in 0..20 {
+            sleep(Duration::from_millis(100)).await;
+            left = self.sandbox_processes(root.clone()).await?;
+            if left.is_empty() {
+                return Ok(());
+            }
+        }
+        self.signal(&left, "-KILL").await?;
+        sleep(Duration::from_millis(200)).await;
+        left = self.sandbox_processes(root).await?;
+        if left.is_empty() {
+            return Ok(());
+        }
+        Err(IsolationError::new(format!(
+            "the sandbox's processes did not stop: {left:?}"
+        )))
+    }
+
     async fn remove_leftover_sandboxes(&self) {
         let entries = match fs::read_dir(self.sandboxes_dir()) {
             Ok(entries) => entries,
@@ -325,4 +361,49 @@ impl IsolationEngine for TestbedIsolation {
 
 fn io_error(error: io::Error) -> IsolationError {
     IsolationError::new(error.to_string())
+}
+
+impl TestbedIsolation {
+    async fn sandbox_processes(&self, root: PathBuf) -> Result<Vec<u32>, IsolationError> {
+        spawn_blocking(move || {
+            let host = process::id();
+            let Ok(processes) = fs::read_dir("/proc") else {
+                return Vec::new();
+            };
+            let mut pids = Vec::new();
+            for entry in processes.flatten() {
+                let name = entry.file_name();
+                let Ok(pid) = name.to_string_lossy().parse::<u32>() else {
+                    continue;
+                };
+                if pid == host {
+                    continue;
+                }
+                let in_sandbox = fs::read_link(entry.path().join("root"))
+                    .is_ok_and(|process_root| process_root == root);
+                if in_sandbox {
+                    pids.push(pid);
+                }
+            }
+            pids
+        })
+        .await
+        .map_err(|error| {
+            IsolationError::new(format!("listing a sandbox's processes failed: {error}"))
+        })
+    }
+
+    async fn signal(&self, pids: &[u32], signal: &str) -> Result<(), IsolationError> {
+        let pids = pids.to_vec();
+        let signal = signal.to_owned();
+        spawn_blocking(move || {
+            for pid in pids {
+                let _ = process::Command::new("kill")
+                    .args([&signal, &pid.to_string()])
+                    .status();
+            }
+        })
+        .await
+        .map_err(|error| IsolationError::new(format!("signalling a sandbox failed: {error}")))
+    }
 }

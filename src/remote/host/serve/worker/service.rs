@@ -266,6 +266,10 @@ impl WorkerService {
                     Err(error) => WorkerReply::Failed(error.to_string()),
                 }
             }
+            WorkerCall::Stop { id } => match self.engine.stop_work(id).await {
+                Ok(()) => WorkerReply::Ok,
+                Err(error) => WorkerReply::Failed(error.to_string()),
+            },
             WorkerCall::HasSandbox { id } => WorkerReply::Bool(self.engine.has_sandbox(id).await),
             WorkerCall::GuestFileExists { id, path } => {
                 match self.engine.guest_regular_file_exists(id, path).await {

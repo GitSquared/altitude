@@ -594,6 +594,18 @@ impl IsolationEngine for WorkersIsolation {
             .map_err(|error| IsolationError::new(error.to_string()))
     }
 
+    // The stop belongs to the machine holding the sandbox: only that machine can tell the
+    // sandbox's processes from its own account's, and a rule that signals everything the
+    // account may signal stops the worker along with the work.
+    async fn stop_work(&self, id: String) -> Result<(), IsolationError> {
+        let Some(worker) = self.placement(&id) else {
+            return Ok(());
+        };
+        self.call_on(&worker, WorkerCall::Stop { id })
+            .await
+            .and_then(expect_ok)
+    }
+
     fn project_snapshot(&self, _project: Project, _recipes: Vec<ProfileRecipe>) -> Option<String> {
         None
     }
