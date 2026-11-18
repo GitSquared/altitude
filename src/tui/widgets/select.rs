@@ -50,6 +50,11 @@ fn pill_in(buffer: &mut Buffer, area: Rect, spans: &[Span<'static>], focused: bo
 pub trait Menu {
     fn is_open(&self) -> bool;
     fn key(&mut self, key: KeyEvent);
+    // A click says which row is under the pointer and a wheel says the list moves;
+    // neither says the row is taken, because taking it is a press and the press is
+    // the key's.
+    fn point_at(&mut self, index: usize) -> bool;
+    fn scroll(&mut self, forward: bool);
 }
 
 impl<T> Menu for Select<T> {
@@ -59,6 +64,14 @@ impl<T> Menu for Select<T> {
 
     fn key(&mut self, key: KeyEvent) {
         Select::handle_key(self, key);
+    }
+
+    fn point_at(&mut self, index: usize) -> bool {
+        Select::point_at(self, index)
+    }
+
+    fn scroll(&mut self, forward: bool) {
+        Select::scroll(self, forward);
     }
 }
 
@@ -171,6 +184,16 @@ impl<T> Select<T> {
             }
             _ => false,
         }
+    }
+
+    // The row the pointer is on, in the terms a click speaks: the offer's index,
+    // which is the same number whichever way the list happens to be filtered.
+    pub fn point_at(&mut self, index: usize) -> bool {
+        let Some(at) = self.matches().iter().position(|offer| *offer == index) else {
+            return false;
+        };
+        self.at = at;
+        true
     }
 
     pub fn hints(&self) -> Vec<chrome::Hint> {

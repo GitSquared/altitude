@@ -35,8 +35,10 @@ pub fn draw(
     // added to the checklist is focusable the moment it exists, and one taken
     // away cannot be focused at all.
     panel.focus_ring.clear();
-    for focus in row_focuses {
-        panel.focus_ring.add(focus);
+    panel.hits.clear();
+    panel.list_rows.clear();
+    for focus in &row_focuses {
+        panel.focus_ring.add(*focus);
     }
     let detail = if panel.commits.open {
         "Commits carry this name and email, and signing marks them as yours. The key lives in \
@@ -67,6 +69,12 @@ pub fn draw(
     ];
     let areas = Layout::vertical(constraints).split(card);
 
+    // A row is one line of the list that is about to be drawn, so the line it
+    // went in is the rect a click on it lands in.
+    for (index, focus) in row_focuses.into_iter().enumerate() {
+        panel.hits.push((row_anchor(areas[4], index as u16), focus));
+    }
+
     frame.render_widget(
         Paragraph::new(Line::styled("GET STARTED", palette::heading())),
         areas[0],
@@ -89,15 +97,15 @@ pub fn draw(
     // A picker is a pop-up over the card, not rows of it: the choice is a
     // question of its own, and it comes before the sign-in that follows it.
     if panel.agent.is_open() {
-        panel
+        panel.list_rows = panel
             .agent
             .draw_list_below(frame, area, row_anchor(areas[4], 1));
     } else if panel.vcs.is_open() {
-        panel
+        panel.list_rows = panel
             .vcs
             .draw_list_below(frame, area, row_anchor(areas[4], 2));
     } else if panel.tracker.is_open() {
-        panel
+        panel.list_rows = panel
             .tracker
             .draw_list_below(frame, area, row_anchor(areas[4], 4));
     } else if let Some(browser) = panel.repositories.as_mut() {
@@ -357,6 +365,23 @@ pub(super) fn draw_footer(
     let width = settings.width() + 2 + go.width();
     let [note_area, buttons_area] =
         Layout::horizontal([Constraint::Min(0), Constraint::Length(width)]).areas(area);
+    // The buttons are the two things on the footer a click can press, and they are
+    // where the spans under them were drawn: one space of fill on either side.
+    panel.hits.push((
+        Rect {
+            width: settings.width(),
+            ..buttons_area
+        },
+        Focus::Settings,
+    ));
+    panel.hits.push((
+        Rect {
+            x: buttons_area.x + settings.width() + 2,
+            width: go.width(),
+            ..buttons_area
+        },
+        Focus::Ready,
+    ));
     frame.render_widget(
         Paragraph::new(Line::styled(
             "You can tweak these options in Settings later.",

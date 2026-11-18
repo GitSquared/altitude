@@ -347,19 +347,6 @@ impl App {
             )
     }
 
-    pub(in crate::tui) fn wants_mouse(&self) -> bool {
-        self.open_shell().is_some()
-            || matches!(
-                self.foreground,
-                Foreground::Keys(_)
-                    | Foreground::Setup(_)
-                    | Foreground::Signals
-                    | Foreground::Panel
-                    | Foreground::NewTask(_)
-                    | Foreground::Tasks
-            )
-    }
-
     pub(in crate::tui) fn scroll_mouse(&mut self, mouse: MouseEvent) {
         let up = match mouse.kind {
             MouseEventKind::ScrollUp => true,

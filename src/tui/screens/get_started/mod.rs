@@ -1,4 +1,7 @@
-use std::slice;
+use std::{mem, slice};
+
+use crossterm::event::{KeyCode, MouseButton, MouseEvent, MouseEventKind};
+use ratatui::layout::Rect;
 
 use crate::{
     agent::AgentKind,
@@ -9,7 +12,7 @@ use crate::{
         widgets::{
             chrome::Hint,
             focus::FocusRing,
-            select::{Offer, Select},
+            select::{self, Menu, Offer, Select},
             text::Field,
         },
     },
@@ -153,6 +156,10 @@ pub struct GetStarted {
     pub repository: Select<Repository>,
     pub commits: Commits,
     pub repositories: Option<Repositories>,
+    // Rebuilt by every draw, so a click lands on the row that was drawn there
+    // rather than on the card as it was when a constant beside it last moved.
+    hits: Vec<(Rect, Focus)>,
+    list_rows: Vec<(Rect, usize)>,
 }
 
 impl GetStarted {
@@ -183,6 +190,8 @@ impl GetStarted {
             name_editing: false,
             commits: Commits::from(identity),
             repositories: None,
+            hits: Vec::new(),
+            list_rows: Vec::new(),
             agent: Select::new(
                 "agent",
                 agents
@@ -232,6 +241,54 @@ impl GetStarted {
 
     pub fn choose_repository(&mut self, repository: &Repository) {
         self.repository = repository_select(slice::from_ref(repository), Some(&repository.url));
+    }
+
+    pub(in crate::tui) fn hit(&self, column: u16, row: u16) -> Option<Focus> {
+        self.hits.iter().find_map(|(area, focus)| {
+            (column >= area.x && column < area.right() && row >= area.y && row < area.bottom())
+                .then_some(*focus)
+        })
+    }
+
+    fn open_list(&mut self) -> Option<&mut dyn Menu> {
+        select::opened([
+            &mut self.agent as &mut dyn Menu,
+            &mut self.vcs,
+            &mut self.tracker,
+        ])
+    }
+
+    // What an event says to the list the card has open, in keys: a click on a row
+    // is that row's press, and a click that misses the list is the escape that
+    // leaves it. The wheel only moves the list, and says nothing back.
+    pub(in crate::tui) fn list_mouse(&mut self, mouse: MouseEvent) -> Option<KeyCode> {
+        let rows = mem::take(&mut self.list_rows);
+        let Some(list) = self.open_list() else {
+            self.list_rows = rows;
+            return None;
+        };
+        let key = match mouse.kind {
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                list.scroll(mouse.kind == MouseEventKind::ScrollDown);
+                None
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                let pointed = rows.iter().find_map(|(area, index)| {
+                    (mouse.column >= area.x
+                        && mouse.column < area.right()
+                        && mouse.row >= area.y
+                        && mouse.row < area.bottom())
+                    .then_some(*index)
+                });
+                match pointed {
+                    Some(index) => list.point_at(index).then_some(KeyCode::Enter),
+                    None => Some(KeyCode::Esc),
+                }
+            }
+            _ => None,
+        };
+        self.list_rows = rows;
+        key
     }
 
     pub fn reset_name(&mut self, name: &str) {

@@ -99,7 +99,12 @@ async fn run_loop<E>(
 where
     E: IsolationEngine + Clone + 'static,
 {
-    execute!(io::stdout(), EnableBracketedPaste)?;
+    // The pointer belongs to the session rather than to a screen: capture that
+    // turns on and off is a second copy of which screens answer a click, and the
+    // copy is the one that goes stale. A screen with nothing under the pointer
+    // ignores the event, which is what a shell's parent does with a key it has no
+    // use for.
+    execute!(io::stdout(), EnableMouseCapture, EnableBracketedPaste)?;
     app.watch_remotes();
     // What each remote answered with last time, before anything is asked, so the
     // first picker of a session names its machines instead of printing addresses
@@ -153,7 +158,6 @@ where
     let mut discovery_clock = time::interval(Duration::from_secs(3));
     discovery_clock.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
 
-    let mut mouse_captured = false;
     // Whether the terminal is reporting the keys the creation question needs.
     let mut keys_enhanced = false;
     // Anything that waits on another machine reports back through a watch, so the
@@ -269,15 +273,6 @@ where
                 app.discovered_remotes.clear();
                 scan = start_scan(&mut app).await;
                 discovery_failed = scan.is_none();
-            }
-        }
-        let wants_mouse = app.wants_mouse();
-        if mouse_captured != wants_mouse {
-            mouse_captured = wants_mouse;
-            if mouse_captured {
-                execute!(io::stdout(), EnableMouseCapture)?;
-            } else {
-                execute!(io::stdout(), DisableMouseCapture)?;
             }
         }
         // ctrl-enter and shift-enter only arrive as keys of their own under this
