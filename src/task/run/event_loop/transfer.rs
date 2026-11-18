@@ -11,7 +11,7 @@ use crate::{
     project::Project,
     task::{
         Task, TaskExecutionMode, TaskExecutionPauseReason, TaskExecutionStatus, TaskHistoryEvent,
-        TaskServiceError,
+        TaskServiceError, TransferStaging,
     },
 };
 
@@ -35,29 +35,27 @@ where
             .ok_or(TaskServiceError::Task(TaskError::MissingSandbox))?;
         let is_staged =
             task.facts.execution_pause_reason == Some(TaskExecutionPauseReason::Transfer);
-        if is_staged && !task.facts.sandbox_available {
-            return Ok(task);
+        // The read that decides this and the staged write are one transaction: a live
+        // start claim stops the handover, and the staged pause leaves a task its own
+        // due rule keeps a new claim from.
+        match self
+            .service
+            .store
+            .begin_transfer(task_id, transfer_id, peer)
+            .await
+            .map_err(TaskServiceError::Task)?
+        {
+            TransferStaging::Staged => {}
+            TransferStaging::AlreadyStopped => return Ok(task),
+            TransferStaging::Starting => {
+                return Err(TaskServiceError::Task(TaskError::OperationRejected(
+                    "the task is still starting",
+                )));
+            }
+            TransferStaging::Missing => {
+                return Err(TaskServiceError::Task(TaskError::MissingSandbox));
+            }
         }
-        if !is_staged && task.facts.active_start_claim().is_some() {
-            return Err(TaskServiceError::Task(TaskError::OperationRejected(
-                "the task is still starting",
-            )));
-        }
-        self.service
-            .record(
-                task_id,
-                &[TaskHistoryEvent::TransferStaged {
-                    transfer_id: transfer_id.to_owned(),
-                    peer: peer.to_owned(),
-                    execution_status: TaskExecutionStatus::Paused,
-                    execution_pause_reason: TaskExecutionPauseReason::Transfer,
-                    execution_mode: task.facts.execution_mode,
-                    sandbox_available: task.facts.sandbox_available,
-                    snapshot_available: task.facts.snapshot_available,
-                    snapshot_path: task.facts.snapshot_path.clone(),
-                }],
-            )
-            .await?;
         let mut capture = task;
         if is_staged {
             capture.facts.execution_status = TaskExecutionStatus::Running;

@@ -46,7 +46,7 @@ mod progress;
 mod queue;
 pub(crate) mod store;
 pub use state::*;
-pub use store::{TaskDraft, TaskStore};
+pub use store::{TaskDraft, TaskStore, TransferStaging};
 
 pub(crate) use mirror::tracker;
 pub(crate) use tracker::{OwnTrackers, TrackerHost};

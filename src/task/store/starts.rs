@@ -94,4 +94,52 @@ impl TaskStore {
         transaction.commit().await.map_err(TaskError::Database)?;
         Ok(Some(task))
     }
+
+    // Reserve a task for a handover, in one transaction with the staged write. A start
+    // claim that committed first is read here and stops the staging; a staged write
+    // that committed first leaves the task Paused, which its own due rule stops a
+    // claim from.
+    pub async fn begin_transfer(
+        &self,
+        task_id: &str,
+        transfer_id: &str,
+        peer: &str,
+    ) -> Result<TransferStaging, TaskError> {
+        let mut transaction = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(TaskError::Database)?;
+        let Some(task) = Self::read_task_optional(&mut transaction, task_id).await? else {
+            transaction.commit().await.map_err(TaskError::Database)?;
+            return Ok(TransferStaging::Missing);
+        };
+        let is_staged =
+            task.facts.execution_pause_reason == Some(TaskExecutionPauseReason::Transfer);
+        if is_staged && !task.facts.sandbox_available {
+            transaction.commit().await.map_err(TaskError::Database)?;
+            return Ok(TransferStaging::AlreadyStopped);
+        }
+        if !is_staged && task.facts.active_start_claim().is_some() {
+            transaction.commit().await.map_err(TaskError::Database)?;
+            return Ok(TransferStaging::Starting);
+        }
+        Self::write_events(
+            &mut transaction,
+            task_id,
+            &[TaskHistoryEvent::TransferStaged {
+                transfer_id: transfer_id.to_owned(),
+                peer: peer.to_owned(),
+                execution_status: TaskExecutionStatus::Paused,
+                execution_pause_reason: TaskExecutionPauseReason::Transfer,
+                execution_mode: task.facts.execution_mode,
+                sandbox_available: task.facts.sandbox_available,
+                snapshot_available: task.facts.snapshot_available,
+                snapshot_path: task.facts.snapshot_path.clone(),
+            }],
+        )
+        .await?;
+        transaction.commit().await.map_err(TaskError::Database)?;
+        Ok(TransferStaging::Staged)
+    }
 }
