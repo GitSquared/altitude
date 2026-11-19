@@ -15,6 +15,9 @@ where
                 .sandbox_id
                 .clone()
                 .ok_or(TaskServiceError::Task(TaskError::MissingSandbox))?;
+            // The sandbox is about to go: take the session it refreshed back to the profile
+            // that will hand the next one out.
+            self.keep_agent_session(&task).await;
             if let Err(error) = self.isolation.remove(id).await {
                 if !task.facts.accepted {
                     self.fail(&task, error.to_string()).await?;

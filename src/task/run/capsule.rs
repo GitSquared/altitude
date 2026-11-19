@@ -116,6 +116,9 @@ where
                 error: "It has no sandbox to save".to_owned(),
             };
         };
+        // Before the sandbox is stopped: the session the turn refreshed lives in it, and it is
+        // the only copy that was spent.
+        self.keep_agent_session(task).await;
         // The sandbox has to be still before it is packed, or the archive reads a tree
         // that is still being written and the pause keeps nothing. A sandbox that will
         // not stop is not a reason to throw its tree away: it stays on the host that
