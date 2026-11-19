@@ -82,9 +82,6 @@ impl SandboxPlan {
         project
             .validate()
             .map_err(|error| IsolationError::new(error.to_string()))?;
-        let project_name = project.name.clone();
-        let project_id = project.id.clone();
-        let project_setup = project.setup_command.clone();
         // Each contributor to a layer is its own step, so a task waiting on a cold
         // environment can say what it is waiting for. The commands are also what the
         // layer is, and so what names its snapshot.
@@ -101,26 +98,10 @@ impl SandboxPlan {
                 installs,
             ));
         }
-        let project_steps = vec![SetupStep::new(
-            format!("preparing the {project_name} environment"),
-            project_setup,
-        )];
-        if !project_steps
-            .iter()
-            .all(|step| step.command.trim().is_empty())
-        {
-            layers.push(BaseSandboxRecipe::new(
-                format!("coding-{project_name}"),
-                // A project id is not a build: a sign-in's narrower composition and
-                // the one tasks run on are two builds, and a store shared between
-                // them would have each replace the other's snapshot.
-                config
-                    .project_snapshots_dir(&project_id)
-                    .join(tag_of(&project_steps)),
-                REFRESH_AFTER,
-                project_steps,
-            ));
-        }
+        // The project's setup is not a layer: it installs what the project's own code needs,
+        // and that code is only cloned when a task's sandbox is made. A layer is built before
+        // any task exists, so a setup there runs in an empty tree (and a monorepo's
+        // `pnpm install` fails with no manifest to read).
         let commits = project.commits.clone();
         let environment = vec![
             ("HOME".into(), GUEST_HOME.into()),

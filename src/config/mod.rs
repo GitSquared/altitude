@@ -377,13 +377,6 @@ impl Config {
             .join("snapshots")
     }
 
-    pub fn project_snapshots_dir(&self, project_id: &str) -> PathBuf {
-        self.scoped_data_dir()
-            .join("projects")
-            .join(project_id)
-            .join("snapshots")
-    }
-
     // One store per set of commands, named after them. A project whose setup command
     // changes never composes its previous tag again, so nothing that knows the store
     // exists goes looking for it: only a walk of these roots finds it.

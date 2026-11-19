@@ -3,7 +3,7 @@ use std::path::Path;
 use tokio::task::spawn_blocking;
 use tokio::time;
 
-use super::guest::{opener_script, project_scripts, run_setup, run_to_end};
+use super::guest::{opener_script, project_scripts, project_setup, run_setup, run_to_end};
 use super::*;
 use crate::isolation::{SandboxBind, install_script, with_port_relay};
 
@@ -215,6 +215,7 @@ pub(crate) async fn create(
     command.push_str(&local_mounts);
     if kind == SandboxKind::Task {
         command.push_str(&project_scripts(&plan.project)?);
+        command.push_str(&project_setup(&plan.project)?);
     }
     tracing::info!(sandbox = %id, "setting up the sandbox's mounts and project");
     if let Err(error) = run_setup(engine, id.clone(), command).await {
