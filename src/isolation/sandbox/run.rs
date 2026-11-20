@@ -207,7 +207,13 @@ pub(crate) async fn create(
         .create(id.clone(), plan.options, kind.purpose())
         .await?;
     tracing::info!(sandbox = %id, "the sandbox is open");
-    let mut command = String::from("set -eu\n");
+    // Nothing in here is attended: the clone, a project's setup and the mounts all run with
+    // nobody to answer. Stdin is closed so a prompt fails at once instead of waiting out the
+    // setup's patience, and the two variables package tools follow when they have no terminal
+    // keep Corepack from asking whether to download the package manager a project pins.
+    let mut command = String::from(
+        "set -eu\nexec < /dev/null\nexport CI=true\nexport COREPACK_ENABLE_DOWNLOAD_PROMPT=0\n",
+    );
     command.push_str(&opener_script());
     if relay {
         command.push_str(&install_script());

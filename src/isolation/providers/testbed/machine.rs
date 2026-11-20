@@ -225,6 +225,7 @@ pub(super) async fn run_step(
     // Corepack asks before it downloads a package manager, and there is nobody here to
     // answer: without this it waits out the step's whole patience on a question.
     builder.env("COREPACK_ENABLE_DOWNLOAD_PROMPT", "0");
+    builder.env("CI", "true");
     builder.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = builder
         .spawn()

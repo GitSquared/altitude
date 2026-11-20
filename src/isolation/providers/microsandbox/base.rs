@@ -275,7 +275,7 @@ impl MicrosandboxIsolation {
         let mut session = self
             .run_command(
                 sandbox_id.to_owned(),
-                format!("set -eu\nexec < /dev/null\n{command}"),
+                format!("set -eu\nexec < /dev/null\nexport CI=true\nexport COREPACK_ENABLE_DOWNLOAD_PROMPT=0\n{command}"),
             )
             .await?;
         loop {
