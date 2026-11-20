@@ -483,9 +483,6 @@ impl AgentEngine for ClaudeCode {
                 ("CLAUDE_CONFIG_DIR", "/altitude/claude"),
                 ("DISABLE_AUTOUPDATER", "1"),
                 ("PATH", GUEST_PATH),
-                // Claude Code fetches a project's package manager through Corepack, which
-                // asks first: the answer belongs to this profile, not to the sandbox.
-                ("COREPACK_ENABLE_DOWNLOAD_PROMPT", "0"),
             ],
         }
     }

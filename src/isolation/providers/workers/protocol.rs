@@ -135,6 +135,13 @@ pub(crate) enum WorkerReply {
     Failed(String),
 }
 
+impl WorkerReply {
+    // What a host says on the way to its answer, never the answer itself.
+    pub(crate) fn is_narration(&self) -> bool {
+        matches!(self, Self::Progress { .. } | Self::Log { .. })
+    }
+}
+
 // What flows on a command's stream in each direction.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) enum CommandFrame {

@@ -81,7 +81,15 @@ impl LinkClient {
         let (mut send, mut recv) = dial.0.open_bi().await?;
         write_frame(&mut send, request).await?;
         send.finish()?;
-        read_frame(&mut recv).await
+        // A host that takes long enough to answer says what it is doing first, and that
+        // narration belongs to any call, not only to a provision: the answer is the first
+        // frame that is not one of those.
+        loop {
+            let frame = read_frame::<_, WorkerReply>(&mut recv).await?;
+            if !frame.is_narration() {
+                return Ok(frame);
+            }
+        }
     }
 
     // A provision carries the operator's profiles, which are too large for a frame:
@@ -102,12 +110,10 @@ impl LinkClient {
         // as work in progress rather than as a call that never answered.
         loop {
             let frame = read_frame::<_, WorkerReply>(&mut recv).await?;
-            match &frame {
-                // What the host says on the way to its answer: the step it is on, and
-                // the lines its own log is writing meanwhile.
-                WorkerReply::Progress { .. } | WorkerReply::Log { .. } => on_side(frame),
-                _ => return Ok(frame),
+            if !frame.is_narration() {
+                return Ok(frame);
             }
+            on_side(frame);
         }
     }
 
