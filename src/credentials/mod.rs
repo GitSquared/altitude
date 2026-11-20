@@ -7,18 +7,17 @@ mod shell;
 
 use std::time::Duration;
 
-use tokio::sync::watch;
+use tokio::sync::{Mutex as AsyncMutex, watch};
 
 use std::{
+    collections::HashMap,
     error::Error,
     fmt, fs,
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
 };
 use tokio::process::Command;
 use tokio::time::timeout;
-
-#[cfg(any(test, debug_assertions, feature = "testkit"))]
-use std::collections::HashMap;
 
 use crate::vcs;
 
@@ -29,8 +28,29 @@ pub use model::{Credential, Service, Slot, agent_of, describe, new_id};
 #[derive(Clone, Debug)]
 pub enum Renewal {
     Renewed,
+    // A caller asked under the lock and found the deadline had already moved.
+    NotDue,
+    // The profile's provider renews nothing, so no clock can help it.
     NothingToRenew,
+    // The profile's session file is not there: there is no grant to refresh.
+    NoSession,
+    // The harness ran and was refused, or could not be run at all.
     Refused(String),
+    // The harness ran and exited zero without moving the deadline.
+    Unchanged,
+}
+
+// One renewal per profile at a time, however many callers want it: a timer and a
+// task start asking at the same moment is one sandbox, not two. The lock is keyed by
+// the profile so two different profiles still renew together.
+#[derive(Clone, Default)]
+struct RenewalGuards(Arc<Mutex<HashMap<String, Arc<AsyncMutex<()>>>>>);
+
+impl RenewalGuards {
+    fn for_profile(&self, profile: &str) -> Arc<AsyncMutex<()>> {
+        let mut guards = self.0.lock().expect("renewal guards poisoned");
+        Arc::clone(guards.entry(profile.to_owned()).or_default())
+    }
 }
 pub use shell::{
     CredentialShell, CredentialShellCancel, CredentialShellEvent, credential_shell_id,
@@ -40,8 +60,8 @@ use crate::{
     agent::{AgentChannels, AgentEngines},
     config::Config,
     isolation::{
-        CredentialSandbox, GuestPath, IsolationEngine, IsolationError, IsolationStatus, PortRelays,
-        ProfileRecipe, ProfileSummary, Unwatched, mounts, renew_session,
+        CredentialSandbox, GuestPath, HarnessRun, IsolationEngine, IsolationError, IsolationStatus,
+        PortRelays, ProfileRecipe, ProfileSummary, Unwatched, mounts, renew_session,
     },
     project::Project,
 };
@@ -76,6 +96,7 @@ pub struct Credentials<E> {
     agents: AgentEngines,
     channels: AgentChannels,
     relays: PortRelays,
+    renewals: RenewalGuards,
     // Recipes a test put in place of the real ones, so a scripted provider does not
     // have to install anything on the machine to answer for a profile.
     #[cfg(any(test, debug_assertions, feature = "testkit"))]
@@ -99,9 +120,32 @@ where
             relays,
             config,
             agents,
+            renewals: RenewalGuards::default(),
             #[cfg(any(test, debug_assertions, feature = "testkit"))]
             overrides: HashMap::new(),
         }
+    }
+
+    // The same credentials, scoped to the operator whose profiles this machine holds:
+    // a remote keeps each operator's session under its own directory, and a renewal
+    // has to read and write the one that operator's next task mounts.
+    pub fn for_operator(&self, owner: &str) -> Result<Self, CredentialsError> {
+        // A machine that holds one operator's profiles is not split by operator; the
+        // isolation engine says the same thing, and the two have to agree.
+        if !self.config.serves_operators() {
+            return Ok(self.clone());
+        }
+        Ok(Self {
+            isolation: self
+                .isolation
+                .for_operator(owner)
+                .map_err(CredentialsError::Isolation)?,
+            config: self
+                .config
+                .for_operator(owner)
+                .map_err(|error| CredentialsError::Refused(error.to_string()))?,
+            ..self.clone()
+        })
     }
 
     #[cfg(any(test, debug_assertions, feature = "testkit"))]
@@ -203,12 +247,31 @@ where
         Ok(answers)
     }
 
+    // Whether a profile is worth renewing right now, decided under the same lock that
+    // renews it: a caller that waited while another renewed sees the new deadline and
+    // does nothing. The lock is what keeps a timer and a task start from making two
+    // sandboxes for one session.
+    pub async fn renew_if_due(&self, profile: &str) -> Result<Renewal, CredentialsError> {
+        if !self.can_renew(profile) {
+            return Ok(Renewal::NothingToRenew);
+        }
+        let guard = self.renewals.for_profile(profile);
+        let _held = guard.lock().await;
+        let Some(standing) = self.session_expiry(profile).map(freshness::Standing::new) else {
+            return Ok(Renewal::NoSession);
+        };
+        if !standing.is_due() {
+            return Ok(Renewal::NotDue);
+        }
+        self.renew_now(profile).await
+    }
+
     // A session is renewed by the harness that owns it. Where this machine has that
     // harness it could run it here, but altitude does not ask an operator's machine to
     // provide one: the renewal runs in a sandbox, which is where a harness lives when the
     // machine has none — and on a remote whose isolation is workers, that sandbox is a
     // worker, spawned for this and gone after.
-    pub async fn renew(&self, profile: &str) -> Result<Renewal, CredentialsError> {
+    async fn renew_now(&self, profile: &str) -> Result<Renewal, CredentialsError> {
         let recipe = self.recipe(profile)?;
         // Whether a credential can renew itself is the harness's business, not this
         // layer's: the one that can is asked for the command, and the ones that cannot
@@ -217,6 +280,9 @@ where
             return Ok(Renewal::NothingToRenew);
         };
         let before = self.session_expiry(profile);
+        if before.is_none() {
+            return Ok(Renewal::NoSession);
+        }
         let recipes = vec![recipe.clone()];
         // A sandbox is only handed out for a layer that exists, so a machine that has
         // never built this profile's harness gets one built first.
@@ -257,7 +323,7 @@ where
             snapshot,
             vsock: Vec::new(),
         };
-        renew_session(
+        let used = renew_session(
             &self.isolation,
             &self.config,
             sandbox,
@@ -270,9 +336,15 @@ where
         // What the command said about itself is not the question. The profile's own file
         // is: a renewal that leaves the deadline where it was has not renewed anything.
         if self.session_expiry(profile) == before {
-            return Ok(Renewal::Refused(
-                "its harness ran and the session did not change".to_owned(),
-            ));
+            return Ok(match used {
+                HarnessRun::Exited(0) => Renewal::Unchanged,
+                HarnessRun::Exited(_) => {
+                    Renewal::Refused("its harness refused to renew; a sign-in is needed".to_owned())
+                }
+                HarnessRun::CouldNotRun => {
+                    Renewal::Refused("its harness could not be run to renew".to_owned())
+                }
+            });
         }
         Ok(Renewal::Renewed)
     }

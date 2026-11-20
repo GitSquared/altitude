@@ -94,6 +94,15 @@ pub(crate) async fn credential_shell(
 // the machine holding the profile has none: a normal remote builds one, a workers remote
 // spawns a worker, and only the session files come back out. Nothing is mounted in, so the
 // refresh runs against the profile the sandbox already carries.
+// What came of using a harness to renew: the exit status it left, or that it could
+// not be run at all. Zero is the harness accepting the renewal; a non-zero status is
+// the provider refusing it, which is a different thing from the sandbox failing.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum HarnessRun {
+    Exited(i32),
+    CouldNotRun,
+}
+
 pub(crate) async fn renew_session(
     engine: &impl IsolationEngine,
     config: &Config,
@@ -101,7 +110,7 @@ pub(crate) async fn renew_session(
     command: String,
     take_back: Vec<(String, PathBuf)>,
     progress: &dyn EnvironmentProgressSink,
-) -> Result<(), IsolationError> {
+) -> Result<HarnessRun, IsolationError> {
     let CredentialSandbox {
         id,
         recipes,
@@ -120,16 +129,20 @@ pub(crate) async fn renew_session(
         progress,
     )
     .await?;
-    let used = run_to_end(engine, id.clone(), command).await;
-    if used.is_err() {
-        tracing::warn!(%id, "the harness could not be used to renew its session");
-    }
+    let used = match run_to_end(engine, id.clone(), command).await {
+        Ok((status, _)) => HarnessRun::Exited(status),
+        Err(error) => {
+            tracing::warn!(%id, %error, "the harness could not be used to renew its session");
+            HarnessRun::CouldNotRun
+        }
+    };
     for (guest, host) in take_back {
         if let Err(error) = engine.collect_file(id.clone(), guest, host.clone()).await {
             tracing::warn!(%error, path = %host.display(), "a session file did not come back out");
         }
     }
-    engine.remove(id).await
+    engine.remove(id).await?;
+    Ok(used)
 }
 
 pub(crate) async fn watcher(

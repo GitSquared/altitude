@@ -84,8 +84,23 @@ where
                 .isolation
                 .for_operator(owner)
                 .map_err(TaskServiceError::Isolation)?,
+            credentials: self
+                .credentials
+                .for_operator(owner)
+                .map_err(TaskServiceError::Credentials)?,
             ..self.clone()
         })
+    }
+
+    // A remote's operator scope as its own credentials, for a keeper that keeps an
+    // operator's sessions alive while no task is running.
+    pub(crate) fn credentials_for_operator(
+        &self,
+        owner: &str,
+    ) -> Result<credentials::Credentials<E>, TaskServiceError> {
+        self.credentials
+            .for_operator(owner)
+            .map_err(TaskServiceError::Credentials)
     }
 
     // Where the minutes of a cold environment go. A caller with something to say
@@ -217,10 +232,8 @@ where
                 .ok_or(TaskServiceError::Task(TaskError::OperationRejected(
                     "the task records no operator to build for",
                 )))?;
-        let isolation = self
-            .isolation
-            .for_operator(&owner)
-            .map_err(TaskServiceError::Isolation)?;
+        let scoped = self.as_operator(&owner)?;
+        let isolation = scoped.isolation.clone();
         // The record is not the runtime: a task whose capsule went away with a hard
         // stop would otherwise be provisioned for the sandbox it says it has, and
         // every later step would be reaching for something that is not there.
@@ -304,7 +317,7 @@ where
                 // it, not because a clock said so, and a machine holding a session has the
                 // harness that refreshes it.
                 for profile in [&agent_id, &vcs_id] {
-                    credentials::keeper::renew_if_due(&self.credentials, profile).await;
+                    credentials::keeper::renew_if_due(&scoped.credentials, profile).await;
                 }
                 isolation
                     .provision(

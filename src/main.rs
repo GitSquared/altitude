@@ -191,17 +191,13 @@ where
         )
         .with_trackers(trackers)
         .with_issue_reader(issue_reader);
-        // A client that starts renews what it holds, so the copies it pushes are as fresh
-        // as this machine can make them. One pass, not a loop: the next renewal is the next
-        // start, or the moment a task needs the session.
+        // A client keeps what it holds alive rather than renewing it only at the moments
+        // it happens to start or run a task: a session that lapses while the machine is
+        // up is one an operator has to log in again for.
         {
             let keeping = tasks.clone();
             tokio::spawn(async move {
-                let Ok(config) = Config::load() else {
-                    return;
-                };
-                let profiles = credentials::keeper::profiles(&config);
-                credentials::keeper::refresh_due(keeping.credentials(), &profiles).await;
+                credentials::keeper::run(keeping.credentials().clone()).await;
             });
         }
         // The scripted harness answers for this machine's version control too, so a
