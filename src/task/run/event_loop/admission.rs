@@ -15,6 +15,17 @@ use crate::task::{
 
 use crate::task::TaskEventLoop;
 
+// What a bounded admission call hands back: the task it claimed, and the claim that
+// authorises starting it. The caller owns the start from here; a successful return
+// means the claim is durable and nothing more, not that a sandbox or an agent started.
+// A caller that cannot dispatch what it was given must give the claim back, and a
+// caller that exits first leaves it to the next startup, whose single-owner recovery
+// releases it.
+pub(crate) struct ClaimedTask {
+    pub task: Task,
+    pub claim_id: String,
+}
+
 // A start that stops getting further is one nothing is going to finish: provisioning
 // or the runtime has wedged, and the future holding the task at the tip of the queue
 // would never return, so nothing after it on the machine would move either. What the
@@ -137,33 +148,14 @@ impl<E: IsolationEngine + Clone + 'static> TaskEventLoop<E> {
         tokio::spawn(async move { event_loop.admit_waiting().await });
     }
 
-    async fn admit_waiting(&self) {
-        if !self.admission_enabled.load(Ordering::Acquire) {
-            return;
-        }
-        let mut tasks = match self.service.list_in_play().await {
-            Ok(tasks) => tasks,
-            Err(error) => {
-                tracing::warn!(%error, "could not read tasks to admit work");
-                return;
-            }
-        };
-        // A limit that has cleared is a task that starts again by itself. It is put
-        // back before the queue is read, so the same pass that measures room is the
-        // one that starts it, and no clock of its own has to be kept for it.
-        for result in self.service.resume_limits_due(&tasks).await {
-            match result {
-                Ok(task) => {
-                    if let Some(known) = tasks.iter_mut().find(|known| known.id == task.id) {
-                        tracing::info!(task_id = %task.id, "a usage limit cleared");
-                        *known = task;
-                    }
-                }
-                Err(error) => {
-                    tracing::warn!(%error, "could not put back a task whose usage limit cleared");
-                }
-            }
-        }
+    // The bounded half of admission: choose the next task the machine may start,
+    // claim it durably, and return before any sandbox is provisioned or a future is
+    // spawned. `None` says neither the queue nor the machine had an offer for this
+    // call. The claim re-checks the queue's own rule under a write lock, so an
+    // overlapping call cannot take the same task and a task that was removed, held,
+    // borrowed or already claimed is refused there.
+    pub(crate) async fn claim_due(&self) -> Result<Option<ClaimedTask>, TaskServiceError> {
+        let tasks = self.service.list_in_play().await?;
         // The tasks already claimed are being started. The claim is the durable fact
         // that replaced the process-local set, so a restart and a second caller read
         // the same answer.
@@ -178,7 +170,7 @@ impl<E: IsolationEngine + Clone + 'static> TaskEventLoop<E> {
         let stalled = self.service.isolation.pressure().filter(|_| carrying);
         // A start that has not booted yet is invisible in the load that would have said
         // no to it, so landings are counted rather than measured.
-        let mut landing = claimed.len();
+        let landing = claimed.len();
         let waiting: Vec<&Task> = tasks_waiting_to_start(&tasks)
             .into_iter()
             .filter(|task| !claimed.contains(task.id.as_str()))
@@ -189,7 +181,7 @@ impl<E: IsolationEngine + Clone + 'static> TaskEventLoop<E> {
         let room = self.service.isolation.sandbox_room();
         let may_land = self.service.isolation.start_landings().min(room.fitting);
         // Why nothing started is the question a quiet machine raises, and this is the
-        // pass that answers it.
+        // call that answers it.
         tracing::debug!(
             ?stalled,
             ceiling_mib = ?room.offered.map(|offered| offered.memory_mib),
@@ -197,18 +189,12 @@ impl<E: IsolationEngine + Clone + 'static> TaskEventLoop<E> {
             fitting = room.fitting,
             landing,
             waiting = waiting.len(),
-            "an admission pass is deciding"
+            "an admission call is deciding"
         );
         for task in waiting {
             if waits_for_room(task) && (stalled.is_some() || landing >= may_land) {
                 continue;
             }
-            if !self.admission_enabled.load(Ordering::Acquire) {
-                break;
-            }
-            // The bounded part: one atomic read-and-claim that re-checks the queue's
-            // own rule under a write lock, before any sandbox work. Losing the race is
-            // an ordinary answer, not an error.
             let claim_id = Uuid::new_v4().to_string();
             let claimed_task = match self
                 .service
@@ -217,17 +203,67 @@ impl<E: IsolationEngine + Clone + 'static> TaskEventLoop<E> {
                 .await
             {
                 Ok(Some(claimed)) => claimed,
+                // Another caller got here first, or the task stopped being due between
+                // the read and the write. Losing the race is an ordinary answer: this
+                // call tries the next candidate, or returns and lets the next pass try.
                 Ok(None) => continue,
+                Err(error) => return Err(TaskServiceError::Task(error)),
+            };
+            debug_assert_eq!(
+                claimed_task
+                    .facts
+                    .active_start_claim()
+                    .map(|claim| claim.id.as_str()),
+                Some(claim_id.as_str())
+            );
+            return Ok(Some(ClaimedTask {
+                task: claimed_task,
+                claim_id,
+            }));
+        }
+        Ok(None)
+    }
+
+    async fn admit_waiting(&self) {
+        if !self.admission_enabled.load(Ordering::Acquire) {
+            return;
+        }
+        let tasks = match self.service.list_in_play().await {
+            Ok(tasks) => tasks,
+            Err(error) => {
+                tracing::warn!(%error, "could not read tasks to admit work");
+                return;
+            }
+        };
+        // A limit that has cleared is a task that starts again by itself. It is put
+        // back before the queue is read, so the same pass that measures room is the
+        // one that starts it, and no clock of its own has to be kept for it.
+        for result in self.service.resume_limits_due(&tasks).await {
+            match result {
+                Ok(task) => tracing::info!(task_id = %task.id, "a usage limit cleared"),
                 Err(error) => {
-                    tracing::warn!(task = %task.id, %error, "could not claim a task to start");
-                    continue;
+                    tracing::warn!(%error, "could not put back a task whose usage limit cleared");
+                }
+            }
+        }
+        // The bounded operation claims one task and returns; keeping the start it
+        // authorises alive is this loop's work. The claim is durable, so each pass of
+        // the loop sees the tasks it already handed out and counts them against room
+        // exactly as one long pass did.
+        loop {
+            if !self.admission_enabled.load(Ordering::Acquire) {
+                break;
+            }
+            let claimed = match self.claim_due().await {
+                Ok(Some(claimed)) => claimed,
+                Ok(None) => break,
+                Err(error) => {
+                    tracing::warn!(%error, "could not claim a task to start");
+                    break;
                 }
             };
-            if waits_for_room(task) {
-                landing += 1;
-            }
             let event_loop = self.clone();
-            tokio::spawn(async move { event_loop.advance(claimed_task, claim_id).await });
+            tokio::spawn(async move { event_loop.advance(claimed).await });
         }
     }
 
@@ -235,7 +271,8 @@ impl<E: IsolationEngine + Clone + 'static> TaskEventLoop<E> {
     // not spend it. A start that failed or was cancelled releases its claim here rather
     // than leaving a restart to clean it up, and a start that ran out of progress still
     // releases it before failing the task.
-    async fn advance(&self, task: Task, claim_id: String) {
+    async fn advance(&self, claimed: ClaimedTask) {
+        let ClaimedTask { task, claim_id } = claimed;
         // A start is minutes of work with nothing to show for it until it is over,
         // which is the state an operator and a log both need to see.
         let began = Instant::now();
