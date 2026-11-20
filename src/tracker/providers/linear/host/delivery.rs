@@ -330,7 +330,7 @@ impl RemoteTracker {
                     report,
                     &stable_id(&format!("{}-{index}", report.task_id), "woken"),
                     AgentActivityContent::Thought {
-                        body: "altitude is waking this task to read a new message".to_owned(),
+                        body: wake_notice(events, index).to_owned(),
                     },
                 )
                 .await
@@ -681,5 +681,30 @@ impl RemoteTracker {
                 tracing::warn!(task = %report.task_id, %error, "task updates remain queued");
             }
         }
+    }
+}
+
+// What the wake is about to do, said from the record and not from the optimism of a
+// message: a task whose start never got as far as a run has no workspace to resume and
+// nothing archived, so the honest word is that the setup is being tried again; a task
+// that ran and kept a capsule is resumed from it; one that ran and kept nothing starts
+// again from the project's repository.
+fn wake_notice(events: &[(i64, TaskHistoryEvent)], index: usize) -> &'static str {
+    let kept = events[..index].iter().any(|(_, event)| match event {
+        TaskHistoryEvent::TaskSnapshotSaved {
+            snapshot_available, ..
+        }
+        | TaskHistoryEvent::ExecutionPaused {
+            snapshot_available, ..
+        } => *snapshot_available,
+        _ => false,
+    });
+    let ran = events[..index]
+        .iter()
+        .any(|(_, event)| matches!(event, TaskHistoryEvent::AgentRunStarted { .. }));
+    match (kept, ran) {
+        (true, _) => "altitude is resuming this task from its saved workspace",
+        (false, true) => "altitude is starting this task again from the project's repository",
+        (false, false) => "altitude is retrying this task's setup",
     }
 }
