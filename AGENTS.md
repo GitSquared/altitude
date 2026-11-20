@@ -67,6 +67,16 @@ and implementer of bounded pieces—not an autonomous author of the whole v1.
   maintained, explained and kept in step. Delete the state, or derive it.
 - Keep the task capsule, not an external tracker, as the source of operational truth.
 - Keep portable task state separate from machine-local identities, credentials, caches, and runtimes.
+- Define lifecycle ownership before changing providers: who owns the running
+  processes, workspace, conversation state and checkpoint, and which observed
+  transition permits releasing each resource. Agent prose alone does not establish
+  that a turn ended, a task paused or work was accepted.
+- Preserve the recoverable source until a complete checkpoint is durably stored.
+  A failed stop or save must surface a failure and retain the source. Treat an
+  unreachable worker as unknown until absence is established.
+- Trace the existing durable event path before adding another state write. Keep
+  accepting an input atomic; deliver or reconcile its committed events without
+  recording the same input, wake or queue transition again.
 - Prefer small typed protocols and deterministic state transitions over conversational glue.
 - Treat Trace, Update, Decision, and Review as additive attention semantics.
 - Never merge, deploy, release, or publish on the operator's behalf.
@@ -212,6 +222,18 @@ machine). `task` is `store`, `agent`, `run` and `mirror`.
 
 ## Verification
 
+- Prove the central provider journey early through normal entry points: a real
+  task changes tracked and untracked files, pauses, releases its original worker,
+  resumes the same conversation on a different worker, and reads the preserved
+  files before making another change. Recreating files after restore is not proof
+  that they survived. Re-run the journey when the relevant implementation changes.
+- Record the exact master artifact, worker image, agent version, task/run and
+  worker identities for that journey. Change one relevant variable at a time when
+  investigating a failure, and distinguish observations from hypotheses.
+- Verify a diagnostic's own boundaries before trusting it: controller and inner
+  task signals must reach their intended task, process cleanup must target owned
+  children, and protocol reads must have deadlines. A nested harness only proves
+  the topology it actually exercised.
 - Judge progress through working user journeys: delegation, switching views,
   keyboard ownership, attention requests and replies, restart, and recovery.
 - Exercise changed interactive behavior in a real terminal. Tests that assert
