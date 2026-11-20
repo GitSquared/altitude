@@ -116,6 +116,9 @@ pub(crate) fn credential_connector(credential: &Credential) -> Connector {
     if credential.profile().is_some() {
         connector.used_by = Some(credential.used_by.clone());
     }
+    if let Some(expires) = &credential.expires {
+        connector.fields.push(("expires", expires.clone()));
+    }
     connector
 }
 

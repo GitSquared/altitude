@@ -202,6 +202,7 @@ pub struct Credential {
     pub label: String,
     pub kind: CredentialKind,
     pub used_by: Vec<String>,
+    pub expires: Option<String>,
 }
 
 impl Credential {

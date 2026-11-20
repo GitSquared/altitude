@@ -234,21 +234,18 @@ impl App {
             .iter()
             .find(|summary| summary.profile == id)
             .and_then(|summary| summary.expires.clone());
-        let detail = match expires {
-            Some(expires) => format!(
-                "{}: {} · {expires}",
-                service.label(),
-                account.unwrap_or(status)
-            ),
-            None => format!("{}: {}", service.label(), account.unwrap_or(status)),
-        };
         Row {
             label: label.clone(),
-            detail: Some(detail),
+            detail: Some(format!(
+                "{}: {}",
+                service.label(),
+                account.unwrap_or(status)
+            )),
             kind: RowKind::Credential(Credential {
                 label,
                 kind,
                 used_by,
+                expires,
             }),
         }
     }
@@ -258,6 +255,7 @@ impl App {
         let hostname = hostname();
         Credential {
             label: hostname.clone(),
+            expires: None,
             kind: CredentialKind::Installation {
                 hostname,
                 label: identity
