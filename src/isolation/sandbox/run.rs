@@ -136,9 +136,15 @@ pub(crate) async fn renew_session(
             HarnessRun::CouldNotRun
         }
     };
-    for (guest, host) in take_back {
-        if let Err(error) = engine.collect_file(id.clone(), guest, host.clone()).await {
-            tracing::warn!(%error, path = %host.display(), "a session file did not come back out");
+    // A provider that mounts this machine's profile has already written the renewal
+    // through it; collecting the file back would open the file it is copying from as
+    // the file it copies to. Only a provider that keeps its own copy needs the files
+    // carried out.
+    if !engine.shares_host_paths() {
+        for (guest, host) in take_back {
+            if let Err(error) = engine.collect_file(id.clone(), guest, host.clone()).await {
+                tracing::warn!(%error, path = %host.display(), "a session file did not come back out");
+            }
         }
     }
     engine.remove(id).await?;

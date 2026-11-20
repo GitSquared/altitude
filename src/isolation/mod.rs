@@ -495,6 +495,14 @@ pub trait IsolationEngine: Send + Sync {
         Ok(self.clone())
     }
 
+    // Whether a path the plan mounts from this machine is the same file inside the
+    // sandbox, so a write in the guest is already this machine's write. A provider
+    // that ships the files to a machine of its own answers false, and what it wrote
+    // has to be collected back.
+    fn shares_host_paths(&self) -> bool {
+        true
+    }
+
     fn credential_shell(
         &self,
         sandbox: CredentialSandbox,

@@ -430,6 +430,12 @@ impl IsolationEngine for WorkersIsolation {
         Ok(scoped)
     }
 
+    // A box keeps its own profile files; what a session renewal writes there has to
+    // be collected back to this machine's operator directory.
+    fn shares_host_paths(&self) -> bool {
+        false
+    }
+
     async fn credential_shell(
         &self,
         sandbox: CredentialSandbox,
