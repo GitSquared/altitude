@@ -56,9 +56,6 @@ pub(crate) enum WorkerCall {
         id: String,
         command: String,
     },
-    // Stop what the sandbox is running. Which processes those are is the host's to say:
-    // on a host engine a sandbox is an account's processes on that machine, and the rule
-    // that signals everything the account may signal reaches the worker running it.
     Stop {
         id: String,
     },

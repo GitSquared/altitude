@@ -78,9 +78,8 @@ impl WorkersIsolation {
         self.checkouts.lock().ok()?.get(id).cloned().flatten()
     }
 
-    // Whether a host still carries a sandbox. A host that cannot be asked has not said
-    // it lost anything, and callers decide a host's fate from this answer: an unanswered
-    // question must not destroy the work it was about.
+    // An unanswered question must not destroy the work it was about, so a host that cannot
+    // be asked is not a host that lost its sandbox.
     async fn sandbox_is_there(&self, worker: &str, id: &str) -> bool {
         match self
             .call_on(worker, WorkerCall::HasSandbox { id: id.to_owned() })
@@ -99,9 +98,7 @@ impl WorkersIsolation {
         }
     }
 
-    // A worker that is not connected has not said it lost anything: a sandbox on it is
-    // unreachable, which is a different answer from gone, and only this remote's own
-    // record of the host it handed a sandbox to can say it is gone.
+    // Unreachable is not gone: only this remote's own record can say a host is.
     fn peer_of(&self, worker: &str) -> Result<EndpointAddr, IsolationError> {
         self.fleet.peer(worker).ok_or_else(|| {
             IsolationError::new(format!("isolation worker {worker} is not connected"))
@@ -594,9 +591,6 @@ impl IsolationEngine for WorkersIsolation {
             .map_err(|error| IsolationError::new(error.to_string()))
     }
 
-    // The stop belongs to the machine holding the sandbox: only that machine can tell the
-    // sandbox's processes from its own account's, and a rule that signals everything the
-    // account may signal stops the worker along with the work.
     async fn stop_work(&self, id: String) -> Result<(), IsolationError> {
         let Some(worker) = self.placement(&id) else {
             return Ok(());

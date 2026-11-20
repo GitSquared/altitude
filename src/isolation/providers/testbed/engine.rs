@@ -15,6 +15,12 @@ use crate::{
 
 use super::{MountRecord, SandboxRecord, TestbedIsolation, check_environment, files, machine};
 
+// Two seconds of patience for a graceful stop, then the harder signal, then time for the
+// kernel to settle it.
+const TERM_ATTEMPTS: usize = 20;
+const TERM_STEP: Duration = Duration::from_millis(100);
+const KILL_SETTLE: Duration = Duration::from_millis(200);
+
 impl IsolationEngine for TestbedIsolation {
     fn pressure(&self) -> Option<Pressure> {
         self.host_pressure
@@ -208,34 +214,14 @@ impl IsolationEngine for TestbedIsolation {
         self.exists(&id)
     }
 
-    // The generic rule — signal every process this sandbox's uid may signal — is written
-    // for a sandbox that is its own machine. On this host the sandbox is one account's
-    // processes on this machine, and the worker running them is the same account: that
-    // signal reaches the worker, its service stops, and every sandbox on the host goes
-    // with it before the archive that was the point of stopping them can start. The
-    // processes that are the sandbox's are the ones whose root is its root.
-    //
-    // A signal is not a stop, so the answer is whether they are gone: what this is for is
-    // an archive of a tree nothing is writing, and a pause that cannot have that says so
-    // instead of archiving anyway.
+    // The generic rule signals every process this sandbox's uid may signal, which here is
+    // the worker running it: the stop would take the host down before the archive. What the
+    // sandbox is on this host is the processes rooted in its root, and a stop is confirmed by
+    // their absence rather than asserted.
     async fn stop_work(&self, id: String) -> Result<(), IsolationError> {
         let root =
             fs::canonicalize(self.sandbox_root(&id)).unwrap_or_else(|_| self.sandbox_root(&id));
-        let mut left = self.sandbox_processes(root.clone()).await?;
-        if left.is_empty() {
-            return Ok(());
-        }
-        self.signal(&left, "-TERM").await?;
-        for _ in 0..20 {
-            sleep(Duration::from_millis(100)).await;
-            left = self.sandbox_processes(root.clone()).await?;
-            if left.is_empty() {
-                return Ok(());
-            }
-        }
-        self.signal(&left, "-KILL").await?;
-        sleep(Duration::from_millis(200)).await;
-        left = self.sandbox_processes(root).await?;
+        let left = self.stop_sandbox_processes(root).await?;
         if left.is_empty() {
             return Ok(());
         }
@@ -364,6 +350,24 @@ fn io_error(error: io::Error) -> IsolationError {
 }
 
 impl TestbedIsolation {
+    async fn stop_sandbox_processes(&self, root: PathBuf) -> Result<Vec<u32>, IsolationError> {
+        let mut left = self.sandbox_processes(root.clone()).await?;
+        if left.is_empty() {
+            return Ok(left);
+        }
+        self.signal(&left, "-TERM").await?;
+        for _ in 0..TERM_ATTEMPTS {
+            sleep(TERM_STEP).await;
+            left = self.sandbox_processes(root.clone()).await?;
+            if left.is_empty() {
+                return Ok(left);
+            }
+        }
+        self.signal(&left, "-KILL").await?;
+        sleep(KILL_SETTLE).await;
+        self.sandbox_processes(root).await
+    }
+
     async fn sandbox_processes(&self, root: PathBuf) -> Result<Vec<u32>, IsolationError> {
         spawn_blocking(move || {
             let host = process::id();

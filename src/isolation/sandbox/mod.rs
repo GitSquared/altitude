@@ -98,10 +98,6 @@ impl SandboxPlan {
                 installs,
             ));
         }
-        // The project's setup is not a layer: it installs what the project's own code needs,
-        // and that code is only cloned when a task's sandbox is made. A layer is built before
-        // any task exists, so a setup there runs in an empty tree (and a monorepo's
-        // `pnpm install` fails with no manifest to read).
         let commits = project.commits.clone();
         let environment = vec![
             ("HOME".into(), GUEST_HOME.into()),

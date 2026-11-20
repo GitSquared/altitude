@@ -221,7 +221,17 @@ fn detail(panel: &Panel, view: &View, tick: Option<usize>) -> Paragraph<'static>
     let lines = match &row.kind {
         RowKind::Project { project } => project_lines(project, view, heading),
         RowKind::GitIdentity(identity) => git_connector(identity).lines(heading, tick),
-        RowKind::Credential(credential) => credential_connector(credential).lines(heading, tick),
+        RowKind::Credential(credential) => {
+            let expires = credential
+                .profile()
+                .and_then(|profile| {
+                    view.profiles
+                        .iter()
+                        .find(|summary| summary.profile == profile)
+                })
+                .and_then(|summary| summary.expires.as_deref());
+            credential_connector(credential, expires).lines(heading, tick)
+        }
         RowKind::Switch { setting, on } => {
             let mut status = mark(*on, false).spans(tick);
             status.push(Span::styled(

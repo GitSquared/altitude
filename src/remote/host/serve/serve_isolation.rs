@@ -201,8 +201,8 @@ impl IsolationEngine for ServeIsolation {
         }
     }
 
-    // Stopping work is the sandbox's own machine's business: a worker knows which of its
-    // account's processes are the sandbox's, and a microVM's rule stays inside its guest.
+    // Each variant's engine answers this: a worker from its own account's processes, a
+    // microVM inside its guest.
     fn stop_work(&self, id: String) -> impl Future<Output = Result<(), IsolationError>> + Send {
         async move {
             match self {

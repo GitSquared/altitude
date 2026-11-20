@@ -11,7 +11,6 @@ use crate::{
 // can pick up, and a tree that could not be archived is worth more on its host than in
 // a claim that there is one.
 pub(super) enum Capsule {
-    // Archived to this path, with the sandbox released.
     Saved(String),
     // Still on this host with nothing archived: the work in it is the only copy.
     Kept { sandbox: String, error: String },

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use crate::isolation::ProfileSummary;
 use crate::{
     credentials::{Credential as NamedCredential, host::HostLogin},
     isolation::EnvironmentDescription,
@@ -185,6 +186,7 @@ impl Row {
 pub struct View {
     pub rows: Vec<Row>,
     pub credentials: Vec<NamedCredential>,
+    pub profiles: Vec<ProfileSummary>,
     pub defaults: ProjectDefaults,
     pub tracker_states: HashMap<String, TrackerState>,
     pub base: Option<EnvironmentDescription>,
@@ -202,7 +204,6 @@ pub struct Credential {
     pub label: String,
     pub kind: CredentialKind,
     pub used_by: Vec<String>,
-    pub expires: Option<String>,
 }
 
 impl Credential {
