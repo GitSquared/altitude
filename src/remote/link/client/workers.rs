@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use tokio::time;
+use tokio::{io::AsyncReadExt, time};
 
 use super::*;
 
@@ -166,20 +166,30 @@ impl LinkClient {
         }
     }
 
-    // Receive a collected file or tree on the stream the call opened.
+    // Receive a collected file or tree on the stream the call opened. The sink is the
+    // caller's, so a caller that must not let go of the source before the copy is on
+    // its disk can flush it before this returns.
     pub(crate) async fn worker_collect(
         &self,
         peer: impl Into<EndpointAddr>,
         request: &WorkerRequest,
-        mut sink: AsyncFile,
+        sink: &mut AsyncFile,
     ) -> LinkResult<(u64, u64)> {
         let dial = self.dial(peer, Conversation::Worker).await?;
         let (mut send, mut recv) = dial.0.open_bi().await?;
         write_frame(&mut send, request).await?;
         send.finish()?;
         match read_frame::<_, WorkerReply>(&mut recv).await? {
-            WorkerReply::Blob { files, bytes, .. } => {
-                copy(&mut recv, &mut sink).await?;
+            // The frame says how many bytes follow, and that is the whole account of
+            // completeness there is: a stream that ended early looks exactly like one
+            // that ended, so what arrives is counted against the length declared.
+            WorkerReply::Blob { len, files, bytes } => {
+                let copied = copy(&mut recv.take(len), sink).await?;
+                if copied != len {
+                    return Err(
+                        format!("{copied} of {len} bytes of a worker's blob arrived").into(),
+                    );
+                }
                 Ok((files, bytes))
             }
             WorkerReply::Failed(reason) => Err(reason.into()),

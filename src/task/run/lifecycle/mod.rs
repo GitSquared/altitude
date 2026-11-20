@@ -443,12 +443,18 @@ where
             CommandEvent::Output { .. } => unreachable!("output is handled by the event_loop"),
         };
         let error = diagnostic.map_or(error.clone(), |detail| format!("{error}: {detail}"));
+        // A failed turn is still a turn that is over, so its sandbox is put away the way
+        // a pause puts one away: a task that stopped working must not go on holding a
+        // machine while the record says nothing is happening.
+        let capsule = self.suspend_capsule(task).await;
         let mut events = vec![run_ended(agent_run, TaskAgentRunOutcome::Failed, exit_code)];
-        events.extend(self.stopped_events(error));
+        events.extend(capsule.workspace_events());
+        events.extend(failure_events(format!(
+            "{error}. {}",
+            capsule.workspace_report(task)
+        )));
         match self.record_run_outcome(agent_run, &events).await? {
-            Some(task) => Ok(task),
-            // The task moved on while this ending was in flight, so the newer run's
-            // record stands and this one is left as it was read.
+            Some(updated) => Ok(updated),
             None => Ok(task.clone()),
         }
     }

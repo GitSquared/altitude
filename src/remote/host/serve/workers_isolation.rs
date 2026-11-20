@@ -9,8 +9,8 @@ use std::{
 
 use iroh::EndpointAddr;
 use tempfile::NamedTempFile;
-use tokio::fs::File as AsyncFile;
 use tokio::sync::watch;
+use tokio::{fs::File as AsyncFile, io::AsyncWriteExt};
 
 use crate::{
     config::Config,
@@ -78,18 +78,38 @@ impl WorkersIsolation {
         self.checkouts.lock().ok()?.get(id).cloned().flatten()
     }
 
+    // Whether a host still carries a sandbox. A host that cannot be asked has not said
+    // it lost anything, and callers decide a host's fate from this answer: an unanswered
+    // question must not destroy the work it was about.
     async fn sandbox_is_there(&self, worker: &str, id: &str) -> bool {
-        matches!(
-            self.call_on(worker, WorkerCall::HasSandbox { id: id.to_owned() })
-                .await,
-            Ok(WorkerReply::Bool(true))
-        )
+        match self
+            .call_on(worker, WorkerCall::HasSandbox { id: id.to_owned() })
+            .await
+        {
+            Ok(WorkerReply::Bool(present)) => present,
+            answer => {
+                tracing::warn!(
+                    worker,
+                    sandbox = %id,
+                    answer = ?answer,
+                    "a host did not say whether it still holds a sandbox"
+                );
+                true
+            }
+        }
+    }
+
+    // A worker that is not connected has not said it lost anything: a sandbox on it is
+    // unreachable, which is a different answer from gone, and only this remote's own
+    // record of the host it handed a sandbox to can say it is gone.
+    fn peer_of(&self, worker: &str) -> Result<EndpointAddr, IsolationError> {
+        self.fleet.peer(worker).ok_or_else(|| {
+            IsolationError::new(format!("isolation worker {worker} is not connected"))
+        })
     }
 
     async fn call_on(&self, worker: &str, call: WorkerCall) -> Result<WorkerReply, IsolationError> {
-        let peer = self.fleet.peer(worker).ok_or_else(|| {
-            IsolationError::missing_sandbox(format!("isolation worker {worker} is gone"))
-        })?;
+        let peer = self.peer_of(worker)?;
         let request = WorkerRequest {
             token: self.fleet.token().to_owned(),
             call,
@@ -107,9 +127,7 @@ impl WorkersIsolation {
         profiles: &[WorkerProfile],
         progress: &dyn EnvironmentProgressSink,
     ) -> Result<WorkerReply, IsolationError> {
-        let peer = self.fleet.peer(worker).ok_or_else(|| {
-            IsolationError::missing_sandbox(format!("isolation worker {worker} is gone"))
-        })?;
+        let peer = self.peer_of(worker)?;
         let request = WorkerRequest {
             token: self.fleet.token().to_owned(),
             call,
@@ -201,9 +219,7 @@ impl WorkersIsolation {
         let worker = self.placement(id).ok_or_else(|| {
             IsolationError::missing_sandbox(format!("sandbox {id} is not on a worker"))
         })?;
-        self.fleet.peer(&worker).ok_or_else(|| {
-            IsolationError::missing_sandbox(format!("isolation worker {worker} is gone"))
-        })
+        self.peer_of(&worker)
     }
 
     // The operator's files for these recipes, gathered as the remote push gathers
@@ -284,6 +300,15 @@ fn checkout_guest(project: &Project) -> Option<String> {
     project
         .checkout_path()
         .and_then(|path| guest_absolute(&path).ok())
+}
+
+async fn sync_directory(path: &Path) -> Result<(), IsolationError> {
+    AsyncFile::open(path)
+        .await
+        .map_err(|error| IsolationError::new(error.to_string()))?
+        .sync_all()
+        .await
+        .map_err(|error| IsolationError::new(error.to_string()))
 }
 
 fn expect_ok(reply: WorkerReply) -> Result<(), IsolationError> {
@@ -558,9 +583,7 @@ impl IsolationEngine for WorkersIsolation {
         let worker = self.placement(&id).ok_or_else(|| {
             IsolationError::missing_sandbox(format!("sandbox {id} is not on a worker"))
         })?;
-        let peer = self.fleet.peer(&worker).ok_or_else(|| {
-            IsolationError::missing_sandbox(format!("isolation worker {worker} is gone"))
-        })?;
+        let peer = self.peer_of(&worker)?;
         let request = WorkerRequest {
             token: self.fleet.token().to_owned(),
             call: WorkerCall::RunCommand { id, command },
@@ -601,10 +624,7 @@ impl IsolationEngine for WorkersIsolation {
         let Some(worker) = self.placement(&id) else {
             return false;
         };
-        matches!(
-            self.call_on(&worker, WorkerCall::HasSandbox { id }).await,
-            Ok(WorkerReply::Bool(true))
-        )
+        self.sandbox_is_there(&worker, &id).await
     }
 
     async fn suspend(
@@ -617,7 +637,12 @@ impl IsolationEngine for WorkersIsolation {
         if let Some(parent) = destination.parent() {
             fs::create_dir_all(parent).map_err(|error| IsolationError::new(error.to_string()))?;
         }
-        let sink = AsyncFile::create(&destination)
+        // The archive is received beside its name and takes the name only once it is
+        // whole and on this machine's disk: a transfer that stops halfway must not leave
+        // a file a resume would trust, and must not disturb a snapshot already kept.
+        let partial = NamedTempFile::new_in(&snapshots_dir)
+            .map_err(|error| IsolationError::new(error.to_string()))?;
+        let mut sink = AsyncFile::create(partial.path())
             .await
             .map_err(|error| IsolationError::new(error.to_string()))?;
         let peer = self.peer_for(&id)?;
@@ -628,12 +653,28 @@ impl IsolationEngine for WorkersIsolation {
                 checkout: self.checkout_of(&id),
             },
         };
-        // The host is released only once the archive is on the master, so a crash
+        // The host is released only once the archive is whole and flushed, so a crash
         // mid-snapshot leaves the task rebuildable rather than silent.
         self.client
-            .worker_collect(peer, &request, sink)
+            .worker_collect(peer, &request, &mut sink)
             .await
             .map_err(|error| IsolationError::new(error.to_string()))?;
+        sink.flush()
+            .await
+            .map_err(|error| IsolationError::new(error.to_string()))?;
+        sink.sync_all()
+            .await
+            .map_err(|error| IsolationError::new(error.to_string()))?;
+        drop(sink);
+        partial
+            .persist(&destination)
+            .map_err(|error| IsolationError::new(error.to_string()))?;
+        // A name is durable only once the directory that holds it is, and the host
+        // holding the only other copy of this tree is released after this.
+        if let Err(error) = sync_directory(&snapshots_dir).await {
+            let _ = fs::remove_file(&destination);
+            return Err(error);
+        }
         self.deprovision_host(&id).await;
         Ok(destination)
     }
@@ -679,7 +720,7 @@ impl IsolationEngine for WorkersIsolation {
     ) -> Result<FileTally, IsolationError> {
         let peer = self.peer_for(&id)?;
         let tar = NamedTempFile::new().map_err(|error| IsolationError::new(error.to_string()))?;
-        let sink = AsyncFile::create(tar.path())
+        let mut sink = AsyncFile::create(tar.path())
             .await
             .map_err(|error| IsolationError::new(error.to_string()))?;
         let request = WorkerRequest {
@@ -688,7 +729,7 @@ impl IsolationEngine for WorkersIsolation {
         };
         let (files, bytes) = self
             .client
-            .worker_collect(peer, &request, sink)
+            .worker_collect(peer, &request, &mut sink)
             .await
             .map_err(|error| IsolationError::new(error.to_string()))?;
         extract_tree(tar.path(), &destination).map_err(IsolationError::new)?;
@@ -702,7 +743,7 @@ impl IsolationEngine for WorkersIsolation {
         host_path: PathBuf,
     ) -> Result<u64, IsolationError> {
         let peer = self.peer_for(&id)?;
-        let sink = AsyncFile::create(&host_path)
+        let mut sink = AsyncFile::create(&host_path)
             .await
             .map_err(|error| IsolationError::new(error.to_string()))?;
         let request = WorkerRequest {
@@ -711,7 +752,7 @@ impl IsolationEngine for WorkersIsolation {
         };
         let (_files, bytes) = self
             .client
-            .worker_collect(peer, &request, sink)
+            .worker_collect(peer, &request, &mut sink)
             .await
             .map_err(|error| IsolationError::new(error.to_string()))?;
         Ok(bytes)
