@@ -525,11 +525,19 @@ fn write_profiles(config: &Config, profiles: &[WorkerProfile]) -> Result<(), Str
             if let Some(parent) = target.parent() {
                 fs::create_dir_all(parent).map_err(|error| error.to_string())?;
             }
-            fs::write(&target, bytes).map_err(|error| error.to_string())?;
+            // Written beside its name and renamed, like every other file a mount carries:
+            // the profile is mounted into the sandbox that is about to start, and a reader
+            // must never see a half-written one.
+            let arriving = target.with_file_name(format!(
+                ".{}.arriving",
+                target.file_name().unwrap_or_default().to_string_lossy()
+            ));
+            fs::write(&arriving, bytes).map_err(|error| error.to_string())?;
             // A profile is credentials: a key the umask leaves world-readable is a key git
             // refuses to sign with, and one anybody on the host could have copied.
-            fs::set_permissions(&target, fs::Permissions::from_mode(0o600))
+            fs::set_permissions(&arriving, fs::Permissions::from_mode(0o600))
                 .map_err(|error| error.to_string())?;
+            fs::rename(&arriving, &target).map_err(|error| error.to_string())?;
         }
     }
     Ok(())
