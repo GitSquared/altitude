@@ -37,7 +37,7 @@ mod testkit;
 mod tracker;
 mod tui;
 
-#[cfg(any(debug_assertions, feature = "preview"))]
+#[cfg(any(debug_assertions, feature = "preview", feature = "testkit"))]
 use std::env;
 mod vcs;
 mod version;
@@ -49,6 +49,18 @@ async fn main() -> ExitCode {
     #[cfg(any(debug_assertions, feature = "preview"))]
     if env::var_os("ALTITUDE_PREVIEW").is_some() {
         return match tui::preview().await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("Error: {error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    // A debug build can run the controlled credential-renewal fixture and print the
+    // verdict, without a terminal, a network or a model.
+    #[cfg(any(debug_assertions, feature = "testkit"))]
+    if env::var_os("ALTITUDE_CREDENTIAL_FIXTURE").is_some() {
+        return match testkit::credential_renewal_fixture().await {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 eprintln!("Error: {error}");
