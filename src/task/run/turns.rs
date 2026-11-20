@@ -18,7 +18,7 @@ use crate::{
     task::{
         IsolationError, Task, TaskAgentRun, TaskAgentRunOutcome, TaskAskAuthor, TaskAskKind,
         TaskError, TaskExecutionMode, TaskExecutionPauseReason, TaskExecutionStatus,
-        TaskHistoryEvent, TaskService, TaskServiceError, run_ended, snapshot_name,
+        TaskHistoryEvent, TaskService, TaskServiceError, run_ended,
     },
 };
 
@@ -404,17 +404,18 @@ where
         if !self.run_can_settle(agent_run).await? {
             return Ok(task.clone());
         }
-        let snapshot_path = self.suspend_capsule(task).await?;
-        let events = [
-            run_ended(agent_run, TaskAgentRunOutcome::AwaitingOperator, Some(0)),
-            TaskHistoryEvent::ExecutionPaused {
-                execution_status: TaskExecutionStatus::Paused,
-                sandbox_available: false,
-                snapshot_available: true,
-                execution_pause_reason: reason,
-                snapshot_path,
-            },
-        ];
+        let capsule = self.suspend_capsule(task).await;
+        let events = match capsule.pause_event(task, reason) {
+            Some(pause) => vec![
+                run_ended(agent_run, TaskAgentRunOutcome::AwaitingOperator, Some(0)),
+                pause,
+            ],
+            None => {
+                let mut events = vec![run_ended(agent_run, TaskAgentRunOutcome::Failed, None)];
+                events.extend(capsule.unpaused_events(task, "This turn could not be paused."));
+                events
+            }
+        };
         let updated = self
             .record_run_outcome_snapshot(task, agent_run, &events)
             .await?;
@@ -434,21 +435,22 @@ where
         if !self.run_can_settle(agent_run).await? {
             return Ok(task.clone());
         }
-        let snapshot_path = self.suspend_capsule(task).await?;
-        let events = [
-            run_ended(agent_run, TaskAgentRunOutcome::Limited, exit_code),
-            TaskHistoryEvent::ExecutionPaused {
-                execution_status: TaskExecutionStatus::Paused,
-                sandbox_available: false,
-                snapshot_available: true,
-                execution_pause_reason: TaskExecutionPauseReason::AwaitingLimit,
-                snapshot_path,
-            },
-            TaskHistoryEvent::LimitHeld {
-                window,
-                clears_at_ms,
-            },
-        ];
+        let capsule = self.suspend_capsule(task).await;
+        let events = match capsule.pause_event(task, TaskExecutionPauseReason::AwaitingLimit) {
+            Some(pause) => vec![
+                run_ended(agent_run, TaskAgentRunOutcome::Limited, exit_code),
+                pause,
+                TaskHistoryEvent::LimitHeld {
+                    window,
+                    clears_at_ms,
+                },
+            ],
+            None => {
+                let mut events = vec![run_ended(agent_run, TaskAgentRunOutcome::Failed, exit_code)];
+                events.extend(capsule.unpaused_events(task, "This turn could not be paused."));
+                events
+            }
+        };
         let updated = self
             .record_run_outcome_snapshot(task, agent_run, &events)
             .await?;
@@ -465,22 +467,26 @@ where
         {
             return Ok(task.clone());
         }
-        let snapshot_path = self.suspend_capsule(task).await?;
+        let capsule = self.suspend_capsule(task).await;
         let mut events = Vec::new();
-        if let Some(agent_run) = agent_run {
-            events.push(run_ended(
-                agent_run,
-                TaskAgentRunOutcome::AwaitingOperator,
-                Some(0),
-            ));
+        match capsule.pause_event(task, TaskExecutionPauseReason::AwaitingReviewChecks) {
+            Some(pause) => {
+                if let Some(agent_run) = agent_run {
+                    events.push(run_ended(
+                        agent_run,
+                        TaskAgentRunOutcome::AwaitingOperator,
+                        Some(0),
+                    ));
+                }
+                events.push(pause);
+            }
+            None => {
+                if let Some(agent_run) = agent_run {
+                    events.push(run_ended(agent_run, TaskAgentRunOutcome::Failed, None));
+                }
+                events.extend(capsule.unpaused_events(task, "This turn could not be paused."));
+            }
         }
-        events.push(TaskHistoryEvent::ExecutionPaused {
-            execution_status: TaskExecutionStatus::Paused,
-            sandbox_available: false,
-            snapshot_available: true,
-            execution_pause_reason: TaskExecutionPauseReason::AwaitingReviewChecks,
-            snapshot_path,
-        });
         match agent_run {
             Some(agent_run) => {
                 let updated = self
@@ -489,56 +495,6 @@ where
                 Ok(updated.unwrap_or_else(|| task.clone()))
             }
             None => self.record_snapshot(task, &events).await,
-        }
-    }
-
-    async fn suspend_capsule(&self, task: &Task) -> Result<String, TaskServiceError> {
-        // Everything this machine holds open in the guest is closed first. An agent
-        // channel or a port relay is a session the guest is still serving, and a
-        // guest with something to serve does not quiesce for a graceful stop — which
-        // is what left a snapshot waiting on a shutdown that never came.
-        self.release_agent_channel(&task.id);
-        self.release_ports(task);
-        let sandbox_id = task
-            .facts
-            .sandbox_id
-            .clone()
-            .ok_or(TaskServiceError::Task(TaskError::MissingSandbox))?;
-        // The sandbox has to be still before it is packed, or the archive reads a tree
-        // that is still being written and the pause keeps nothing.
-        if let Err(error) = self.isolation.stop_work(sandbox_id.clone()).await {
-            tracing::warn!(%error, "could not stop the sandbox before archiving it");
-        }
-        match self
-            .isolation
-            .suspend(
-                sandbox_id.clone(),
-                snapshot_name(&task.id),
-                self.snapshots_dir.clone(),
-            )
-            .await
-        {
-            Ok(path) => Ok(path.to_string_lossy().into_owned()),
-            // A capsule that could not be packed is a pause that keeps no snapshot: the
-            // task keeps its record and its memory, and the next run builds a sandbox
-            // again. Ending the task here ends the work the operator was watching, which
-            // is a worse answer than a slower next start — and this is the pause an agent
-            // still writing in its own sandbox can always provoke.
-            Err(error) => {
-                tracing::warn!(
-                    task_id = %task.id,
-                    snapshots = %self.snapshots_dir.display(),
-                    %error,
-                    "a task's sandbox could not be saved; the pause keeps no snapshot"
-                );
-                // The sandbox can only live on the host that made it, and a task that
-                // cannot use it has no business holding that host. Letting it go leaves
-                // the machine unclaimed, which is what hands it back.
-                if let Err(error) = self.isolation.remove(sandbox_id).await {
-                    tracing::warn!(%error, "could not remove a sandbox whose pause kept no snapshot");
-                }
-                Ok(String::new())
-            }
         }
     }
 

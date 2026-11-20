@@ -64,6 +64,7 @@ impl App {
             credentials,
             defaults: self.project_defaults(),
             tracker_states,
+            profiles: self.profiles.clone(),
             base: self.base_description.clone(),
         }
     }
@@ -227,13 +228,6 @@ impl App {
             } => public_identity(&id, output),
             _ => None,
         };
-        // How long the credential in this profile will keep working, from its own files:
-        // the row an operator looks at says it, rather than a task finding out.
-        let expires = self
-            .profiles
-            .iter()
-            .find(|summary| summary.profile == id)
-            .and_then(|summary| summary.expires.clone());
         Row {
             label: label.clone(),
             detail: Some(format!(
@@ -245,7 +239,6 @@ impl App {
                 label,
                 kind,
                 used_by,
-                expires,
             }),
         }
     }
@@ -255,7 +248,6 @@ impl App {
         let hostname = hostname();
         Credential {
             label: hostname.clone(),
-            expires: None,
             kind: CredentialKind::Installation {
                 hostname,
                 label: identity

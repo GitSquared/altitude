@@ -3,7 +3,7 @@ use crate::{
     config::InstallationIdentity,
     credentials,
     isolation::{
-        CommandEvent, CommandSession, FileTransferSink, IsolationEngine, SandboxOptions,
+        CommandEvent, CommandSession, FileTransferSink, GuestPath, IsolationEngine, SandboxOptions,
         SandboxPurpose, VsockRoute, guest_absolute, mounts,
     },
     project::Project,
@@ -11,8 +11,10 @@ use crate::{
 };
 use futures_util::future::join_all;
 
+static SESSION_WRITE: SessionMutex<()> = SessionMutex::new(());
+
 use crate::isolation::EnvironmentProgressSink;
-use std::{fs, path::PathBuf, time::Instant};
+use std::{fs, path::Path, path::PathBuf, sync::Mutex as SessionMutex, time::Instant};
 use uuid::Uuid;
 
 use crate::remote::{TRANSCRIPT_FILE, WORK_PLAIN_FILE};
@@ -443,15 +445,115 @@ where
             CommandEvent::Output { .. } => unreachable!("output is handled by the event_loop"),
         };
         let error = diagnostic.map_or(error.clone(), |detail| format!("{error}: {detail}"));
+        // A failed turn is still a turn that is over, so its sandbox is put away the way
+        // a pause puts one away: a task that stopped working must not go on holding a
+        // machine while the record says nothing is happening.
+        let capsule = self.suspend_capsule(task).await;
         let mut events = vec![run_ended(agent_run, TaskAgentRunOutcome::Failed, exit_code)];
-        events.extend(self.stopped_events(error));
+        events.extend(capsule.workspace_events());
+        events.extend(failure_events(format!(
+            "{error}. {}",
+            capsule.workspace_report(task)
+        )));
         match self.record_run_outcome(agent_run, &events).await? {
-            Some(task) => Ok(task),
-            // The task moved on while this ending was in flight, so the newer run's
-            // record stands and this one is left as it was read.
+            Some(updated) => Ok(updated),
             None => Ok(task.clone()),
         }
     }
+    // One session write at a time: two tasks of the same operator can end together, and each
+    // wants to compare its own copy against the profile before replacing it.
+    // A turn refreshes the agent's session inside its sandbox, and that copy is the one that
+    // was actually spent: a host's profile copy dies with the host, so the profile the next
+    // task starts from would keep a session whose refresh already happened elsewhere. What the
+    // sandbox left is written over the profile only when its own deadline is later: a task
+    // that stopped before it refreshed must not put an older session back, and neither may a
+    // copy that arrived from a machine that has been away.
+    pub(crate) async fn keep_agent_session(&self, task: &Task) {
+        let (Some(sandbox), Some(project), Some(kind)) = (
+            task.facts.sandbox_id.clone(),
+            task.project(),
+            task.agent_kind,
+        ) else {
+            return;
+        };
+        let profile = project
+            .agent_credential
+            .clone()
+            .unwrap_or_else(|| kind.profile().to_owned());
+        let Ok(recipe) = self.credentials.recipe(&profile) else {
+            return;
+        };
+        let Some(root) = recipe
+            .directories
+            .first()
+            .map(|directory| match directory.guest_path {
+                GuestPath::Absolute(path) | GuestPath::HomeRelative(path) => path.to_owned(),
+            })
+        else {
+            return;
+        };
+        if recipe.session_keep.is_empty() {
+            return;
+        }
+        let scope = match task.operator_id() {
+            Some(owner) => match self.credentials.config().for_operator(owner) {
+                Ok(scope) => scope,
+                Err(error) => {
+                    tracing::warn!(task = %task.id, %error, "a refreshed session has no profile to go back to");
+                    return;
+                }
+            },
+            None => self.credentials.config().clone(),
+        };
+        let directory = scope.scoped_data_dir().join(&profile).join("profile");
+        if let Err(error) = fs::create_dir_all(&directory) {
+            tracing::warn!(task = %task.id, %error, "a refreshed session has nowhere to go");
+            return;
+        }
+        // Collected first, compared and put in place after: the wait for a file is not a
+        // reason to hold the one lock that orders two tasks' writes.
+        let mut arriving = Vec::new();
+        for name in recipe.session_keep {
+            let guest = format!("{root}/{name}");
+            let profile_file = directory.join(name);
+            let staged = directory.join(format!(".{name}.arriving"));
+            match self
+                .isolation
+                .collect_file(sandbox.clone(), guest, staged.clone())
+                .await
+            {
+                Ok(_) => arriving.push((staged, profile_file)),
+                Err(error) => {
+                    tracing::warn!(task = %task.id, %error, %profile, "a refreshed session did not come back out of the sandbox");
+                    let _ = fs::remove_file(&staged);
+                }
+            }
+        }
+        let _one_at_a_time = SESSION_WRITE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for (staged, profile_file) in arriving {
+            let deadline_of = |path: &Path| {
+                fs::read_to_string(path)
+                    .ok()
+                    .and_then(|contents| (recipe.session_deadline?)(&contents))
+            };
+            let newer = match (deadline_of(&staged), deadline_of(&profile_file)) {
+                (Some(arriving), Some(here)) => arriving > here,
+                (Some(_), None) => true,
+                _ => false,
+            };
+            if newer {
+                if let Err(error) = fs::rename(&staged, &profile_file) {
+                    tracing::warn!(task = %task.id, %error, "a refreshed session did not take its place");
+                    let _ = fs::remove_file(&staged);
+                }
+            } else {
+                let _ = fs::remove_file(&staged);
+            }
+        }
+    }
+
     pub async fn remove(&self, task: Task) -> Result<(), TaskServiceError> {
         // Record cancellation before cleanup so a concurrent provision cannot resume the work.
         self.store

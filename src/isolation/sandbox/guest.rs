@@ -129,6 +129,23 @@ pub(crate) async fn run_collecting(
     ))
 }
 
+// A project's setup is the project's: it runs where the code is, once the task's checkout is
+// there, and never on a machine that has not seen the repository.
+pub(crate) fn project_setup(project: &Project) -> Result<String, IsolationError> {
+    let setup = project.setup_command.trim_end();
+    if setup.is_empty() {
+        return Ok(String::new());
+    }
+    let Some(checkout) = project.checkout_path() else {
+        return Ok(format!("\n{setup}\n"));
+    };
+    let checkout = expand_guest_path(&checkout)?;
+    Ok(format!(
+        "\ncd {}\n{setup}\n",
+        shell_quote(&checkout.to_string_lossy())
+    ))
+}
+
 pub(crate) const SETUP_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
 pub(crate) async fn run_setup(

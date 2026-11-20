@@ -221,10 +221,8 @@ pub(super) async fn run_step(
     // would not have said as it went. That output is logged rather than swallowed: on a
     // host it travels to the master with the rest of the host's log, so an install that
     // is slow and one that is wedged look different.
-    //
-    // Corepack asks before it downloads a package manager, and there is nobody here to
-    // answer: without this it waits out the step's whole patience on a question.
-    builder.env("COREPACK_ENABLE_DOWNLOAD_PROMPT", "0");
+    // A step has nobody to answer it, and a tool that asks anyway should be told so.
+    builder.env("CI", "true");
     builder.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = builder
         .spawn()

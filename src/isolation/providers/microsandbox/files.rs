@@ -369,12 +369,19 @@ pub(super) async fn carry_out(
         },
     )
     .await?;
+    // Beside its name, then renamed: a profile written here is the same file a sandbox has
+    // mounted, and a reader — the harness inside an open shell — must never see the half of it
+    // that a truncate leaves behind.
+    let arriving = host.with_file_name(format!(
+        ".{}.arriving",
+        host.file_name().unwrap_or_default().to_string_lossy()
+    ));
     let mut file = fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
         .mode(0o600)
-        .open(host)
+        .open(&arriving)
         .map_err(io_error)?;
     let mut offset = 0u64;
     let copied = loop {
@@ -393,7 +400,8 @@ pub(super) async fn carry_out(
     close_guest_handle(fs, handle, guest).await;
     let written = copied?;
     drop(file);
-    fs::set_permissions(host, fs::Permissions::from_mode(mode)).map_err(io_error)?;
+    fs::set_permissions(&arriving, fs::Permissions::from_mode(mode)).map_err(io_error)?;
+    fs::rename(&arriving, host).map_err(io_error)?;
     Ok(written)
 }
 

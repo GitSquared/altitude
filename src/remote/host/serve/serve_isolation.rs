@@ -201,6 +201,17 @@ impl IsolationEngine for ServeIsolation {
         }
     }
 
+    // Each variant's engine answers this: a worker from its own account's processes, a
+    // microVM inside its guest.
+    fn stop_work(&self, id: String) -> impl Future<Output = Result<(), IsolationError>> + Send {
+        async move {
+            match self {
+                Self::Microsandbox(engine) => engine.stop_work(id).await,
+                Self::Workers(engine) => engine.stop_work(id).await,
+            }
+        }
+    }
+
     fn project_snapshot(&self, project: Project, recipes: Vec<ProfileRecipe>) -> Option<String> {
         match self {
             Self::Microsandbox(engine) => engine.project_snapshot(project, recipes),

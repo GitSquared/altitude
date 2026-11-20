@@ -353,6 +353,11 @@ impl RemoteTracker {
             .into_iter()
             .collect();
         let redelegation = !replaced.is_empty();
+        // A task that could not be put away keeps the issue: a second capsule on it is
+        // two tasks doing the same work, and the machine has no copy of what the first
+        // one still holds. The delivery is retried, which finds that task still in play
+        // and tries it again rather than reporting a replacement that did not happen.
+        let mut unpaused = None;
         for task in &replaced {
             if let Err(error) = host
                 .stop(
@@ -361,7 +366,12 @@ impl RemoteTracker {
                 )
                 .await
             {
-                tracing::warn!(task = %task.task_id, %error, "could not stop a replaced task");
+                tracing::warn!(
+                    task = %task.task_id,
+                    %error,
+                    "a replaced task could not be stopped; the new delegation waits"
+                );
+                unpaused.get_or_insert(error);
                 continue;
             }
             if let Some(report) = self.report_for_task(&task.task_id) {
@@ -383,6 +393,11 @@ impl RemoteTracker {
                     tracing::warn!(task = %task.task_id, %error, "could not retire a replaced task's report");
                 }
             }
+        }
+        if let Some(error) = unpaused {
+            return Err(format!(
+                "a task this delegation replaces could not be stopped: {error}"
+            ));
         }
 
         let Some(owner) = self.owner_for_user(author) else {

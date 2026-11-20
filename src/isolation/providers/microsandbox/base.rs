@@ -269,13 +269,12 @@ impl MicrosandboxIsolation {
     ) -> Result<i32, IsolationError> {
         // Every command here is one-shot: nothing writes its stdin, so a step that
         // asks a question waits on a pipe that will never be written — corepack's
-        // "about to download pnpm, continue?" is one keystroke away from a build
-        // that never ends. Closed stdin turns that prompt into the end of the file
-        // the command already has to handle.
+        // A step has no one to answer it: closed stdin turns any prompt into the end of
+        // the file the command already has to handle.
         let mut session = self
             .run_command(
                 sandbox_id.to_owned(),
-                format!("set -eu\nexec < /dev/null\n{command}"),
+                format!("set -eu\nexec < /dev/null\nexport CI=true\n{command}"),
             )
             .await?;
         loop {

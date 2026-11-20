@@ -56,6 +56,9 @@ pub(crate) enum WorkerCall {
         id: String,
         command: String,
     },
+    Stop {
+        id: String,
+    },
     // A tree or a file moves as a stream on the same connection: the request names
     // the sandbox side, the bytes follow, and the reply says how it went.
     DeliverFile {
@@ -130,6 +133,13 @@ pub(crate) enum WorkerReply {
     Bool(bool),
     Text(String),
     Failed(String),
+}
+
+impl WorkerReply {
+    // What a host says on the way to its answer, never the answer itself.
+    pub(crate) fn is_narration(&self) -> bool {
+        matches!(self, Self::Progress { .. } | Self::Log { .. })
+    }
 }
 
 // What flows on a command's stream in each direction.

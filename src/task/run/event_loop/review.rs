@@ -210,7 +210,10 @@ where
         }
         events.push(TaskHistoryEvent::ExecutionPaused {
             execution_status: TaskExecutionStatus::Paused,
-            sandbox_available: false,
+            // Read rather than assumed: a hold that could not release its capsule still
+            // has the sandbox, and saying it is gone would forget the work in it until
+            // the task was removed.
+            sandbox_available: task.facts.sandbox_available,
             snapshot_available: task.facts.snapshot_available,
             execution_pause_reason: TaskExecutionPauseReason::AwaitingOperator,
             snapshot_path: task.facts.snapshot_path.clone().unwrap_or_default(),

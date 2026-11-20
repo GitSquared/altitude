@@ -15,6 +15,9 @@ where
                 .sandbox_id
                 .clone()
                 .ok_or(TaskServiceError::Task(TaskError::MissingSandbox))?;
+            // The sandbox is about to go: take the session it refreshed back to the profile
+            // that will hand the next one out.
+            self.keep_agent_session(&task).await;
             if let Err(error) = self.isolation.remove(id).await {
                 if !task.facts.accepted {
                     self.fail(&task, error.to_string()).await?;
@@ -249,146 +252,53 @@ where
         join_all(tasks.into_iter().filter(should_suspend).map(|task| {
             let service = self.clone();
             let reason = reason.clone();
-            async move {
-                // A task that says it has a sandbox and cannot name one has none to stop.
-                // Recording the pause without a snapshot is what the engine's own answer
-                // means, and it is not worth taking the process down for: this runs while
-                // an operator is closing the window, when the work being saved matters
-                // more than the invariant being right.
-                let Some(sandbox_id) = task.facts.sandbox_id.clone() else {
-                    service
-                        .record(
-                            &task.id,
-                            &[TaskHistoryEvent::ExecutionPaused {
-                                execution_status: TaskExecutionStatus::Paused,
-                                sandbox_available: false,
-                                snapshot_available: task.facts.snapshot_available,
-                                execution_pause_reason: reason.clone(),
-                                snapshot_path: task.facts.snapshot_path.clone().unwrap_or_default(),
-                            }],
-                        )
-                        .await?;
-                    return Ok(());
-                };
-                if let Err(error) = service.isolation.stop_work(sandbox_id.clone()).await {
-                    tracing::warn!(%error, "could not stop the sandbox before archiving it");
-                }
-                match service
-                    .isolation
-                    .suspend(
-                        sandbox_id,
-                        snapshot_name(&task.id),
-                        service.snapshots_dir.clone(),
-                    )
-                    .await
-                {
-                    Ok(path) => {
-                        let snapshot_path = path.to_string_lossy().into_owned();
-                        let event = if task.facts.execution_status == TaskExecutionStatus::Failed {
-                            TaskHistoryEvent::TaskSnapshotSaved {
-                                snapshot_path,
-                                sandbox_available: false,
-                                snapshot_available: true,
-                            }
-                        } else {
-                            TaskHistoryEvent::ExecutionPaused {
-                                execution_status: TaskExecutionStatus::Paused,
-                                sandbox_available: false,
-                                snapshot_available: true,
-                                execution_pause_reason: reason,
-                                snapshot_path,
-                            }
-                        };
-                        service.record_snapshot(&task, &[event]).await?;
-                        service.release_agent_channel(&task.id);
-                        Ok(())
-                    }
-                    Err(error) if error.is_missing_sandbox() => {
-                        // There is no capsule to stop, so there is nothing to keep:
-                        // the pause is recorded without one, and the next run builds
-                        // it again.
-                        service
-                            .record(
-                                &task.id,
-                                &[TaskHistoryEvent::ExecutionPaused {
-                                    execution_status: TaskExecutionStatus::Paused,
-                                    sandbox_available: false,
-                                    snapshot_available: task.facts.snapshot_available,
-                                    execution_pause_reason: reason.clone(),
-                                    snapshot_path: task
-                                        .facts
-                                        .snapshot_path
-                                        .clone()
-                                        .unwrap_or_default(),
-                                }],
-                            )
-                            .await?;
-                        Ok(())
-                    }
-                    // A machine that is going down has nothing to do about it: the
-                    // task keeps the state it has, and the boot that follows works out
-                    // what survived. Recording a failure here would end a task because
-                    // its host restarted, and queuing it would hand work to a process
-                    // that is about to be gone.
-                    Err(error) if reason == TaskExecutionPauseReason::ApplicationShutdown => {
-                        tracing::warn!(
-                            task_id = %task.id,
-                            %error,
-                            "a task could not be saved before the machine stopped"
-                        );
-                        Ok(())
-                    }
-                    // A capsule that could not be packed is a capsule this pause does
-                    // not keep, and that is all it costs: the task keeps its record and
-                    // its memory, and the next run builds a sandbox again. Ending the
-                    // task over it ends the work the operator was watching, which is a
-                    // worse answer than a slower next start.
-                    //
-                    // Where it was writing is half of why it could not — a file changed
-                    // while it was read, a permission denied on another machine's
-                    // directory — so the directory is in the warning.
-                    Err(error) => {
-                        tracing::warn!(
-                            task_id = %task.id,
-                            snapshots = %service.snapshots_dir.display(),
-                            %error,
-                            "a task's sandbox could not be saved; the pause keeps no snapshot"
-                        );
-                        service
-                            .record(
-                                &task.id,
-                                &[TaskHistoryEvent::ExecutionPaused {
-                                    execution_status: TaskExecutionStatus::Paused,
-                                    sandbox_available: false,
-                                    snapshot_available: false,
-                                    execution_pause_reason: reason.clone(),
-                                    snapshot_path: String::new(),
-                                }],
-                            )
-                            .await?;
-                        // A pause with no snapshot leaves a sandbox that can only live on
-                        // the host it was made on, and that host is then kept alive for a
-                        // task that cannot use it. Letting the sandbox go makes the host
-                        // unclaimed, which is what hands the machine back.
-                        if let Some(sandbox_id) = task.facts.sandbox_id.clone() {
-                            match service.isolation.remove(sandbox_id.clone()).await {
-                                Ok(()) => tracing::info!(
-                                    sandbox = %sandbox_id,
-                                    "the sandbox is gone; its host can be let go"
-                                ),
-                                Err(error) => tracing::warn!(
-                                    sandbox = %sandbox_id,
-                                    %error,
-                                    "could not remove a sandbox whose pause kept no snapshot"
-                                ),
-                            }
-                        }
-                        Ok(())
-                    }
-                }
-            }
+            async move { service.put_away(&task, reason).await }
         }))
         .await
+    }
+
+    // A task stopped by something other than the end of its turn: the tracker said the
+    // work is over, the operator is carrying it somewhere else, or the machine is going
+    // down. It is the same capsule work a pause does, and the same rule about what the
+    // record may claim afterwards.
+    async fn put_away(
+        &self,
+        task: &Task,
+        reason: TaskExecutionPauseReason,
+    ) -> Result<(), TaskServiceError> {
+        let capsule = self.suspend_capsule(task).await;
+        // A sandbox that could not be put away keeps the work in it. A machine on its
+        // way down leaves the record alone for the boot that follows to read, but
+        // anywhere else the failure is recorded and returned: what comes next is a
+        // hand-back or a hand-over, and neither is true of a workspace still on its host.
+        let Some(pause) = capsule.pause_event(task, reason.clone()) else {
+            if reason == TaskExecutionPauseReason::ApplicationShutdown {
+                tracing::warn!(
+                    task_id = %task.id,
+                    "a task's sandbox could not be saved before the machine stopped"
+                );
+                return Ok(());
+            }
+            self.record(
+                &task.id,
+                &capsule.unpaused_events(task, "This task could not be stopped."),
+            )
+            .await?;
+            return Err(TaskServiceError::Task(TaskError::OperationRejected(
+                "this task's sandbox could not be put away, so its work was kept where it is",
+            )));
+        };
+        // A task that failed is not a pause: what it keeps is where its work went, and
+        // the failure it stopped on stays the thing the operator reads.
+        let events = if task.facts.execution_status == TaskExecutionStatus::Failed {
+            capsule.workspace_events()
+        } else {
+            vec![pause]
+        };
+        if !events.is_empty() {
+            self.record_snapshot(task, &events).await?;
+        }
+        Ok(())
     }
 
     pub(crate) async fn record_snapshot(

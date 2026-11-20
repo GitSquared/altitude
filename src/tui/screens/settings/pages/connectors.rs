@@ -67,7 +67,7 @@ pub(crate) fn profile_connector(
     }
 }
 
-pub(crate) fn credential_connector(credential: &Credential) -> Connector {
+pub(crate) fn credential_connector(credential: &Credential, expires: Option<&str>) -> Connector {
     let mut connector = match &credential.kind {
         CredentialKind::Installation {
             hostname,
@@ -116,8 +116,10 @@ pub(crate) fn credential_connector(credential: &Credential) -> Connector {
     if credential.profile().is_some() {
         connector.used_by = Some(credential.used_by.clone());
     }
-    if let Some(expires) = &credential.expires {
-        connector.fields.push(("expires", expires.clone()));
+    // The list says what a credential is and whether it is signed in; how long it lasts
+    // belongs to the row an operator has opened, in the provider's own words.
+    if let Some(expires) = expires {
+        connector.fields.push(("expires", expires.to_owned()));
     }
     connector
 }

@@ -1,6 +1,6 @@
-use std::{fs, io, io::ErrorKind, path::PathBuf};
+use std::{fs, io, io::ErrorKind, path::PathBuf, process, time::Duration};
 
-use tokio::sync::watch;
+use tokio::{sync::watch, task::spawn_blocking, time::sleep};
 
 use crate::{
     isolation::{
@@ -14,6 +14,12 @@ use crate::{
 };
 
 use super::{MountRecord, SandboxRecord, TestbedIsolation, check_environment, files, machine};
+
+// Two seconds of patience for a graceful stop, then the harder signal, then time for the
+// kernel to settle it.
+const TERM_ATTEMPTS: usize = 20;
+const TERM_STEP: Duration = Duration::from_millis(100);
+const KILL_SETTLE: Duration = Duration::from_millis(200);
 
 impl IsolationEngine for TestbedIsolation {
     fn pressure(&self) -> Option<Pressure> {
@@ -208,6 +214,22 @@ impl IsolationEngine for TestbedIsolation {
         self.exists(&id)
     }
 
+    // The generic rule signals every process this sandbox's uid may signal, which here is
+    // the worker running it: the stop would take the host down before the archive. What the
+    // sandbox is on this host is the processes rooted in its root, and a stop is confirmed by
+    // their absence rather than asserted.
+    async fn stop_work(&self, id: String) -> Result<(), IsolationError> {
+        let root =
+            fs::canonicalize(self.sandbox_root(&id)).unwrap_or_else(|_| self.sandbox_root(&id));
+        let left = self.stop_sandbox_processes(root).await?;
+        if left.is_empty() {
+            return Ok(());
+        }
+        Err(IsolationError::new(format!(
+            "the sandbox's processes did not stop: {left:?}"
+        )))
+    }
+
     async fn remove_leftover_sandboxes(&self) {
         let entries = match fs::read_dir(self.sandboxes_dir()) {
             Ok(entries) => entries,
@@ -325,4 +347,67 @@ impl IsolationEngine for TestbedIsolation {
 
 fn io_error(error: io::Error) -> IsolationError {
     IsolationError::new(error.to_string())
+}
+
+impl TestbedIsolation {
+    async fn stop_sandbox_processes(&self, root: PathBuf) -> Result<Vec<u32>, IsolationError> {
+        let mut left = self.sandbox_processes(root.clone()).await?;
+        if left.is_empty() {
+            return Ok(left);
+        }
+        self.signal(&left, "-TERM").await?;
+        for _ in 0..TERM_ATTEMPTS {
+            sleep(TERM_STEP).await;
+            left = self.sandbox_processes(root.clone()).await?;
+            if left.is_empty() {
+                return Ok(left);
+            }
+        }
+        self.signal(&left, "-KILL").await?;
+        sleep(KILL_SETTLE).await;
+        self.sandbox_processes(root).await
+    }
+
+    async fn sandbox_processes(&self, root: PathBuf) -> Result<Vec<u32>, IsolationError> {
+        spawn_blocking(move || {
+            let host = process::id();
+            let Ok(processes) = fs::read_dir("/proc") else {
+                return Vec::new();
+            };
+            let mut pids = Vec::new();
+            for entry in processes.flatten() {
+                let name = entry.file_name();
+                let Ok(pid) = name.to_string_lossy().parse::<u32>() else {
+                    continue;
+                };
+                if pid == host {
+                    continue;
+                }
+                let in_sandbox = fs::read_link(entry.path().join("root"))
+                    .is_ok_and(|process_root| process_root == root);
+                if in_sandbox {
+                    pids.push(pid);
+                }
+            }
+            pids
+        })
+        .await
+        .map_err(|error| {
+            IsolationError::new(format!("listing a sandbox's processes failed: {error}"))
+        })
+    }
+
+    async fn signal(&self, pids: &[u32], signal: &str) -> Result<(), IsolationError> {
+        let pids = pids.to_vec();
+        let signal = signal.to_owned();
+        spawn_blocking(move || {
+            for pid in pids {
+                let _ = process::Command::new("kill")
+                    .args([&signal, &pid.to_string()])
+                    .status();
+            }
+        })
+        .await
+        .map_err(|error| IsolationError::new(format!("signalling a sandbox failed: {error}")))
+    }
 }
