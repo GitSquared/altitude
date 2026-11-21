@@ -73,6 +73,9 @@ pub fn store(directory: &Path, bytes: &[u8]) -> io::Result<String> {
 pub fn adopt(directory: &Path, staged: &Path) -> io::Result<String> {
     let id = blake3::hash(&fs::read(staged)?).to_hex().to_string();
     if directory.join(&id).is_file() {
+        // These bytes are held already, and nothing will ever name the copy read out of
+        // the sandbox: left where it is, it would sit in the store for good.
+        let _ = fs::remove_file(staged);
         return Ok(id);
     }
     fs::create_dir_all(directory)?;

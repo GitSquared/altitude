@@ -79,6 +79,16 @@ impl TaskStore {
             .collect()
     }
 
+    // Every body the log holds, as it was written. A picture is named by a body and not
+    // by a field of one, so a caller asking what anything still names reads these rather
+    // than a walk over the kinds of event this module happens to understand.
+    pub async fn payloads(&self) -> Result<Vec<String>, TaskError> {
+        sqlx::query_scalar("SELECT payload FROM task_event_logs")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(TaskError::Database)
+    }
+
     pub(super) async fn write_recorded_events(
         transaction: &mut Transaction<'_, Sqlite>,
         task_id: &str,

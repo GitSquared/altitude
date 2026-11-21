@@ -293,27 +293,19 @@ where
         tools
     }
 
-    // Pictures are named by the signals that carry them, so what nothing names is
+    // Pictures are named by the bodies that carry them, so what nothing names is
     // nothing. Run when the application starts: it is the only moment every body is
-    // known and none is being written.
+    // known and none is being written. Every recorded body is asked, because a deferred
+    // review holds the same body a signal does, and a picture named by either is live.
     pub async fn sweep_pictures(&self) -> Result<usize, TaskServiceError> {
         let mut keep = HashSet::new();
-        for task in self.list().await? {
-            let threads = self
-                .store
-                .signal_threads(&task.id)
-                .await
-                .map_err(TaskServiceError::Task)?;
-            for thread in threads {
-                for message in thread.messages {
-                    keep.extend(
-                        picture::take(&message.body)
-                            .1
-                            .into_iter()
-                            .map(|held| held.id),
-                    );
-                }
-            }
+        for payload in self
+            .store
+            .payloads()
+            .await
+            .map_err(TaskServiceError::Task)?
+        {
+            keep.extend(picture::take(&payload).1.into_iter().map(|named| named.id));
         }
         picture::sweep(&self.attachments_dir, &keep).map_err(|_| {
             TaskServiceError::Task(TaskError::OperationRejected("could not sweep pictures"))
