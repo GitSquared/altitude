@@ -112,6 +112,12 @@ where
             app.signals_mouse(mouse, remote_signals, event_loop).await;
             return Ok(false);
         }
+        // A prompt holds the pointer the way it holds the keys: what is behind it is
+        // not what the click was for.
+        if matches!(app.foreground, Foreground::Message(_)) {
+            app.message_mouse(mouse, event_loop, remote_signals).await;
+            return Ok(false);
+        }
         if matches!(app.foreground, Foreground::Tasks) {
             app.task_mouse(mouse);
             return Ok(false);

@@ -277,14 +277,16 @@ where
         }
         // ctrl-enter and shift-enter only arrive as keys of their own under this
         // protocol. The task grid and signals use ctrl-enter as their secondary
-        // action, and so do the creation page, the signal composer and a settings
-        // form; the signal composer uses shift-enter as well. A shell needs it
-        // too, or a prompt that asks for shift-enter only ever sees enter.
+        // action, and so do the creation page, the signal composer, a settings form
+        // and the prompt that messages an agent; the signal composer uses shift-enter
+        // as well. A shell needs it too, or a prompt that asks for shift-enter only
+        // ever sees enter.
         let wants_enhanced = matches!(
             app.foreground,
             Foreground::NewTask(_)
                 | Foreground::Tasks
                 | Foreground::Signals
+                | Foreground::Message(_)
                 | Foreground::Shell(_)
                 | Foreground::ImportLogins(_)
         ) || app.signal_composer.is_some()

@@ -102,6 +102,37 @@ impl App {
             };
             (prompt.task_id().to_owned(), prompt.handle_key(key))
         };
+        self.settle_message(task_id, decision, event_loop, remote_signals)
+            .await;
+    }
+
+    pub(in crate::tui) async fn message_mouse<E>(
+        &mut self,
+        mouse: MouseEvent,
+        event_loop: &TaskEventLoop<E>,
+        remote_signals: &mpsc::Sender<RemoteSignalsReply>,
+    ) where
+        E: IsolationEngine + Clone + 'static,
+    {
+        let (task_id, decision) = {
+            let Foreground::Message(prompt) = &self.foreground else {
+                return;
+            };
+            (prompt.task_id().to_owned(), prompt.handle_mouse(mouse))
+        };
+        self.settle_message(task_id, decision, event_loop, remote_signals)
+            .await;
+    }
+
+    async fn settle_message<E>(
+        &mut self,
+        task_id: String,
+        decision: Option<MessageDecision>,
+        event_loop: &TaskEventLoop<E>,
+        remote_signals: &mpsc::Sender<RemoteSignalsReply>,
+    ) where
+        E: IsolationEngine + Clone + 'static,
+    {
         match decision {
             Some(MessageDecision::Cancel) => self.foreground = Foreground::Signals,
             Some(MessageDecision::Send(body)) => {

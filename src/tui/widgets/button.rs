@@ -1,6 +1,7 @@
+use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{
     Frame,
-    layout::{Constraint, Flex, Layout, Rect},
+    layout::{Constraint, Flex, Layout, Position, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::Paragraph,
@@ -150,3 +151,13 @@ pub fn actions(frame: &mut Frame, modal: Rect, area: Rect, actions: &[Action]) -
 }
 
 const ACTION_GAP: u16 = 3;
+
+// Which action a click landed on, asked of the areas the row was drawn in rather than
+// of a second copy of the row's layout.
+pub fn hit(areas: &[Rect], mouse: MouseEvent) -> Option<usize> {
+    if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
+        return None;
+    }
+    let at = Position::new(mouse.column, mouse.row);
+    areas.iter().position(|area| area.contains(at))
+}

@@ -238,7 +238,7 @@ impl Drawing<'_> {
                 &mut self.app.new_task_targets,
             ));
         }
-        if let Foreground::Message(message) = &self.app.foreground {
+        if let Foreground::Message(message) = &mut self.app.foreground {
             widgets::chrome::dim(frame, content);
             modal = Some(popups::message::draw(frame, content, message));
         }

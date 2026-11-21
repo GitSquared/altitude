@@ -1,4 +1,4 @@
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, MouseEvent};
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
@@ -15,6 +15,9 @@ pub struct MessagePrompt {
     task_id: String,
     agent: String,
     body: TextBox,
+    // Where the buttons were drawn last frame, so a click is answered by the layout
+    // the operator can see.
+    buttons: Vec<Rect>,
 }
 
 impl MessagePrompt {
@@ -23,6 +26,7 @@ impl MessagePrompt {
             task_id,
             agent,
             body: TextBox::new(""),
+            buttons: Vec::new(),
         }
     }
 
@@ -41,11 +45,26 @@ impl MessagePrompt {
         if key.code == KeyCode::Esc {
             return Some(Decision::Cancel);
         }
-        if keys::is_secondary(key) && !self.body.value().trim().is_empty() {
-            return Some(Decision::Send(self.body.value().trim().to_owned()));
+        if keys::is_secondary(key) {
+            return self.send();
         }
         self.body.handle_key(key);
         None
+    }
+
+    pub fn handle_mouse(&self, mouse: MouseEvent) -> Option<Decision> {
+        match button::hit(&self.buttons, mouse)? {
+            0 => Some(Decision::Cancel),
+            1 => self.send(),
+            _ => None,
+        }
+    }
+
+    // Nothing to say is nothing to send, whichever way the operator asked.
+    fn send(&self) -> Option<Decision> {
+        let body = self.body.value();
+        let body = body.trim();
+        (!body.is_empty()).then(|| Decision::Send(body.to_owned()))
     }
 }
 
@@ -54,7 +73,7 @@ pub enum Decision {
     Send(String),
 }
 
-pub fn draw(frame: &mut Frame, area: Rect, prompt: &MessagePrompt) -> Rect {
+pub fn draw(frame: &mut Frame, area: Rect, prompt: &mut MessagePrompt) -> Rect {
     let popup = chrome::centered(area, 64, chrome::modal_height(9));
     frame.render_widget(Clear, popup);
     let block = chrome::modal(format!("Message {}", prompt.agent));
@@ -77,7 +96,7 @@ pub fn draw(frame: &mut Frame, area: Rect, prompt: &MessagePrompt) -> Rect {
         hint,
     );
     prompt.body.draw_titled(frame, field, true, None);
-    button::actions(
+    prompt.buttons = button::actions(
         frame,
         popup,
         actions,
