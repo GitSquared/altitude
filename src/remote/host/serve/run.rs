@@ -440,6 +440,11 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
     let mut runtime = host.runtime.clone();
     let readiness = host.readiness.clone();
     let resumed = host.tasks.clone();
+    // The remote keeps each operator's sessions alive while that operator's client is
+    // away. It is started once the runtime can make a sandbox, so a renewal is not
+    // what builds the base image.
+    let keeper_tasks = Arc::clone(&host.tasks);
+    let keeper_config = config.clone();
     let preparation = async {
         loop {
             let status = runtime.borrow_and_update().clone();
@@ -485,6 +490,13 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
         }
         resumed.enable_admission();
         readiness.send_replace(Phase::Ready);
+        {
+            let service = keeper_tasks.service().clone();
+            let config = keeper_config.clone();
+            tokio::spawn(async move {
+                super::keepers::watch(service, config).await;
+            });
+        }
         tracing::info!("Remote ready · open altitude → Settings → Remotes");
         if !listen.ip().is_loopback() {
             tracing::info!("Clients on the same network can discover this remote automatically");

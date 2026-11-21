@@ -31,8 +31,8 @@ pub(crate) use relay::{PORT_RELAY_GUEST_PORT, install_script, with_port_relay};
 pub use relay::{PortNotice, PortRelays};
 pub(crate) use sandbox::guest_absolute;
 pub(crate) use sandbox::private_directory;
-pub(crate) use sandbox::renew_session;
 pub use sandbox::{DefaultFile, GuestPath, PersistentDirectory, ProfileRecipe, SignInCommand};
+pub(crate) use sandbox::{HarnessRun, renew_session};
 pub(crate) use sandbox::{run_collecting, shell_quote};
 
 // A command's search path inside a sandbox. `/root` is the guest's home whatever
@@ -493,6 +493,14 @@ pub trait IsolationEngine: Send + Sync {
     {
         let _ = owner;
         Ok(self.clone())
+    }
+
+    // Whether a path the plan mounts from this machine is the same file inside the
+    // sandbox, so a write in the guest is already this machine's write. A provider
+    // that ships the files to a machine of its own answers false, and what it wrote
+    // has to be collected back.
+    fn shares_host_paths(&self) -> bool {
+        true
     }
 
     fn credential_shell(

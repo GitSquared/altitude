@@ -4,7 +4,7 @@
 // can be driven end to end without an account, a network or a model.
 #![allow(dead_code)]
 
-use std::{env, path::Path, sync::Arc};
+use std::{env, fs, io, path::Path, sync::Arc};
 
 use crate::{
     agent::{AgentEngine, AgentEngines, AgentKind, AgentUsage, TaskStreamDecoder, TaskUsage},
@@ -204,4 +204,160 @@ pub fn engines() -> AgentEngines {
 // `testkit` feature, honours it; a release build does not know the name.
 pub fn is_scripted() -> bool {
     env::var_os("ALTITUDE_SCRIPTED_AGENT").is_some()
+}
+
+// A controlled credential renewal: a short-lived session, a harness that writes a
+// later one, and the keeper. It proves the schedule the real harnesses are on
+// without an account, a network or a model. The verdict is the exit code; the log
+// lines are the evidence.
+pub async fn credential_renewal_fixture() -> Result<(), String> {
+    use crate::{
+        credentials::{Credentials, freshness, keeper::Keeper},
+        isolation::{PortRelays, TestbedIsolation},
+    };
+
+    const PROFILE: &str = "claude";
+    const SESSION: &str = "fixture-session.json";
+    const ATTEMPTS: &str = "fixture-attempts";
+    // Far enough ahead that a renewal is unmistakable, and fixed so the fixture needs
+    // no clock inside the sandbox.
+    const RENEWED_AT_MS: i64 = 4_102_444_800_000;
+    const RENEW_COMMAND: &str = r#"printf '%s' '{"expiresAt":4102444800000}' > /altitude/fixture/fixture-session.json; echo x >> /altitude/fixture/fixture-attempts"#;
+    const REFUSE_COMMAND: &str = r#"echo x >> /altitude/fixture/fixture-attempts; exit 1"#;
+
+    // The keeper's own lines are the evidence that only profile, deadline and attempt
+    // are logged, so a fixture run shows them.
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .with_target(false)
+        .try_init();
+
+    fn deadline(contents: &str) -> Option<i64> {
+        let value: serde_json::Value = serde_json::from_str(contents).ok()?;
+        value.get("expiresAt")?.as_i64()
+    }
+
+    fn recipe(renew: &'static str) -> ProfileRecipe {
+        ProfileRecipe {
+            profile: PROFILE.to_owned(),
+            display: "Fixture harness",
+            sign_in: "",
+            sign_in_command: SignInCommand::Direct("true"),
+            status_command: "true",
+            session_file: Some(SESSION),
+            session_deadline: Some(deadline),
+            session_renew: Some(renew),
+            session_keep: &[SESSION],
+            label: "the fixture harness",
+            setup_command: "",
+            directories: vec![PersistentDirectory::root(
+                GuestPath::Absolute("/altitude/fixture"),
+                "",
+                Vec::<DefaultFile>::new(),
+            )],
+            environment: Vec::new(),
+        }
+    }
+
+    let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let config = Config::at(
+        root.path().join("config"),
+        root.path().join("data"),
+        root.path().join("cache"),
+    );
+    let profile = config.profile_dir(PROFILE);
+    fs::create_dir_all(&profile).map_err(|error| error.to_string())?;
+    let session = profile.join(SESSION);
+    let attempts = profile.join(ATTEMPTS);
+
+    let mut credentials = Credentials::new(
+        TestbedIsolation::new(&config),
+        config.clone(),
+        AgentEngines::new(),
+        PortRelays::new(config.agent_channel_dir()),
+    );
+    credentials.override_recipe(PROFILE, recipe(RENEW_COMMAND));
+
+    let due = freshness::now_ms() + 60_000;
+    write_session(&session, due)?;
+
+    // Idle renewal: one pass of a keeper renews a session before it runs out.
+    let mut keeper = Keeper::new(credentials.clone());
+    let _ = keeper.poll().await;
+    let renewed = read_deadline(&session)?;
+    if renewed != RENEWED_AT_MS {
+        return Err(format!(
+            "an idle keeper did not renew the session: {renewed:?}"
+        ));
+    }
+    println!("idle renewal: {} -> {renewed}", due);
+
+    // Restart recovery: a keeper built after a restart carries nothing across; its
+    // first pass reads the deadline from the file.
+    write_session(&session, due)?;
+    drop(keeper);
+    let mut restarted = Keeper::new(credentials.clone());
+    let _ = restarted.poll().await;
+    let recovered = read_deadline(&session)?;
+    if recovered != RENEWED_AT_MS {
+        return Err(format!("a restarted keeper did not renew: {recovered:?}"));
+    }
+    println!("restart recovery: {} -> {recovered}", due);
+
+    // Single flight: two callers at once make one sandbox. The first renews, the
+    // second waits and finds the deadline already moved.
+    write_session(&session, due)?;
+    let _ = fs::remove_file(&attempts);
+    let (first, second) = tokio::join!(
+        credentials.renew_if_due(PROFILE),
+        credentials.renew_if_due(PROFILE),
+    );
+    first.map_err(|error| error.to_string())?;
+    second.map_err(|error| error.to_string())?;
+    let made = attempts_made(&attempts)?;
+    if made != 1 {
+        return Err(format!("two concurrent renewals made {made} attempts"));
+    }
+    println!("single flight: two callers, {made} attempt");
+
+    // A refusal is visible and is not retried on the next pass: the second poll
+    // finds the profile in backoff and leaves it alone.
+    credentials.override_recipe(PROFILE, recipe(REFUSE_COMMAND));
+    write_session(&session, due)?;
+    let _ = fs::remove_file(&attempts);
+    let mut keeper = Keeper::new(credentials.clone());
+    let _ = keeper.poll().await;
+    let _ = keeper.poll().await;
+    let made = attempts_made(&attempts)?;
+    if made != 1 {
+        return Err(format!(
+            "a refused renewal was retried {made} times without waiting"
+        ));
+    }
+    println!("refusal: {made} attempt, then backoff");
+
+    println!("credential renewal fixture passed");
+    Ok(())
+}
+
+fn write_session(path: &Path, expires_at_ms: i64) -> Result<(), String> {
+    fs::write(path, format!("{{\"expiresAt\":{expires_at_ms}}}")).map_err(|error| error.to_string())
+}
+
+fn read_deadline(path: &Path) -> Result<i64, String> {
+    let contents = fs::read_to_string(path).map_err(|error| error.to_string())?;
+    let value: serde_json::Value =
+        serde_json::from_str(&contents).map_err(|error| error.to_string())?;
+    value
+        .get("expiresAt")
+        .and_then(serde_json::Value::as_i64)
+        .ok_or_else(|| format!("no deadline in {contents}"))
+}
+
+fn attempts_made(path: &Path) -> Result<usize, String> {
+    match fs::read_to_string(path) {
+        Ok(contents) => Ok(contents.lines().count()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(0),
+        Err(error) => Err(error.to_string()),
+    }
 }

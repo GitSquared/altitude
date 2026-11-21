@@ -37,7 +37,7 @@ mod testkit;
 mod tracker;
 mod tui;
 
-#[cfg(any(debug_assertions, feature = "preview"))]
+#[cfg(any(debug_assertions, feature = "preview", feature = "testkit"))]
 use std::env;
 mod vcs;
 mod version;
@@ -49,6 +49,18 @@ async fn main() -> ExitCode {
     #[cfg(any(debug_assertions, feature = "preview"))]
     if env::var_os("ALTITUDE_PREVIEW").is_some() {
         return match tui::preview().await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("Error: {error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    // A debug build can run the controlled credential-renewal fixture and print the
+    // verdict, without a terminal, a network or a model.
+    #[cfg(any(debug_assertions, feature = "testkit"))]
+    if env::var_os("ALTITUDE_CREDENTIAL_FIXTURE").is_some() {
+        return match testkit::credential_renewal_fixture().await {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 eprintln!("Error: {error}");
@@ -191,17 +203,13 @@ where
         )
         .with_trackers(trackers)
         .with_issue_reader(issue_reader);
-        // A client that starts renews what it holds, so the copies it pushes are as fresh
-        // as this machine can make them. One pass, not a loop: the next renewal is the next
-        // start, or the moment a task needs the session.
+        // A client keeps what it holds alive rather than renewing it only at the moments
+        // it happens to start or run a task: a session that lapses while the machine is
+        // up is one an operator has to log in again for.
         {
             let keeping = tasks.clone();
             tokio::spawn(async move {
-                let Ok(config) = Config::load() else {
-                    return;
-                };
-                let profiles = credentials::keeper::profiles(&config);
-                credentials::keeper::refresh_due(keeping.credentials(), &profiles).await;
+                credentials::keeper::run(keeping.credentials().clone()).await;
             });
         }
         // The scripted harness answers for this machine's version control too, so a

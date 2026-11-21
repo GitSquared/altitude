@@ -94,6 +94,13 @@ impl IsolationEngine for ServeIsolation {
         })
     }
 
+    fn shares_host_paths(&self) -> bool {
+        match self {
+            Self::Microsandbox(engine) => engine.shares_host_paths(),
+            Self::Workers(engine) => engine.shares_host_paths(),
+        }
+    }
+
     fn credential_shell(
         &self,
         sandbox: CredentialSandbox,
