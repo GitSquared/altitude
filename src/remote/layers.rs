@@ -22,9 +22,22 @@ use crate::remote::protocol::{read_frame, write_frame};
 // the installs layer, and a project's cache. It is neither the link (clients and their
 // tasks) nor the worker ALPN (the master asking a host for compute): it is a different
 // conversation.
-pub(crate) const LAYER_ALPN: &[u8] = b"altitude/layers/1";
+pub(crate) const LAYER_ALPN: &[u8] = b"altitude/layers/2";
 
-const GIB: u64 = 1024 * 1024 * 1024;
+const MIB: u64 = 1024 * 1024;
+const GIB: u64 = 1024 * MIB;
+
+// A layer installs the newest release its commands name, so one older than this is
+// older software, and 72 hours is the window base snapshots refresh on. A cache has no
+// such rule: a stale package store is still correct, and the byte budget is what bounds it.
+const LAYER_FRESHNESS: Duration = Duration::from_secs(72 * 60 * 60);
+
+// The one assumption behind every cache bound: a host moves a cache to or from the
+// master at about this rate (200 Mbit/s). A cache that cannot cross within its patience
+// at that rate is not worth having, so the size cap is the rate times the patience, and
+// the same patience bounds the download, the upload and the packing that precedes it.
+const CACHE_THROUGHPUT: u64 = 25 * MIB;
+const CACHE_PATIENCE: Duration = Duration::from_secs(2 * 60);
 
 // What the master keeps for its hosts. Each kind has its own directory and its own
 // budget, so a project's cache, which is large and rewritten by every task, cannot
@@ -45,23 +58,13 @@ impl ArchiveKind {
         }
     }
 
-    // Bounds what a host can put on its master's disk, not what an archive realistically
-    // is: a layer is a toolchain, a cache is a package store and may be gigabytes.
-    fn max_bytes(self) -> u64 {
+    // Bounds what a host can put on its master's disk. A layer is a toolchain; a cache is
+    // as much as can cross the link within its patience, so it is never stored only to be
+    // too slow to fetch.
+    pub(crate) fn max_bytes(self) -> u64 {
         match self {
             Self::Layer => 4 * GIB,
-            Self::Cache => 8 * GIB,
-        }
-    }
-
-    // A freshness rule and not a sweep, evaluated when a host asks, never on a timer.
-    // A layer's commands install the newest release they name, so an old archive is
-    // older software and 72 hours is the window base snapshots refresh on. A cache is
-    // rebuildable data that only costs time when stale, so it is kept for longer.
-    fn keep_for(self) -> Duration {
-        match self {
-            Self::Layer => Duration::from_secs(72 * 60 * 60),
-            Self::Cache => Duration::from_secs(14 * 24 * 60 * 60),
+            Self::Cache => CACHE_THROUGHPUT * CACHE_PATIENCE.as_secs(),
         }
     }
 
@@ -80,16 +83,17 @@ impl ArchiveKind {
     pub(crate) fn fetch_patience(self) -> Duration {
         match self {
             Self::Layer => Duration::from_secs(10),
-            Self::Cache => Duration::from_secs(2 * 60),
+            Self::Cache => CACHE_PATIENCE,
         }
     }
 
     // An upload moves the whole archive, so it gets minutes where a question gets
-    // seconds, and it is still not left to the connection's ten-minute idle window.
+    // seconds, and it is still not left to the connection's ten-minute idle window. A
+    // cache's is the same as its fetch: what is stored is what can be fetched.
     pub(crate) fn store_patience(self) -> Duration {
         match self {
             Self::Layer => Duration::from_secs(5 * 60),
-            Self::Cache => Duration::from_secs(10 * 60),
+            Self::Cache => CACHE_PATIENCE,
         }
     }
 }
@@ -124,9 +128,11 @@ pub(crate) enum LayerReply {
 }
 
 // What a master keeps of what its hosts leave. Nothing here knows what an archive is:
-// one per kind, environment and tag, aged out like a base snapshot. A host is trusted to
-// say which environment it is, because the token is the boundary on this link and
-// everywhere else: a host that lies about itself only corrupts its own fleet's archives.
+// one per kind, environment and tag; layers age out like a base snapshot and caches only
+// by the byte budget. A host is trusted to say which environment it is and which project
+// a cache is for, because the token is the boundary on this link and everywhere else: a
+// host holding it could already reach every task's channel, and a project's id is an
+// unguessable UUID, so a host that lies only corrupts its own fleet's archives.
 pub(crate) struct LayerStore {
     dir: PathBuf,
     caches: PathBuf,
@@ -212,8 +218,8 @@ impl LayerStore {
             .modified()
             .ok()
             .and_then(|written| SystemTime::now().duration_since(written).ok());
-        if age.is_some_and(|age| age >= kind.keep_for()) {
-            // An archive this old is rebuilt by its host anyway, so it is dropped rather
+        if kind == ArchiveKind::Layer && age.is_some_and(|age| age >= LAYER_FRESHNESS) {
+            // A layer this old is rebuilt by its host anyway, so it is dropped rather
             // than left to fill the disk.
             let _ = fs::remove_file(&path);
             return None;

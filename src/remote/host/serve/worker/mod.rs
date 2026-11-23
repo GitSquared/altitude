@@ -115,7 +115,6 @@ pub(crate) async fn run(args: &WorkerArgs, base: Config) -> Result<(), Box<dyn E
         channels: Arc::new(Mutex::new(HashMap::new())),
         layers,
         caches: Arc::new(Mutex::new(HashMap::new())),
-        uploads: Arc::new(Mutex::new(HashMap::new())),
     };
     let worker_addr = endpoint.addr();
     let _router = Router::builder(endpoint)
@@ -183,8 +182,6 @@ struct WorkerService {
     layers: LinkLayers,
     // The project cache each sandbox restored and has yet to hand back.
     caches: Arc<Mutex<HashMap<String, CacheLease>>>,
-    // The uploads of caches whose sandbox is gone, until the master asks to settle them.
-    uploads: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
 }
 
 impl fmt::Debug for WorkerService {

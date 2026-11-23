@@ -6,20 +6,22 @@ use std::{
 
 use tar::{Archive, Builder};
 use tempfile::NamedTempFile;
-use tokio::task::spawn_blocking;
+use tokio::{task::spawn_blocking, time};
 
 use crate::remote::layers::ArchiveKind;
 
 use super::WorkerService;
 
-// A cache is restored at provision and handed back when the sandbox ends. Both are
-// best-effort: a cache that cannot be had costs time and nothing else, so every failure
-// here is a line in the log and never an answer to the master.
+// A cache is restored at provision and handed back when the sandbox ends, whether it is
+// removed or parked. Both are best-effort: a cache that cannot be had costs time and
+// nothing else, so every failure here is a line in the log and never an answer to the
+// master.
 pub(super) struct CacheLease {
     pub(super) project: String,
-    // The moment the sandbox was ready, restored files and the sandbox's own managed
-    // files included: whatever is newer than this was written by the task.
-    pub(super) ready_at: SystemTime,
+    // The moment the restore finished, before the sandbox's setup ran: whatever is newer
+    // than this was written by setup or the task, and a restored file keeps the time it
+    // had when it was packed.
+    pub(super) restored_at: SystemTime,
 }
 
 impl WorkerService {
@@ -58,10 +60,11 @@ impl WorkerService {
         }
     }
 
-    // Started once the sandbox is gone, because nothing is writing the cache after that.
-    // The upload outlives this call, which is the point: the sandbox ending waits on
-    // nothing. `settle_cache` is how the master lets the host live until it is done.
-    pub(super) fn begin_cache_upload(&self, sandbox: &str) {
+    // Called once the sandbox is gone, because nothing is writing the cache after that.
+    // Packing and sending share one bound, the master's own for a cache, so the host is
+    // never held longer than that for it, and the master destroys the host when this
+    // returns.
+    pub(super) async fn leave_cache(&self, sandbox: &str) {
         let Some(lease) = self
             .caches
             .lock()
@@ -70,28 +73,21 @@ impl WorkerService {
         else {
             return;
         };
-        let service = self.clone();
-        let upload = tokio::spawn(async move { service.upload_cache(lease).await });
-        if let Ok(mut uploads) = self.uploads.lock() {
-            uploads.insert(sandbox.to_owned(), upload);
+        let project = lease.project.clone();
+        let bound = ArchiveKind::Cache.store_patience();
+        if time::timeout(bound, self.upload_cache(lease, Instant::now() + bound))
+            .await
+            .is_err()
+        {
+            tracing::warn!(?bound, %project, "leaving this project's cache took too long; giving up");
         }
     }
 
-    pub(super) async fn settle_cache(&self, sandbox: &str) {
-        let upload = self
-            .uploads
-            .lock()
-            .ok()
-            .and_then(|mut uploads| uploads.remove(sandbox));
-        if let Some(upload) = upload {
-            let _ = upload.await;
-        }
-    }
-
-    async fn upload_cache(&self, lease: CacheLease) {
+    async fn upload_cache(&self, lease: CacheLease, deadline: Instant) {
         let directory = self.config.project_cache_dir(&lease.project);
-        let ready_at = lease.ready_at;
-        let packed = spawn_blocking(move || pack_if_changed(&directory, ready_at)).await;
+        let restored_at = lease.restored_at;
+        let packed =
+            spawn_blocking(move || pack_if_changed(&directory, restored_at, deadline)).await;
         match packed {
             Ok(Ok(Some(archive))) => {
                 self.layers
@@ -115,12 +111,15 @@ impl WorkerService {
 // An unchanged cache is not packed at all, which is the only saving available without a
 // protocol that exchanges differences: the next host would restore the same bytes, and
 // the upload is the slow part. Anything the task wrote, deleted or created moves a
-// modification time past the moment the sandbox was ready.
+// modification time past the moment the restore finished. The walk stops at the deadline
+// and at the size the master keeps, so a cache too big to cross the link in time is not
+// packed to be refused.
 fn pack_if_changed(
     directory: &Path,
-    ready_at: SystemTime,
+    restored_at: SystemTime,
+    deadline: Instant,
 ) -> Result<Option<NamedTempFile>, String> {
-    if !changed_since(directory, ready_at) {
+    if !changed_since(directory, restored_at) {
         return Ok(None);
     }
     let archive = NamedTempFile::new().map_err(|error| error.to_string())?;
@@ -131,8 +130,13 @@ fn pack_if_changed(
     builder.follow_symlinks(false);
     // An entry that cannot be packed (a socket, a file nobody may read) is left out and
     // said aloud: one of them is not a reason for every host after this one to start cold.
+    let limit = ArchiveKind::Cache.max_bytes();
+    let mut total = 0;
     let mut pending = vec![(directory.to_path_buf(), String::from("."))];
     while let Some((path, name)) = pending.pop() {
+        if Instant::now() >= deadline {
+            return Err("ran out of time packing it".into());
+        }
         let Ok(entries) = fs::read_dir(&path) else {
             tracing::warn!(path = %path.display(), "leaving a directory out of a cache");
             continue;
@@ -147,6 +151,12 @@ fn pack_if_changed(
                 pending.push((child.clone(), child_name.clone()));
                 builder.append_dir(&child_name, &child)
             } else if metadata.is_file() || metadata.is_symlink() {
+                total += metadata.len();
+                if total > limit {
+                    return Err(format!(
+                        "it is larger than the {limit} bytes the master keeps"
+                    ));
+                }
                 builder.append_path_with_name(&child, &child_name)
             } else {
                 continue;
@@ -160,7 +170,7 @@ fn pack_if_changed(
     Ok(Some(archive))
 }
 
-fn changed_since(directory: &Path, ready_at: SystemTime) -> bool {
+fn changed_since(directory: &Path, restored_at: SystemTime) -> bool {
     let mut pending = vec![directory.to_path_buf()];
     while let Some(path) = pending.pop() {
         let Ok(entries) = fs::read_dir(&path) else {
@@ -170,7 +180,10 @@ fn changed_since(directory: &Path, ready_at: SystemTime) -> bool {
             let Ok(metadata) = fs::symlink_metadata(entry.path()) else {
                 continue;
             };
-            if metadata.modified().is_ok_and(|written| written > ready_at) {
+            if metadata
+                .modified()
+                .is_ok_and(|written| written > restored_at)
+            {
                 return true;
             }
             if metadata.is_dir() {

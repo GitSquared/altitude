@@ -5,7 +5,7 @@ use crate::project::Project;
 
 // The ALPN a master dials a worker on. It is not the link's: the link is clients
 // talking about their tasks, and this is a master asking an empty host for compute.
-pub(crate) const WORKER_ALPN: &[u8] = b"altitude/worker/1";
+pub(crate) const WORKER_ALPN: &[u8] = b"altitude/worker/2";
 
 // A worker only ever speaks to the master that provisioned it, and the token it
 // was provisioned with is what says so. It travels with each call because a worker
@@ -99,13 +99,9 @@ pub(crate) enum WorkerCall {
         profiles: Vec<WorkerProfile>,
         project: Project,
     },
+    // Answered once the sandbox is gone and the project cache it left is on the master or
+    // has failed to be, so destroying the host after it cannot cut an upload short.
     Remove {
-        id: String,
-    },
-    // Answered once the cache a removed sandbox left is on the master or has failed to
-    // be. The master calls it after `Remove` so that destroying the host, which ends an
-    // upload, waits for the upload without the task waiting for either.
-    Settle {
         id: String,
     },
     HasSandbox {

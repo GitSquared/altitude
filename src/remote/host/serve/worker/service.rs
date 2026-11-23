@@ -192,17 +192,15 @@ impl WorkerService {
             },
             WorkerCall::Remove { id } => {
                 self.stop_channel(&id);
-                // Only once the sandbox is gone does nothing write the cache any more.
+                // Only once the sandbox is gone does nothing write the cache any more. The
+                // master destroys this host as soon as it answers, so the upload is done, or
+                // given up on, before it does.
                 let removed = self.engine.remove(id.clone()).await;
-                self.begin_cache_upload(&id);
+                self.leave_cache(&id).await;
                 match removed {
                     Ok(()) => WorkerReply::Ok,
                     Err(error) => WorkerReply::Failed(error.to_string()),
                 }
-            }
-            WorkerCall::Settle { id } => {
-                self.settle_cache(&id).await;
-                WorkerReply::Ok
             }
             WorkerCall::Stop { id } => match self.engine.stop_work(id).await {
                 Ok(()) => WorkerReply::Ok,
@@ -331,6 +329,9 @@ impl WorkerService {
             progress.say("restoring this project's cache");
             self.restore_cache(&project_id).await;
         }
+        // Taken before the sandbox's setup runs, so what setup installs into a cache that
+        // was cold counts as the task's own writing and is left for the next host.
+        let restored_at = SystemTime::now();
         let recipes = match (
             profile_recipe(&agent_profile, &self.agents),
             profile_recipe(&vcs_profile, &self.agents),
@@ -360,7 +361,7 @@ impl WorkerService {
                         id.clone(),
                         CacheLease {
                             project: project_id,
-                            ready_at: SystemTime::now(),
+                            restored_at,
                         },
                     );
                 }
