@@ -1,5 +1,8 @@
 use std::{
+    cmp::Reverse,
+    collections::HashSet,
     env, fs, io,
+    os::unix::fs::{MetadataExt, PermissionsExt},
     path::{Component, Path, PathBuf},
     process::Command,
     sync::{Arc, Mutex},
@@ -53,7 +56,9 @@ pub struct TestbedIsolation {
     // A layer's steps run in a sandbox directory of their own, so two layers
     // building at once would share one view and each see the other's work.
     layer_build: Arc<LayerBuild<()>>,
-    // Where a built installs layer goes, when this host has somewhere to leave it.
+    // Where a built installs layer goes, when this host has somewhere to leave it. It is
+    // also what says the machine is a disposable worker's own: only then is the account's
+    // home the workspace's, rather than a person's.
     layers: Option<Arc<dyn HostLayers>>,
 }
 
@@ -68,9 +73,9 @@ pub(super) struct MountRecord {
 pub(super) struct SandboxRecord {
     pub mounts: Vec<MountRecord>,
     pub environment: Vec<(String, String)>,
-    // The guest path of the project's checkout, which a checkpoint carries beside the
-    // sandbox's own tree. Known once the sandbox is provisioned for a project.
-    pub checkout: Option<String>,
+    // The guest paths of the mounts that are project caches, which a checkpoint carries
+    // under their own keys because their contents live outside the sandbox's tree.
+    pub caches: Vec<String>,
 }
 
 impl TestbedIsolation {
@@ -248,7 +253,7 @@ impl TestbedIsolation {
         let root = self.sandboxes_dir().join(LAYER_SANDBOX);
         machine::prepare_root(&root)?;
         let record = SandboxRecord {
-            checkout: None,
+            caches: Vec::new(),
             mounts: view
                 .mounts
                 .iter()
@@ -312,13 +317,14 @@ impl TestbedIsolation {
             .map(|name| name.to_string_lossy().into_owned())
     }
 
-    // The home as this host holds it, which is the whole of an installs layer: the
-    // profile directories and project caches are mounted into the layer's view from
-    // the master, so taking the home from outside that view leaves them out.
-    // An entry this account cannot read fails the pack, like a checkpoint's: a layer
+    // The home as this host holds it, minus altitude's own state, which is the whole of
+    // an installs layer: the profile directories and project caches are mounted into the
+    // layer's view from the master, so taking the home from outside that view leaves them
+    // out. An entry this account cannot read fails the pack, like a checkpoint's: a layer
     // that lacks something its steps installed would be restored on the next host and
-    // recorded as built. A host that could not store its layer is only a host the next
-    // one does not save time on.
+    // recorded as built. A link is archived as a link, never opened, which is how an
+    // installer's absolute link into the guest's `/root` (unreadable from here) is packed.
+    // A host that could not store its layer is only a host the next one does not save time on.
     async fn store_home(
         &self,
         layers: &Arc<dyn HostLayers>,
@@ -328,11 +334,12 @@ impl TestbedIsolation {
         let archive = NamedTempFile::new().map_err(io_error)?;
         let packing = archive.path().to_path_buf();
         let home = self.home.clone();
+        let skipped = self.altitude_dirs();
         let began = Instant::now();
         spawn_blocking(move || -> Result<(), String> {
             let file = fs::File::create(&packing).map_err(|error| error.to_string())?;
             let mut builder = Builder::new(file);
-            pack_tree(&mut builder, &entry, &home)?;
+            archive_whole_tree(&mut builder, &entry, &home, &skipped)?;
             builder.finish().map_err(|error| error.to_string())
         })
         .await
@@ -385,14 +392,20 @@ impl TestbedIsolation {
     }
 
     // A host that is about to be destroyed has no machine to come back to, so a
-    // snapshot is the workspace: the tree the sandbox wrote, and the project checkout,
-    // which lives outside it under the machine's own roots. Both are carried whole or
-    // the archive is not made: the caller keeps the sandbox when this fails.
+    // snapshot is the workspace, and a resume neither clones nor runs setup. It has three
+    // kinds of section: `root/`, the sandbox's own tree (task-local state, the
+    // transcript); `home/`, the account's home, which is what the guest sees as `/root`
+    // (the project checkout and whatever setup and the agent put there); and
+    // `caches/<guest path>/`, the contents of each project cache mount, whose directories
+    // are bound from outside the sandbox's tree. Credentials, memory and altitude's own
+    // state are the machine's, not the workspace's, and are left out. Everything is carried
+    // or the archive is not made: the caller keeps the sandbox when this fails.
     pub(crate) fn archive_sandbox(
         &self,
         id: &str,
         destination: &Path,
     ) -> Result<(), IsolationError> {
+        let home = self.workspace_home()?;
         let root = self.sandbox_root(id);
         if !root.is_dir() {
             return Err(IsolationError::missing_sandbox(format!(
@@ -400,63 +413,91 @@ impl TestbedIsolation {
             )));
         }
         let record = self.read_record(id)?;
+        // What the sandbox saw as home is the account's, minus what is mounted over it or
+        // is altitude's own, and minus the archive being written.
+        let mut skipped = self.altitude_dirs();
+        skipped.push(destination.to_path_buf());
+        skipped.extend(
+            record
+                .mounts
+                .iter()
+                .filter(|mount| mount.host_path.starts_with(home))
+                .map(|mount| mount.host_path.clone()),
+        );
         let file = fs::File::create(destination).map_err(io_error)?;
         let mut builder = Builder::new(file);
-        pack_tree(&mut builder, "root", &root).map_err(IsolationError::new)?;
-        if let Some(checkout) = &record.checkout {
-            let host = self.host_path(id, &record, checkout);
-            if !host.is_dir() {
-                return Err(IsolationError::new(format!(
-                    "the project checkout is not on this host, so its work cannot be archived: {}",
-                    host.display()
-                )));
+        archive_whole_tree(&mut builder, "root", &root, &[]).map_err(IsolationError::new)?;
+        archive_whole_tree(&mut builder, "home", home, &skipped).map_err(IsolationError::new)?;
+        for guest in &record.caches {
+            let host = self.host_path(id, &record, guest);
+            // A cache directory that is a mount point is the master's export, which
+            // outlives this host and is shared with its other tasks.
+            if is_mount_point(&host).map_err(io_error)? {
+                continue;
             }
-            pack_tree(&mut builder, "checkout", &host).map_err(IsolationError::new)?;
+            archive_whole_tree(&mut builder, &format!("caches{guest}"), &host, &[])
+                .map_err(IsolationError::new)?;
         }
         let file = builder.into_inner().map_err(io_error)?;
         file.sync_all().map_err(io_error)
     }
 
-    pub(super) fn remember_checkout(
-        &self,
-        id: &str,
-        checkout: Option<String>,
-    ) -> Result<(), IsolationError> {
-        let mut record = self.read_record(id)?;
-        record.checkout = checkout;
-        self.write_record(id, &record)
-    }
-
-    // A checkpoint carries two trees — the sandbox's own disk under `root/` and the
-    // project checkout under `checkout/` — and each entry goes back to the destination
-    // it came from. The entry's name is not trusted: it may climb out of its section,
-    // or lie beneath a directory that is a link pointing elsewhere, so the destination
-    // is worked out and checked before anything is written through it.
+    // Each entry goes back to the destination it came from. The entry's name is not
+    // trusted: it may climb out of its section, or lie beneath a directory that is a link
+    // pointing elsewhere, so the destination is worked out and checked before anything is
+    // written through it. `root/` and `home/` overlay what is there, which is the installs
+    // layer the host ensured before restoring. A cache is only filled where it is missing:
+    // a cache directory another task shares is never overwritten, and one that is a mount
+    // point is the master's export and is not written at all.
     pub(crate) fn restore_sandbox(&self, id: &str, source: &Path) -> Result<(), IsolationError> {
+        let home = self.workspace_home()?;
         let root = self.sandbox_root(id);
         let record = self.read_record(id)?;
-        let checkout_host = record
-            .checkout
-            .as_deref()
-            .map(|checkout| self.host_path(id, &record, checkout));
         let file = fs::File::open(source).map_err(io_error)?;
         let mut archive = Archive::new(file);
+        let mut modes: Vec<(PathBuf, u32)> = Vec::new();
+        let mut undeclared: HashSet<String> = HashSet::new();
         for entry in archive.entries().map_err(io_error)? {
             let mut entry = entry.map_err(io_error)?;
             let path = entry.path().map_err(io_error)?.into_owned();
             let mut components = path.components();
-            let base = match components.next() {
-                Some(Component::Normal(name)) if name == "root" => &root,
-                Some(Component::Normal(name)) if name == "checkout" && checkout_host.is_some() => {
-                    checkout_host.as_ref().expect("checked above")
-                }
-                _ => continue,
+            let Some(Component::Normal(section)) = components.next() else {
+                return Err(IsolationError::new(format!(
+                    "a checkpoint entry names no section: {}",
+                    path.display()
+                )));
             };
             let rest = components.as_path();
+            let (base, rest, overwrite) = match section.to_str() {
+                Some("root") => (root.clone(), rest, true),
+                Some("home") => (home.to_path_buf(), rest, true),
+                Some("caches") => match self.cache_destination(id, &record, rest) {
+                    Some((base, rest)) => {
+                        if is_mount_point(&base).map_err(io_error)? {
+                            continue;
+                        }
+                        (base, rest, false)
+                    }
+                    None => {
+                        // A cache the project no longer declares has nowhere to go, and
+                        // is derived data.
+                        if undeclared.insert(rest.to_string_lossy().into_owned()) {
+                            tracing::warn!(entry = %path.display(), "a checkpointed cache is not declared by this sandbox; leaving it out");
+                        }
+                        continue;
+                    }
+                },
+                _ => {
+                    return Err(IsolationError::new(format!(
+                        "a checkpoint entry is in a section this host does not know: {}",
+                        path.display()
+                    )));
+                }
+            };
             // A hard link is unpacked by its link target, which `Entry::unpack` does not
             // resolve against the destination, so it could name a file outside the
-            // section. `pack_tree` writes files and symlinks and never one of these, so
-            // refuse it before any filesystem change.
+            // section. `archive_whole_tree` writes files and symlinks and never one of
+            // these, so refuse it before any filesystem change.
             if entry.header().entry_type().is_hard_link() {
                 return Err(IsolationError::new(format!(
                     "a checkpoint entry is a hard link, which a restore does not carry: {}",
@@ -482,24 +523,88 @@ impl TestbedIsolation {
                 continue;
             }
             let target = base.join(rest);
-            ensure_parent_within(base, &target)?;
-            clear_other_kind(&target, entry.header().entry_type().is_dir())?;
+            ensure_parent_within(&base, &target)?;
+            let is_directory = entry.header().entry_type().is_dir();
+            let existing = fs::symlink_metadata(&target).ok();
+            if !overwrite
+                && existing
+                    .as_ref()
+                    .is_some_and(|found| !(is_directory && found.is_dir()))
+            {
+                continue;
+            }
+            clear_other_kind(&target, is_directory)?;
             // A directory is made, not unpacked: unpacking applies its recorded mode, and
-            // a read-only one would refuse the entries restored into it next.
-            if entry.header().entry_type().is_dir() {
+            // a read-only one would refuse the entries restored into it next. Its mode is
+            // applied once everything beneath it is in place.
+            if is_directory {
                 fs::create_dir_all(&target).map_err(io_error)?;
+                if overwrite || existing.is_none() {
+                    modes.push((target, entry.header().mode().map_err(io_error)? & 0o7777));
+                }
                 continue;
             }
             entry.unpack(&target).map_err(io_error)?;
         }
+        modes.sort_by_key(|(path, _)| Reverse(path.components().count()));
+        for (path, mode) in modes {
+            fs::set_permissions(&path, fs::Permissions::from_mode(mode)).map_err(io_error)?;
+        }
         Ok(())
+    }
+
+    // The home is the workspace's only where the machine is a worker's own: on any other
+    // machine it is a person's account, shared with every other task of the project, and
+    // archiving or restoring it would read or overwrite what they work on.
+    fn workspace_home(&self) -> Result<&Path, IsolationError> {
+        if self.layers.is_none() {
+            return Err(IsolationError::new(
+                "a testbed sandbox's home is this machine's own account unless the machine is a worker, \
+                 so its workspace is neither checkpointed nor restored here",
+            ));
+        }
+        Ok(&self.home)
+    }
+
+    // altitude's own state, which is the machine's rather than any task's: its identity,
+    // the sandboxes' trees, the profiles and caches mounted into them.
+    fn altitude_dirs(&self) -> Vec<PathBuf> {
+        let mut dirs = vec![
+            self.config.data_dir().to_path_buf(),
+            self.config.cache_dir().to_path_buf(),
+        ];
+        let resolved: Vec<PathBuf> = dirs
+            .iter()
+            .filter_map(|dir| dir.canonicalize().ok())
+            .collect();
+        dirs.extend(resolved);
+        dirs
+    }
+
+    // Which declared cache an archive path beneath `caches/` belongs to, and the rest of
+    // the path inside it. The longest declared path wins.
+    fn cache_destination<'a>(
+        &self,
+        id: &str,
+        record: &SandboxRecord,
+        rest: &'a Path,
+    ) -> Option<(PathBuf, &'a Path)> {
+        record
+            .caches
+            .iter()
+            .filter_map(|guest| {
+                let key = Path::new(guest.trim_start_matches('/'));
+                let inner = rest.strip_prefix(key).ok()?;
+                Some((key.components().count(), guest, inner))
+            })
+            .max_by_key(|(depth, _, _)| *depth)
+            .map(|(_, guest, inner)| (self.host_path(id, record, guest), inner))
     }
 }
 
-// The chain of directories a restored entry lives beneath. `pack_home` writes files
-// without their directories, so a transcript under `projects/-/` or a git object
-// under `.git/objects/` has none of its parents, and tar's `Entry::unpack` will not
-// make them. Each step is created shallowest first, and a step's parent is
+// The chain of directories a restored entry lives beneath. A section's base may not
+// exist yet (a cache directory on a fresh host), and an archive names a directory before
+// what is in it, so each missing step is created shallowest first. A step's parent is
 // canonicalized — which follows a link — and checked before anything is made, and the
 // entry's parent is checked once more before it is written through, so a link the
 // checkpoint carried cannot redirect a restore out of its destination.
@@ -566,11 +671,16 @@ fn ensure_inside(base: &Path, path: &Path) -> Result<(), IsolationError> {
 }
 
 // Every entry of the tree goes into the archive, or the pack fails and says which one
-// did not. Two things are not content and are left out: an entry that vanished while the
+// did not, except what the caller names as not part of it. Two things are not content and are left out: an entry that vanished while the
 // tree was walked, which is gone from the workspace too, and a socket, pipe or device,
 // which a process holds and an archive cannot carry. Anything else the account cannot
 // read is workspace content that a restore would silently lose.
-fn pack_tree(builder: &mut Builder<fs::File>, entry: &str, root: &Path) -> Result<(), String> {
+fn archive_whole_tree(
+    builder: &mut Builder<fs::File>,
+    entry: &str,
+    root: &Path,
+    skipped: &[PathBuf],
+) -> Result<(), String> {
     // A link is archived as a link: followed, a link to a directory becomes a bare
     // directory entry and a link out of the tree copies what it points at into the
     // archive.
@@ -590,6 +700,9 @@ fn pack_tree(builder: &mut Builder<fs::File>, entry: &str, root: &Path) -> Resul
             };
             let child_name = format!("{name}/{}", child.file_name().to_string_lossy());
             let child_path = child.path();
+            if skipped.iter().any(|skip| child_path.starts_with(skip)) {
+                continue;
+            }
             let file_type = match fs::symlink_metadata(&child_path) {
                 Ok(metadata) => metadata.file_type(),
                 Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
@@ -614,6 +727,19 @@ fn pack_tree(builder: &mut Builder<fs::File>, entry: &str, root: &Path) -> Resul
         }
     }
     Ok(())
+}
+
+// Whether a directory is another filesystem mounted over this machine's own.
+fn is_mount_point(path: &Path) -> io::Result<bool> {
+    let here = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    let Some(parent) = path.parent() else {
+        return Ok(false);
+    };
+    Ok(here.dev() != fs::metadata(parent)?.dev())
 }
 
 fn unreadable(path: &Path, error: &io::Error) -> String {

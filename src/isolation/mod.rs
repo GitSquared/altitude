@@ -220,6 +220,9 @@ pub struct SandboxOptions {
     // writes to. A provider whose commands each run in a fresh mount namespace has to
     // re-apply these for every command; one that keeps its guest applies them once.
     pub binds: Vec<SandboxBind>,
+    // The guest paths of the mounts that are the project's caches, so a provider that
+    // checkpoints a workspace off the machine that holds them can carry their contents.
+    pub caches: Vec<String>,
     pub environment: Vec<(String, String)>,
     pub vsock: Vec<VsockRoute>,
 }
@@ -343,6 +346,7 @@ impl SandboxOptions {
             network_enabled: false,
             mounts: Vec::new(),
             binds: Vec::new(),
+            caches: Vec::new(),
             environment: Vec::new(),
             vsock: Vec::new(),
         }
@@ -585,10 +589,18 @@ pub trait IsolationEngine: Send + Sync {
         async move { sandbox::stop_work(self, id).await }
     }
 
-    // Whatever a provider's snapshot is, it holds the whole workspace the sandbox was
-    // working in (the project checkout and the home, the agent's edits and what setup
-    // installed), because a resume neither clones nor runs setup. A workspace that cannot
-    // be captured whole fails the suspend, and the sandbox is left running.
+    // A snapshot holds the whole workspace the sandbox was working in, because a resume
+    // neither clones nor runs setup: the guest's home with the project checkout, the
+    // agent's edits and whatever setup installed, and the sandbox's own disk. A disk
+    // snapshot (microsandbox) has all of that. A host checkpoint (testbed) archives its
+    // account's home and the sandbox's tree, and the contents of the project cache mounts
+    // too, since a resume lands on another machine; a cache that is itself a mount point is
+    // the master's export, which outlives the host, so it is left where it is. A microVM
+    // resumes on the machine that holds its cache directories, which persist and are
+    // shared, so its snapshot leaves them (an operator who clears a cache clears it for a
+    // resume too). Mounts that are credentials, memory or altitude's own notes belong to
+    // the machine and are never carried. A workspace that cannot be captured whole fails
+    // the suspend, and the sandbox is left running.
     fn suspend(
         &self,
         id: String,

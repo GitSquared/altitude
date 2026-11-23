@@ -9,7 +9,7 @@ use crate::{
         EnvironmentDescription, EnvironmentProgressSink, FileTally, FileTransferSink,
         IsolationEngine, IsolationError, IsolationStatus, LAYER_MARKER, LayerView, Pressure,
         ProfileRecipe, SandboxOptions, SandboxPurpose, SandboxRoom, TaskSnapshot, VsockRoute,
-        guest_absolute, private_directory,
+        private_directory,
         sandbox::{self, ProvisionRequest},
     },
     project::Project,
@@ -90,7 +90,7 @@ impl IsolationEngine for TestbedIsolation {
         let mut record = SandboxRecord {
             mounts,
             environment: options.environment,
-            checkout: None,
+            caches: options.caches,
         };
         // A task-local bind's source is a guest path on the sandbox's own disk, so it
         // is resolved once here and stored beside the host mounts. Every command's
@@ -156,14 +156,15 @@ impl IsolationEngine for TestbedIsolation {
         vsock: Vec<VsockRoute>,
         progress: &dyn EnvironmentProgressSink,
     ) -> Result<(), IsolationError> {
-        let checkout = project
-            .checkout_path()
-            .map(|path| guest_absolute(&path))
-            .transpose()?;
         let resumed_from = match &task_snapshot {
             Some(TaskSnapshot::File(path)) => Some(PathBuf::from(path)),
             Some(TaskSnapshot::Awaited) | None => None,
         };
+        // Refused before anything is made: a machine whose home is a person's cannot
+        // restore a workspace into it.
+        if resumed_from.is_some() {
+            self.workspace_home()?;
+        }
         sandbox::provision(
             self,
             &self.config,
@@ -177,7 +178,6 @@ impl IsolationEngine for TestbedIsolation {
             progress,
         )
         .await?;
-        self.remember_checkout(&id, checkout)?;
         // The same restore a worker host does when the master delivers the archive: the
         // sandbox is made without cloning or running setup, then the workspace is put back.
         if let Some(archive) = resumed_from
