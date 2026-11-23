@@ -60,25 +60,16 @@ impl LinkClient {
 
     // This host's copy, left for the next one. A failure is the caller's to log and
     // forget: a layer that cannot be shared is a layer the next host builds itself.
+    // Bounded as a whole, dial and upload and answer: nothing else ends a conversation
+    // whose peer stays connected and says nothing, short of the connection's idle window.
     pub(crate) async fn layer_store(
         &self,
         peer: impl Into<EndpointAddr>,
         request: &LayerRequest,
-        archive: AsyncFile,
-    ) -> LinkResult<()> {
-        self.layer_store_within(LAYER_STORE_PATIENCE, peer.into(), request, archive)
-            .await
-    }
-
-    // Bounded as a whole, dial and upload and answer: nothing else ends a conversation
-    // whose peer stays connected and says nothing, short of the connection's idle window.
-    pub(crate) async fn layer_store_within(
-        &self,
-        patience: Duration,
-        peer: EndpointAddr,
-        request: &LayerRequest,
         mut archive: AsyncFile,
     ) -> LinkResult<()> {
+        let peer = peer.into();
+        let patience = LAYER_STORE_PATIENCE;
         let stored = time::timeout(patience, async {
             let dial = self.dial(peer, Conversation::Layers).await?;
             let (mut send, mut recv) = dial.0.open_bi().await?;

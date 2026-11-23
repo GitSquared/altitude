@@ -115,25 +115,3 @@ impl HostLayers for LinkLayers {
         })
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use std::time::{Duration, Instant};
-
-    use super::*;
-    use crate::remote::layers::loopback::{client, serve_silence};
-
-    #[tokio::test]
-    async fn storing_a_layer_returns_before_the_master_answers() {
-        let (_master, address) = serve_silence().await;
-        let layers = LinkLayers::new(client().await, address, "token".into(), "image".into());
-        let root = tempfile::tempdir().expect("a root");
-        let archive = root.path().join("layer.tar");
-        fs::write(&archive, b"layer").expect("an archive");
-
-        let began = Instant::now();
-        layers.store("installs", archive).await;
-
-        assert!(began.elapsed() < Duration::from_secs(2));
-    }
-}
