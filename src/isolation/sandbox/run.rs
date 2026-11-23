@@ -90,10 +90,6 @@ pub(crate) async fn credential_shell(
     Ok(with_port_relay(command))
 }
 
-// A session is renewed by the harness that owns it, and a harness lives in a sandbox when
-// the machine holding the profile has none: a normal remote builds one, a workers remote
-// spawns a worker, and only the session files come back out. Nothing is mounted in, so the
-// refresh runs against the profile the sandbox already carries.
 // What came of using a harness to renew: the exit status it left, or that it could
 // not be run at all. Zero is the harness accepting the renewal; a non-zero status is
 // the provider refusing it, which is a different thing from the sandbox failing.
@@ -103,32 +99,25 @@ pub(crate) enum HarnessRun {
     CouldNotRun,
 }
 
+// A session is renewed by the harness that owns it, and a harness lives in a sandbox when
+// the machine holding the profile has none: a normal remote builds one, a workers remote
+// spawns a worker, and only the session files come back out. The sandbox is opened the way
+// a sign-in shell is, because that is the call that carries the profile to wherever the
+// sandbox runs: a mount's source on a worker is that worker's copy, never this machine's path.
 pub(crate) async fn renew_session(
     engine: &impl IsolationEngine,
-    config: &Config,
     sandbox: CredentialSandbox,
     command: String,
     take_back: Vec<(String, PathBuf)>,
     progress: &dyn EnvironmentProgressSink,
 ) -> Result<HarnessRun, IsolationError> {
-    let CredentialSandbox {
-        id,
-        recipes,
-        snapshot,
-        vsock,
-    } = sandbox;
-    let mut plan = SandboxPlan::compose(config, Project::profile_build(), recipes)?;
-    plan.options.vsock = vsock;
-    create(
-        engine,
-        config,
-        id.clone(),
-        plan,
-        SandboxKind::Shell,
-        snapshot.map(SnapshotSource::Environment),
-        progress,
-    )
-    .await?;
+    let id = sandbox.id.clone();
+    let profile = sandbox
+        .recipes
+        .first()
+        .map(|recipe| recipe.profile.to_owned())
+        .ok_or_else(|| IsolationError::new("a renewal needs a profile recipe".to_owned()))?;
+    engine.credential_shell(sandbox, &profile, progress).await?;
     let used = match run_to_end(engine, id.clone(), command).await {
         Ok((status, _)) => HarnessRun::Exited(status),
         Err(error) => {

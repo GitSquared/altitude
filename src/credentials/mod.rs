@@ -325,7 +325,6 @@ where
         };
         let used = renew_session(
             &self.isolation,
-            &self.config,
             sandbox,
             command.to_owned(),
             take_back,
