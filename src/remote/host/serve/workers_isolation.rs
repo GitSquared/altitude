@@ -232,7 +232,7 @@ impl WorkersIsolation {
     }
 }
 
-fn pack_tree(source: &Path, tar_path: &Path) -> Result<FileTally, String> {
+fn tar_directory(source: &Path, tar_path: &Path) -> Result<FileTally, String> {
     let file = fs::File::create(tar_path).map_err(|error| error.to_string())?;
     let mut builder = tar::Builder::new(file);
     builder
@@ -770,7 +770,7 @@ impl IsolationEngine for WorkersIsolation {
     ) -> Result<FileTally, IsolationError> {
         let peer = self.peer_for(&id)?;
         let tar = NamedTempFile::new().map_err(|error| IsolationError::new(error.to_string()))?;
-        let tally = pack_tree(&source, tar.path()).map_err(IsolationError::new)?;
+        let tally = tar_directory(&source, tar.path()).map_err(IsolationError::new)?;
         let file = AsyncFile::open(tar.path())
             .await
             .map_err(|error| IsolationError::new(error.to_string()))?;

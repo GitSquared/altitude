@@ -125,7 +125,7 @@ impl WorkerService {
                 )
                 .await
             && let Ok(tar) = NamedTempFile::new()
-            && let Ok(len) = pack_tree(directory.path(), tar.path())
+            && let Ok(len) = tar_directory(directory.path(), tar.path())
         {
             if write_frame(
                 &mut send,
@@ -227,7 +227,7 @@ async fn receive_to_temp(recv: &mut RecvStream) -> Result<NamedTempFile, String>
     Ok(temp)
 }
 
-fn pack_tree(source: &Path, tar_path: &Path) -> Result<u64, String> {
+fn tar_directory(source: &Path, tar_path: &Path) -> Result<u64, String> {
     let file = fs::File::create(tar_path).map_err(|error| error.to_string())?;
     let mut builder = tar::Builder::new(file);
     builder
