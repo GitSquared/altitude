@@ -68,6 +68,9 @@ pub(super) struct MountRecord {
 pub(super) struct SandboxRecord {
     pub mounts: Vec<MountRecord>,
     pub environment: Vec<(String, String)>,
+    // The guest path of the project's checkout, which a checkpoint carries beside the
+    // sandbox's own tree. Known once the sandbox is provisioned for a project.
+    pub checkout: Option<String>,
 }
 
 impl TestbedIsolation {
@@ -245,6 +248,7 @@ impl TestbedIsolation {
         let root = self.sandboxes_dir().join(LAYER_SANDBOX);
         machine::prepare_root(&root)?;
         let record = SandboxRecord {
+            checkout: None,
             mounts: view
                 .mounts
                 .iter()
@@ -311,10 +315,10 @@ impl TestbedIsolation {
     // The home as this host holds it, which is the whole of an installs layer: the
     // profile directories and project caches are mounted into the layer's view from
     // the master, so taking the home from outside that view leaves them out.
-    // A layer is a convenience for the next host, not a thing this one owes: an entry it
-    // cannot read is left out and said aloud, because one socket or one root-owned file
-    // in an account's home is not a reason for every host after this one to build the
-    // same layer again.
+    // An entry this account cannot read fails the pack, like a checkpoint's: a layer
+    // that lacks something its steps installed would be restored on the next host and
+    // recorded as built. A host that could not store its layer is only a host the next
+    // one does not save time on.
     async fn store_home(
         &self,
         layers: &Arc<dyn HostLayers>,
@@ -328,7 +332,7 @@ impl TestbedIsolation {
         spawn_blocking(move || -> Result<(), String> {
             let file = fs::File::create(&packing).map_err(|error| error.to_string())?;
             let mut builder = Builder::new(file);
-            pack_home(&mut builder, &entry, &home)?;
+            pack_tree(&mut builder, &entry, &home)?;
             builder.finish().map_err(|error| error.to_string())
         })
         .await
@@ -381,12 +385,12 @@ impl TestbedIsolation {
     }
 
     // A host that is about to be destroyed has no machine to come back to, so a
-    // snapshot is the sandbox itself: the tree it wrote, and the project checkout,
-    // which lives outside it under the machine's own roots.
+    // snapshot is the workspace: the tree the sandbox wrote, and the project checkout,
+    // which lives outside it under the machine's own roots. Both are carried whole or
+    // the archive is not made: the caller keeps the sandbox when this fails.
     pub(crate) fn archive_sandbox(
         &self,
         id: &str,
-        checkout: Option<&str>,
         destination: &Path,
     ) -> Result<(), IsolationError> {
         let root = self.sandbox_root(id);
@@ -395,21 +399,32 @@ impl TestbedIsolation {
                 "this testbed sandbox is not on disk: {id}"
             )));
         }
+        let record = self.read_record(id)?;
         let file = fs::File::create(destination).map_err(io_error)?;
         let mut builder = Builder::new(file);
-        // A sandbox is being written while it is packed — the agent may be running in it
-        // — so an entry that cannot be read at this instant is an entry to leave out,
-        // not a reason to lose the whole snapshot.
-        pack_home(&mut builder, "root", &root).map_err(IsolationError::new)?;
-        if let Some(checkout) = checkout {
-            let record = self.read_record(id)?;
+        pack_tree(&mut builder, "root", &root).map_err(IsolationError::new)?;
+        if let Some(checkout) = &record.checkout {
             let host = self.host_path(id, &record, checkout);
-            if host.exists() {
-                pack_home(&mut builder, "checkout", &host).map_err(IsolationError::new)?;
+            if !host.is_dir() {
+                return Err(IsolationError::new(format!(
+                    "the project checkout is not on this host, so its work cannot be archived: {}",
+                    host.display()
+                )));
             }
+            pack_tree(&mut builder, "checkout", &host).map_err(IsolationError::new)?;
         }
-        builder.finish().map_err(io_error)?;
-        Ok(())
+        let file = builder.into_inner().map_err(io_error)?;
+        file.sync_all().map_err(io_error)
+    }
+
+    pub(super) fn remember_checkout(
+        &self,
+        id: &str,
+        checkout: Option<String>,
+    ) -> Result<(), IsolationError> {
+        let mut record = self.read_record(id)?;
+        record.checkout = checkout;
+        self.write_record(id, &record)
     }
 
     // A checkpoint carries two trees — the sandbox's own disk under `root/` and the
@@ -417,20 +432,13 @@ impl TestbedIsolation {
     // it came from. The entry's name is not trusted: it may climb out of its section,
     // or lie beneath a directory that is a link pointing elsewhere, so the destination
     // is worked out and checked before anything is written through it.
-    pub(crate) fn restore_sandbox(
-        &self,
-        id: &str,
-        checkout: Option<&str>,
-        source: &Path,
-    ) -> Result<(), IsolationError> {
+    pub(crate) fn restore_sandbox(&self, id: &str, source: &Path) -> Result<(), IsolationError> {
         let root = self.sandbox_root(id);
-        let checkout_host = match checkout {
-            Some(checkout) => {
-                let record = self.read_record(id)?;
-                Some(self.host_path(id, &record, checkout))
-            }
-            None => None,
-        };
+        let record = self.read_record(id)?;
+        let checkout_host = record
+            .checkout
+            .as_deref()
+            .map(|checkout| self.host_path(id, &record, checkout));
         let file = fs::File::open(source).map_err(io_error)?;
         let mut archive = Archive::new(file);
         for entry in archive.entries().map_err(io_error)? {
@@ -447,7 +455,7 @@ impl TestbedIsolation {
             let rest = components.as_path();
             // A hard link is unpacked by its link target, which `Entry::unpack` does not
             // resolve against the destination, so it could name a file outside the
-            // section. `pack_home` writes files and symlinks and never one of these, so
+            // section. `pack_tree` writes files and symlinks and never one of these, so
             // refuse it before any filesystem change.
             if entry.header().entry_type().is_hard_link() {
                 return Err(IsolationError::new(format!(
@@ -476,6 +484,12 @@ impl TestbedIsolation {
             let target = base.join(rest);
             ensure_parent_within(base, &target)?;
             clear_other_kind(&target, entry.header().entry_type().is_dir())?;
+            // A directory is made, not unpacked: unpacking applies its recorded mode, and
+            // a read-only one would refuse the entries restored into it next.
+            if entry.header().entry_type().is_dir() {
+                fs::create_dir_all(&target).map_err(io_error)?;
+                continue;
+            }
             entry.unpack(&target).map_err(io_error)?;
         }
         Ok(())
@@ -551,41 +565,62 @@ fn ensure_inside(base: &Path, path: &Path) -> Result<(), IsolationError> {
     Ok(())
 }
 
-fn pack_home(builder: &mut Builder<fs::File>, entry: &str, home: &Path) -> Result<(), String> {
+// Every entry of the tree goes into the archive, or the pack fails and says which one
+// did not. Two things are not content and are left out: an entry that vanished while the
+// tree was walked, which is gone from the workspace too, and a socket, pipe or device,
+// which a process holds and an archive cannot carry. Anything else the account cannot
+// read is workspace content that a restore would silently lose.
+fn pack_tree(builder: &mut Builder<fs::File>, entry: &str, root: &Path) -> Result<(), String> {
     // A link is archived as a link: followed, a link to a directory becomes a bare
     // directory entry and a link out of the tree copies what it points at into the
-    // checkpoint.
+    // archive.
     builder.follow_symlinks(false);
-    let mut pending = vec![(home.to_path_buf(), entry.to_owned())];
+    let mut pending = vec![(root.to_path_buf(), entry.to_owned())];
     while let Some((path, name)) = pending.pop() {
         let read = match fs::read_dir(&path) {
             Ok(read) => read,
-            Err(error) => {
-                tracing::warn!(path = %path.display(), %error, "leaving an entry out of a layer");
-                continue;
-            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(unreadable(&path, &error)),
         };
-        for child in read.flatten() {
+        for child in read {
+            let child = match child {
+                Ok(child) => child,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(unreadable(&path, &error)),
+            };
             let child_name = format!("{name}/{}", child.file_name().to_string_lossy());
             let child_path = child.path();
-            match fs::symlink_metadata(&child_path) {
-                Ok(metadata) if metadata.is_dir() => pending.push((child_path, child_name)),
-                Ok(_) => {
-                    if let Err(error) = builder.append_path_with_name(&child_path, &child_name) {
-                        tracing::warn!(
-                            path = %child_path.display(),
-                            %error,
-                            "leaving an entry out of a layer"
-                        );
-                    }
+            let file_type = match fs::symlink_metadata(&child_path) {
+                Ok(metadata) => metadata.file_type(),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(unreadable(&child_path, &error)),
+            };
+            if file_type.is_dir() {
+                // The directory's own entry, so that an empty one is restored too.
+                match builder.append_path_with_name(&child_path, &child_name) {
+                    Ok(()) => pending.push((child_path, child_name)),
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(unreadable(&child_path, &error)),
                 }
-                Err(error) => {
-                    tracing::warn!(path = %child_path.display(), %error, "leaving an entry out of a layer")
+            } else if file_type.is_file() || file_type.is_symlink() {
+                match builder.append_path_with_name(&child_path, &child_name) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(unreadable(&child_path, &error)),
                 }
+            } else {
+                tracing::debug!(path = %child_path.display(), "not archiving a socket, pipe or device");
             }
         }
     }
     Ok(())
+}
+
+fn unreadable(path: &Path, error: &io::Error) -> String {
+    format!(
+        "{} cannot be archived, and an archive without it would lose it: {error}",
+        path.display()
+    )
 }
 
 fn io_error(error: io::Error) -> IsolationError {

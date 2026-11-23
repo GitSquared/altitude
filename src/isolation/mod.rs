@@ -585,6 +585,10 @@ pub trait IsolationEngine: Send + Sync {
         async move { sandbox::stop_work(self, id).await }
     }
 
+    // Whatever a provider's snapshot is, it holds the whole workspace the sandbox was
+    // working in (the project checkout and the home, the agent's edits and what setup
+    // installed), because a resume neither clones nor runs setup. A workspace that cannot
+    // be captured whole fails the suspend, and the sandbox is left running.
     fn suspend(
         &self,
         id: String,

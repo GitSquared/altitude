@@ -1,5 +1,6 @@
 use std::{fs, io, io::ErrorKind, path::PathBuf, process, time::Duration};
 
+use tempfile::NamedTempFile;
 use tokio::{sync::watch, task::spawn_blocking, time::sleep};
 
 use crate::{
@@ -8,7 +9,7 @@ use crate::{
         EnvironmentDescription, EnvironmentProgressSink, FileTally, FileTransferSink,
         IsolationEngine, IsolationError, IsolationStatus, LAYER_MARKER, LayerView, Pressure,
         ProfileRecipe, SandboxOptions, SandboxPurpose, SandboxRoom, TaskSnapshot, VsockRoute,
-        private_directory,
+        guest_absolute, private_directory,
         sandbox::{self, ProvisionRequest},
     },
     project::Project,
@@ -89,6 +90,7 @@ impl IsolationEngine for TestbedIsolation {
         let mut record = SandboxRecord {
             mounts,
             environment: options.environment,
+            checkout: None,
         };
         // A task-local bind's source is a guest path on the sandbox's own disk, so it
         // is resolved once here and stored beside the host mounts. Every command's
@@ -154,11 +156,19 @@ impl IsolationEngine for TestbedIsolation {
         vsock: Vec<VsockRoute>,
         progress: &dyn EnvironmentProgressSink,
     ) -> Result<(), IsolationError> {
+        let checkout = project
+            .checkout_path()
+            .map(|path| guest_absolute(&path))
+            .transpose()?;
+        let resumed_from = match &task_snapshot {
+            Some(TaskSnapshot::File(path)) => Some(PathBuf::from(path)),
+            Some(TaskSnapshot::Awaited) | None => None,
+        };
         sandbox::provision(
             self,
             &self.config,
             ProvisionRequest {
-                id,
+                id: id.clone(),
                 snapshot: task_snapshot,
                 project,
                 recipes,
@@ -166,7 +176,21 @@ impl IsolationEngine for TestbedIsolation {
             },
             progress,
         )
-        .await
+        .await?;
+        self.remember_checkout(&id, checkout)?;
+        // The same restore a worker host does when the master delivers the archive: the
+        // sandbox is made without cloning or running setup, then the workspace is put back.
+        if let Some(archive) = resumed_from
+            && let Err(error) = self.restore_sandbox(&id, &archive)
+        {
+            if let Err(cleanup_error) = self.remove(id).await {
+                tracing::warn!(%cleanup_error, "could not remove a sandbox whose workspace would not restore");
+            }
+            return Err(IsolationError::new(format!(
+                "restoring the parked workspace: {error}"
+            )));
+        }
+        Ok(())
     }
 
     async fn credential_shell(
@@ -264,10 +288,14 @@ impl IsolationEngine for TestbedIsolation {
         if let Some(parent) = path.parent() {
             private_directory(parent)?;
         }
-        // There is nothing to capture: a testbed sandbox's files are the machine's,
-        // which outlive it. The marker only says that a snapshot is recorded, so a
-        // resume can tell the agent it was paused and restored.
-        fs::write(&path, b"testbed\n").map_err(io_error)?;
+        // The archive takes its name only once it is whole, and the sandbox is removed
+        // only after that: an archive that fails leaves the sandbox and no file a
+        // resume would trust.
+        let partial = NamedTempFile::new_in(&snapshots_dir).map_err(io_error)?;
+        self.archive_sandbox(&id, partial.path())?;
+        partial
+            .persist(&path)
+            .map_err(|error| io_error(error.error))?;
         self.remove(id).await?;
         Ok(path)
     }

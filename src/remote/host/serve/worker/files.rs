@@ -152,43 +152,45 @@ impl WorkerService {
         let _ = send.finish();
     }
 
-    // The whole sandbox, archived on its way to the master.
-    pub(super) async fn send_snapshot(
-        &self,
-        mut send: SendStream,
-        _recv: RecvStream,
-        id: String,
-        checkout: Option<String>,
-    ) {
-        if let Ok(tar) = NamedTempFile::new()
-            && self
-                .engine
-                .archive_sandbox(&id, checkout.as_deref(), tar.path())
+    // The whole workspace, archived on its way to the master. An archive that is not
+    // complete is not sent: the master keeps its sandbox when this fails.
+    pub(super) async fn send_snapshot(&self, mut send: SendStream, _recv: RecvStream, id: String) {
+        let archived = NamedTempFile::new()
+            .map_err(|error| error.to_string())
+            .and_then(|tar| {
+                self.engine
+                    .archive_sandbox(&id, tar.path())
+                    .map_err(|error| error.to_string())?;
+                let length = fs::metadata(tar.path())
+                    .map_err(|error| error.to_string())?
+                    .len();
+                Ok((tar, length))
+            });
+        match archived {
+            Ok((tar, length)) => {
+                if write_frame(
+                    &mut send,
+                    &WorkerReply::Blob {
+                        len: length,
+                        files: 0,
+                        bytes: 0,
+                    },
+                )
+                .await
                 .is_ok()
-            && let Ok(metadata) = fs::metadata(tar.path())
-        {
-            if write_frame(
-                &mut send,
-                &WorkerReply::Blob {
-                    len: metadata.len(),
-                    files: 0,
-                    bytes: 0,
-                },
-            )
-            .await
-            .is_ok()
-                && let Ok(mut file) = AsyncFile::open(tar.path()).await
-            {
-                let _ = copy(&mut file, &mut send).await;
+                    && let Ok(mut file) = AsyncFile::open(tar.path()).await
+                {
+                    let _ = copy(&mut file, &mut send).await;
+                }
             }
-            let _ = send.finish();
-            return;
+            Err(error) => {
+                let _ = write_frame(
+                    &mut send,
+                    &WorkerReply::Failed(format!("could not archive the workspace: {error}")),
+                )
+                .await;
+            }
         }
-        let _ = write_frame(
-            &mut send,
-            &WorkerReply::Failed("could not archive the sandbox".into()),
-        )
-        .await;
         let _ = send.finish();
     }
 
@@ -198,13 +200,9 @@ impl WorkerService {
         mut send: SendStream,
         mut recv: RecvStream,
         id: String,
-        checkout: Option<String>,
     ) {
         let reply = match receive_to_temp(&mut recv).await {
-            Ok(tar) => match self
-                .engine
-                .restore_sandbox(&id, checkout.as_deref(), tar.path())
-            {
+            Ok(tar) => match self.engine.restore_sandbox(&id, tar.path()) {
                 Ok(()) => WorkerReply::Ok,
                 Err(error) => WorkerReply::Failed(error.to_string()),
             },
