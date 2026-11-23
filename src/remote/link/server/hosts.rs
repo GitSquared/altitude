@@ -19,7 +19,7 @@ pub struct ServerParts {
     pub agent_channels: Option<AgentChannelAccess>,
     // The installs layers its hosts built, when this machine keeps them for the next
     // host rather than making every host build its own.
-    pub layers: Option<Arc<LayerStore>>,
+    pub layers: Option<Arc<ArchiveStore>>,
 }
 
 // A worker is trusted to carry the connections an agent inside its sandbox makes,

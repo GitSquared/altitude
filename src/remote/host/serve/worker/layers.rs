@@ -10,7 +10,7 @@ use tokio::fs::File as AsyncFile;
 
 use crate::isolation::HostLayers;
 use crate::remote::LinkClient;
-use crate::remote::layers::{ArchiveKind, LayerOp, LayerRequest};
+use crate::remote::layers::{ArchiveKind, ArchiveOp, ArchiveRequest};
 
 // What a host that declares no environment calls itself. Hosts that declare nothing
 // share one key, which the 72-hour window bounds: an image that changes without
@@ -46,8 +46,8 @@ impl LinkLayers {
         }
     }
 
-    fn request(&self, kind: ArchiveKind, tag: &str, op: LayerOp) -> LayerRequest {
-        LayerRequest {
+    fn request(&self, kind: ArchiveKind, tag: &str, op: ArchiveOp) -> ArchiveRequest {
+        ArchiveRequest {
             token: self.token.clone(),
             kind,
             environment: self.environment.clone(),
@@ -61,10 +61,10 @@ impl LinkLayers {
     pub(super) async fn fetch_archive(&self, kind: ArchiveKind, tag: &str) -> Option<PathBuf> {
         let path = env::temp_dir().join(format!("altitude-{kind:?}-{tag}.tar"));
         let sink = AsyncFile::create(&path).await.ok()?;
-        let request = self.request(kind, tag, LayerOp::Fetch);
+        let request = self.request(kind, tag, ArchiveOp::Fetch);
         match self
             .client
-            .layer_fetch(self.master.clone(), &request, sink)
+            .archive_fetch(self.master.clone(), &request, sink)
             .await
         {
             Ok(true) => Some(path),
@@ -93,10 +93,10 @@ impl LinkLayers {
             return;
         };
         let bytes = metadata.len();
-        let request = self.request(kind, tag, LayerOp::Store { len: bytes });
+        let request = self.request(kind, tag, ArchiveOp::Store { len: bytes });
         match self
             .client
-            .layer_store(self.master.clone(), &request, file)
+            .archive_store(self.master.clone(), &request, file)
             .await
         {
             Ok(()) => {
@@ -127,7 +127,7 @@ impl HostLayers for LinkLayers {
                 return;
             };
             let bytes = file.metadata().await.map(|meta| meta.len()).unwrap_or(0);
-            let request = self.request(ArchiveKind::Layer, tag, LayerOp::Store { len: bytes });
+            let request = self.request(ArchiveKind::Layer, tag, ArchiveOp::Store { len: bytes });
             let client = self.client.clone();
             let master = self.master.clone();
             let tag = tag.to_owned();
@@ -135,7 +135,7 @@ impl HostLayers for LinkLayers {
             // benefits from. A host torn down mid-upload drops the task, and the
             // next host builds its own layer.
             tokio::spawn(async move {
-                match client.layer_store(master, &request, file).await {
+                match client.archive_store(master, &request, file).await {
                     Ok(()) => {
                         tracing::info!(%tag, bytes, "left this host's layer for the next one")
                     }

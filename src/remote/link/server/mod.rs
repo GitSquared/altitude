@@ -32,7 +32,7 @@ use crate::task::memory;
 use crate::task::picture;
 
 use crate::remote::host::clients::{ClientLog, ClientRecord};
-use crate::remote::layers::{LAYER_ALPN, LayerHandler, LayerStore};
+use crate::remote::layers::{ArchiveHandler, ArchiveStore, LAYER_ALPN};
 use crate::task::TaskAsk;
 
 use crate::remote::{
@@ -405,7 +405,7 @@ impl LinkServer {
         .map_err(|error| format!("UDP task bind at {listen}: {error}"))?;
         let mut router = Router::builder(endpoint).accept(LINK_ALPN, handler);
         if let Some(layers) = layers {
-            router = router.accept(LAYER_ALPN, LayerHandler::new(layers));
+            router = router.accept(LAYER_ALPN, ArchiveHandler::new(layers));
         }
         let router = router.spawn();
         // Announced on the same address, over TCP, so that a client which has

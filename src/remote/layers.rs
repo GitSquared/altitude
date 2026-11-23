@@ -99,7 +99,7 @@ impl ArchiveKind {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct LayerRequest {
+pub(crate) struct ArchiveRequest {
     pub token: String,
     pub kind: ArchiveKind,
     // What the host is: the image's own name, as the host declares it. A layer built
@@ -108,18 +108,18 @@ pub(crate) struct LayerRequest {
     // The archive's name for itself: the digest of the commands that build a layer, the
     // project's id for a cache.
     pub tag: String,
-    pub op: LayerOp,
+    pub op: ArchiveOp,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) enum LayerOp {
+pub(crate) enum ArchiveOp {
     Fetch,
     // The archive follows the request, `len` bytes of it.
     Store { len: u64 },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) enum LayerReply {
+pub(crate) enum ArchiveReply {
     // The archive follows, `len` bytes of it.
     Blob { len: u64 },
     Missing,
@@ -133,7 +133,7 @@ pub(crate) enum LayerReply {
 // a cache is for, because the token is the boundary on this link and everywhere else: a
 // host holding it could already reach every task's channel, and a project's id is an
 // unguessable UUID, so a host that lies only corrupts its own fleet's archives.
-pub(crate) struct LayerStore {
+pub(crate) struct ArchiveStore {
     dir: PathBuf,
     caches: PathBuf,
     // Where a receive writes before it is an archive. Emptied when the store opens: a
@@ -143,7 +143,7 @@ pub(crate) struct LayerStore {
     token: String,
 }
 
-impl LayerStore {
+impl ArchiveStore {
     pub(crate) fn open(config: &Config, token: String) -> io::Result<Self> {
         let dir = config.data_dir().join("hosts").join("layers");
         let caches = dir.join("caches");
@@ -174,7 +174,7 @@ impl LayerStore {
 
     // Unique per receive: two tasks of one project end at once, and a shared name would
     // have them write the same file and hand the master an archive of both.
-    fn staging_path(&self, request: &LayerRequest) -> PathBuf {
+    fn staging_path(&self, request: &ArchiveRequest) -> PathBuf {
         self.staging.join(format!(
             "{}.{}.incoming",
             self.key(request.kind, &request.environment, &request.tag),
@@ -227,7 +227,7 @@ impl LayerStore {
         Some((path, metadata.len()))
     }
 
-    fn adopt(&self, request: &LayerRequest, received: PathBuf) -> io::Result<u64> {
+    fn adopt(&self, request: &ArchiveRequest, received: PathBuf) -> io::Result<u64> {
         let path = self.archive_path(request.kind, &request.environment, &request.tag);
         // The path matters as much as the reason: a store that refuses says which file
         // it refused, because the host that sent it can do nothing with "denied".
@@ -282,23 +282,23 @@ impl LayerStore {
 }
 
 #[derive(Clone)]
-pub(crate) struct LayerHandler {
-    store: Arc<LayerStore>,
+pub(crate) struct ArchiveHandler {
+    store: Arc<ArchiveStore>,
 }
 
-impl LayerHandler {
-    pub(crate) fn new(store: Arc<LayerStore>) -> Self {
+impl ArchiveHandler {
+    pub(crate) fn new(store: Arc<ArchiveStore>) -> Self {
         Self { store }
     }
 }
 
-impl fmt::Debug for LayerHandler {
+impl fmt::Debug for ArchiveHandler {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("LayerHandler")
+        formatter.write_str("ArchiveHandler")
     }
 }
 
-impl ProtocolHandler for LayerHandler {
+impl ProtocolHandler for ArchiveHandler {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
         // A host asks for a layer and a cache per sandbox and leaves them on the way out,
         // all on the connection it holds, so each stream is answered as it arrives.
@@ -307,19 +307,19 @@ impl ProtocolHandler for LayerHandler {
                 return Ok(());
             };
             let handler = self.clone();
-            tokio::spawn(async move { handler.answer_layer(send, recv).await });
+            tokio::spawn(async move { handler.answer_archive(send, recv).await });
         }
     }
 }
 
-impl LayerHandler {
-    async fn answer_layer(&self, mut send: SendStream, mut recv: RecvStream) {
+impl ArchiveHandler {
+    async fn answer_archive(&self, mut send: SendStream, mut recv: RecvStream) {
         // A host waiting on an answer it never gets is indistinguishable from a master
         // that never heard the question, and only one of those is a bug here.
-        let request: LayerRequest = match read_frame(&mut recv).await {
+        let request: ArchiveRequest = match read_frame(&mut recv).await {
             Ok(request) => request,
             Err(error) => {
-                tracing::warn!(%error, "an unreadable layer call arrived");
+                tracing::warn!(%error, "an unreadable archive call arrived");
                 return;
             }
         };
@@ -327,13 +327,13 @@ impl LayerHandler {
         if request.token != self.store.token() {
             let _ = write_frame(
                 &mut send,
-                &LayerReply::Failed("this host does not hold the master's token".into()),
+                &ArchiveReply::Failed("this host does not hold the master's token".into()),
             )
             .await;
             return;
         }
         match request.op {
-            LayerOp::Fetch => {
+            ArchiveOp::Fetch => {
                 match self
                     .store
                     .fresh_archive(request.kind, &request.environment, &request.tag)
@@ -342,12 +342,12 @@ impl LayerHandler {
                         let Ok(mut archive) = AsyncFile::open(&path).await else {
                             let _ = write_frame(
                                 &mut send,
-                                &LayerReply::Failed("a stored archive could not be read".into()),
+                                &ArchiveReply::Failed("a stored archive could not be read".into()),
                             )
                             .await;
                             return;
                         };
-                        if write_frame(&mut send, &LayerReply::Blob { len })
+                        if write_frame(&mut send, &ArchiveReply::Blob { len })
                             .await
                             .is_err()
                         {
@@ -361,13 +361,13 @@ impl LayerHandler {
                         return;
                     }
                     None => {
-                        let _ = write_frame(&mut send, &LayerReply::Missing).await;
+                        let _ = write_frame(&mut send, &ArchiveReply::Missing).await;
                     }
                 }
             }
-            LayerOp::Store { len } => {
+            ArchiveOp::Store { len } => {
                 let reply = if len == 0 || len > request.kind.max_bytes() {
-                    LayerReply::Failed(format!("{len} bytes is not a {}", request.kind.name()))
+                    ArchiveReply::Failed(format!("{len} bytes is not a {}", request.kind.name()))
                 } else {
                     let staging = self.store.staging_path(&request);
                     match receive(&mut recv, &staging, len).await {
@@ -380,11 +380,11 @@ impl LayerHandler {
                                     bytes = len,
                                     "a host left an archive for the next one"
                                 );
-                                LayerReply::Stored
+                                ArchiveReply::Stored
                             }
-                            Err(error) => LayerReply::Failed(error.to_string()),
+                            Err(error) => ArchiveReply::Failed(error.to_string()),
                         },
-                        Err(error) => LayerReply::Failed(error),
+                        Err(error) => ArchiveReply::Failed(error),
                     }
                 };
                 let _ = write_frame(&mut send, &reply).await;

@@ -8,15 +8,15 @@ impl LinkClient {
     // An archive is an optimisation and a host that cannot fetch one does without, so the
     // fetch is bounded: a conversation that stalls costs this host a build or a cold
     // start, not the ten minutes a connection's idle window takes to end it.
-    pub(crate) async fn layer_fetch(
+    pub(crate) async fn archive_fetch(
         &self,
         peer: impl Into<EndpointAddr>,
-        request: &LayerRequest,
+        request: &ArchiveRequest,
         mut sink: AsyncFile,
     ) -> LinkResult<bool> {
         let peer = peer.into();
         let patience = request.kind.fetch_patience();
-        match time::timeout(patience, self.fetch_layer(peer, request, &mut sink)).await {
+        match time::timeout(patience, self.download_archive(peer, request, &mut sink)).await {
             Ok(result) => result,
             Err(_) => {
                 tracing::warn!(
@@ -29,24 +29,24 @@ impl LinkClient {
         }
     }
 
-    async fn fetch_layer(
+    async fn download_archive(
         &self,
         peer: EndpointAddr,
-        request: &LayerRequest,
+        request: &ArchiveRequest,
         sink: &mut AsyncFile,
     ) -> LinkResult<bool> {
         let dial = self.dial(peer, Conversation::Layers).await?;
         let (mut send, mut recv) = dial.0.open_bi().await?;
         write_frame(&mut send, request).await?;
         send.finish()?;
-        match read_frame::<_, LayerReply>(&mut recv).await? {
-            LayerReply::Blob { .. } => {
+        match read_frame::<_, ArchiveReply>(&mut recv).await? {
+            ArchiveReply::Blob { .. } => {
                 copy(&mut recv, sink).await?;
                 sink.sync_all().await?;
                 Ok(true)
             }
-            LayerReply::Missing => Ok(false),
-            LayerReply::Failed(reason) => Err(reason.into()),
+            ArchiveReply::Missing => Ok(false),
+            ArchiveReply::Failed(reason) => Err(reason.into()),
             other => Err(format!("unexpected answer: {other:?}").into()),
         }
     }
@@ -55,10 +55,10 @@ impl LinkClient {
     // forget: an archive that cannot be shared is one the next host does without.
     // Bounded as a whole, dial and upload and answer: nothing else ends a conversation
     // whose peer stays connected and says nothing, short of the connection's idle window.
-    pub(crate) async fn layer_store(
+    pub(crate) async fn archive_store(
         &self,
         peer: impl Into<EndpointAddr>,
-        request: &LayerRequest,
+        request: &ArchiveRequest,
         mut archive: AsyncFile,
     ) -> LinkResult<()> {
         let peer = peer.into();
@@ -76,11 +76,11 @@ impl LinkClient {
             // A master that refuses a layer answers before it has read the archive and
             // stops the stream, so the write fails with "stopped by peer" while the
             // reason it stopped is already waiting in the reply.
-            match read_frame::<_, LayerReply>(&mut recv).await {
-                Ok(LayerReply::Failed(reason)) => {
+            match read_frame::<_, ArchiveReply>(&mut recv).await {
+                Ok(ArchiveReply::Failed(reason)) => {
                     Err(format!("the master refused the archive: {reason}").into())
                 }
-                Ok(LayerReply::Stored) => sent,
+                Ok(ArchiveReply::Stored) => sent,
                 Ok(other) => Err(format!("unexpected answer: {other:?}").into()),
                 Err(error) => sent.and(Err(error)),
             }

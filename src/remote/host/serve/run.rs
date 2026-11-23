@@ -37,7 +37,7 @@ use crate::{
     remote::{
         ClientRecord, InstallationKey, LinkClient, LinkServer, TrackerConnection,
         announce::{Phase, TrackerReadiness},
-        layers::LayerStore,
+        layers::ArchiveStore,
         server::{AgentChannelAccess, ServerParts, WorkerHost},
     },
     task::{TaskEventLoop, TaskExecutionUpdate, TaskService, TaskStore},
@@ -398,7 +398,7 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
             // A layer store is only worth keeping where hosts exist to share it with:
             // a remote that runs its own sandboxes builds them once anyway.
             Some(fleet) => Some(Arc::new(
-                LayerStore::open(&config, fleet.token().to_owned()).map_err(io::Error::other)?,
+                ArchiveStore::open(&config, fleet.token().to_owned()).map_err(io::Error::other)?,
             )),
             None => None,
         },
