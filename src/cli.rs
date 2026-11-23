@@ -166,8 +166,6 @@ To set workers up on a remote:
       git, gh, openssh-client   the version-control profile checks for them
       python3                   the bridge altitude's tools arrive through
       the agent harness         or the network to fetch it
-      nfs-common                the project's cache, which the master exports to
-                                this host for as long as its sandbox lives
     The Dockerfile's worker target and compose.worker.example.yaml are a starting
     point.
  6. Say what the image is. Set ALTITUDE_WORKER_ENVIRONMENT to the image's own name.
@@ -175,6 +173,11 @@ To set workers up on a remote:
     one runs it, and leaves it on its master; the next host of that image restores it
     instead of building it. The name is part of what that layer is called, so a
     rebuilt image builds its own rather than restore software from the one before.
+
+A project's caches travel the same way: the host restores them from its master when
+its sandbox starts, and leaves them there when the sandbox ends if the task changed
+them. The task does not wait for that upload, but the host is destroyed only once it
+finishes, for at most ten minutes.
 
 The remote spawns a host when a task needs one and destroys it when the task ends.
 Run this by hand only to debug a provision script.";

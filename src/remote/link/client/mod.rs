@@ -9,7 +9,7 @@ use tokio::io::copy;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
-use crate::remote::layers::{LayerReply, LayerRequest};
+use crate::remote::layers::{ArchiveReply, ArchiveRequest};
 use crate::remote::protocol::Conversation;
 use crate::task::TaskAsk;
 use crate::task::picture;

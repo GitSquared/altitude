@@ -4,13 +4,13 @@ use std::{
     io::ErrorKind,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use iroh::EndpointAddr;
 use tempfile::NamedTempFile;
-use tokio::sync::watch;
 use tokio::{fs::File as AsyncFile, io::AsyncWriteExt};
+use tokio::{sync::watch, time};
 
 use crate::{
     config::Config,
@@ -23,13 +23,15 @@ use crate::{
         worker_protocol::{WorkerCall, WorkerProfile, WorkerReply, WorkerRequest},
     },
     project::Project,
-    remote::LinkClient,
+    remote::{LinkClient, layers::ArchiveKind},
 };
 
 use crate::remote::bundle::ProfileBundle;
-use crate::remote::cache::share;
 
 use super::workers::WorkerFleet;
+
+// What a host is given beyond its cache upload's own bound to take its sandbox down.
+const REMOVE_MARGIN: Duration = Duration::from_secs(60);
 
 // The isolation provider for a remote that has no sandbox runtime of its own: it
 // spawns a disposable host per sandbox and speaks to it over the link. The master
@@ -171,6 +173,29 @@ impl WorkersIsolation {
         if let Some(worker) = worker {
             self.fleet.deprovision_worker(&worker).await;
         }
+    }
+
+    // The end of a sandbox's host, for a removal and for a park alike: the host hands its
+    // project cache back and the master destroys it. The call is bounded as a whole, and
+    // the host is destroyed whatever it answers, so none outlives its sandbox unbounded.
+    async fn release_host(&self, id: &str) -> Result<(), IsolationError> {
+        let Some(worker) = self.placements.lock().ok().and_then(|mut p| p.remove(id)) else {
+            return Ok(());
+        };
+        let bound = ArchiveKind::Cache.store_patience() + REMOVE_MARGIN;
+        let result = match time::timeout(
+            bound,
+            self.call_on(&worker, WorkerCall::Remove { id: id.to_owned() }),
+        )
+        .await
+        {
+            Ok(answer) => answer.and_then(expect_ok),
+            Err(_) => Err(IsolationError::new(format!(
+                "isolation worker {worker} did not remove sandbox {id} within {bound:?}"
+            ))),
+        };
+        self.fleet.deprovision_worker(&worker).await;
+        result
     }
 
     // The archive a parked task left on the master, put back on its new host.
@@ -364,7 +389,6 @@ impl IsolationEngine for WorkersIsolation {
         // The host is fresh, so the operator's profile files travel with the spawn.
         let profiles = self.profile_bundles(&recipes)?;
         let worker = self.provision_host(&id).await?;
-        let cache = Some(share::cache_path(&project.id));
         progress.report(EnvironmentProgress {
             label: "getting the worker ready".to_owned(),
             completed: 0,
@@ -376,8 +400,6 @@ impl IsolationEngine for WorkersIsolation {
             // that this is a resume.
             snapshot: task_snapshot.as_ref().map(|_| TaskSnapshot::Awaited),
             project,
-            owner: self.owner.clone().unwrap_or_default(),
-            cache,
             agent_profile,
             vcs_profile,
             vsock,
@@ -593,17 +615,7 @@ impl IsolationEngine for WorkersIsolation {
     }
 
     async fn remove(&self, id: String) -> Result<(), IsolationError> {
-        let worker = self.placement(&id);
-        if let Some(worker) = worker {
-            let result = self
-                .call_on(&worker, WorkerCall::Remove { id: id.clone() })
-                .await
-                .and_then(expect_ok);
-            self.deprovision_host(&id).await;
-            result
-        } else {
-            Ok(())
-        }
+        self.release_host(&id).await
     }
 
     async fn has_sandbox(&self, id: String) -> bool {
@@ -658,7 +670,11 @@ impl IsolationEngine for WorkersIsolation {
             let _ = fs::remove_file(&destination);
             return Err(error);
         }
-        self.deprovision_host(&id).await;
+        // The snapshot is whole and durable, so a host that cannot hand its cache back
+        // costs the next start some time and nothing else.
+        if let Err(error) = self.release_host(&id).await {
+            tracing::warn!(%error, sandbox = %id, "a parked task's host did not release cleanly");
+        }
         Ok(destination)
     }
 

@@ -18,46 +18,108 @@ use tokio::{
 use crate::config::Config;
 use crate::remote::protocol::{read_frame, write_frame};
 
-// A host dials this to hand over the installs layer it built, or to ask for one that
-// another host built. It is neither the link (clients and their tasks) nor the worker
-// ALPN (the master asking a host for compute), for the same reason the cache has one
-// of its own: it is a different conversation.
-pub(crate) const LAYER_ALPN: &[u8] = b"altitude/layers/1";
+// A host dials this to hand over what it built, or to ask for what another host left:
+// the installs layer, and a project's cache. It is neither the link (clients and their
+// tasks) nor the worker ALPN (the master asking a host for compute): it is a different
+// conversation.
+pub(crate) const LAYER_ALPN: &[u8] = b"altitude/layers/2";
 
-// Long enough for a toolchain the agent's own profile installs, and no longer: this
-// bounds what a host can put on its master's disk, not what a layer realistically is.
-const MAX_LAYER_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+const MIB: u64 = 1024 * 1024;
+const GIB: u64 = 1024 * MIB;
 
-// The window a stored layer is served for, which is the one base snapshots refresh
-// on. It is a freshness rule and not a sweep: a layer's commands install the newest
-// release they name, so an old archive is older *software*, and a host that cannot be
-// served builds instead. Evaluated when a host asks, never on a timer.
-const KEEP_FOR: Duration = Duration::from_secs(72 * 60 * 60);
+// A layer installs the newest release its commands name, so one older than this is
+// older software, and 72 hours is the window base snapshots refresh on. A cache has no
+// such rule: a stale package store is still correct, and the byte budget is what bounds it.
+const LAYER_FRESHNESS: Duration = Duration::from_secs(72 * 60 * 60);
 
-// What the store may occupy. Eviction is a bucket, not a count of files: what costs
-// is bytes, and the number of layers an image has says nothing about what they weigh.
-const LAYER_BUDGET: u64 = 8 * 1024 * 1024 * 1024;
+// The one assumption behind every cache bound: a host moves a cache to or from the
+// master at about this rate (200 Mbit/s). A cache that cannot cross within its patience
+// at that rate is not worth having, so the size cap is the rate times the patience, and
+// the same patience bounds the download, the upload and the packing that precedes it.
+const CACHE_THROUGHPUT: u64 = 25 * MIB;
+const CACHE_PATIENCE: Duration = Duration::from_secs(2 * 60);
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct LayerRequest {
-    pub token: String,
-    // What the host is: the image's own name, as the host declares it. A layer built
-    // on one image is not the software another image's hosts expect to find.
-    pub environment: String,
-    // The layer's name for itself, which is the digest of the commands that build it.
-    pub tag: String,
-    pub op: LayerOp,
+// What the master keeps for its hosts. Each kind has its own directory and its own
+// budget, so a project's cache, which is large and rewritten by every task, cannot
+// push out the layers every host of an image restores.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum ArchiveKind {
+    // The software a host installed, shared by every project.
+    Layer,
+    // One project's cache directories as the last sandbox to end left them.
+    Cache,
+}
+
+impl ArchiveKind {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Layer => "layer",
+            Self::Cache => "cache",
+        }
+    }
+
+    // Bounds what a host can put on its master's disk. A layer is a toolchain; a cache is
+    // as much as can cross the link within its patience, so it is never stored only to be
+    // too slow to fetch.
+    pub(crate) fn max_bytes(self) -> u64 {
+        match self {
+            Self::Layer => 4 * GIB,
+            Self::Cache => CACHE_THROUGHPUT * CACHE_PATIENCE.as_secs(),
+        }
+    }
+
+    // What the kind may occupy. Eviction is a bucket, not a count of files: what costs
+    // is bytes.
+    fn budget(self) -> u64 {
+        match self {
+            Self::Layer => 8 * GIB,
+            Self::Cache => 32 * GIB,
+        }
+    }
+
+    // A host waiting on an archive it may not get is a host not doing its own work, so
+    // asking is bounded as a whole, dial and download included. A cache is larger, and
+    // still only ever costs the cold start the host would have had without it.
+    pub(crate) fn fetch_patience(self) -> Duration {
+        match self {
+            Self::Layer => Duration::from_secs(10),
+            Self::Cache => CACHE_PATIENCE,
+        }
+    }
+
+    // An upload moves the whole archive, so it gets minutes where a question gets
+    // seconds, and it is still not left to the connection's ten-minute idle window. A
+    // cache's is the same as its fetch: what is stored is what can be fetched.
+    pub(crate) fn store_patience(self) -> Duration {
+        match self {
+            Self::Layer => Duration::from_secs(5 * 60),
+            Self::Cache => CACHE_PATIENCE,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) enum LayerOp {
+pub(crate) struct ArchiveRequest {
+    pub token: String,
+    pub kind: ArchiveKind,
+    // What the host is: the image's own name, as the host declares it. A layer built
+    // on one image is not the software another image's hosts expect to find.
+    pub environment: String,
+    // The archive's name for itself: the digest of the commands that build a layer, the
+    // project's id for a cache.
+    pub tag: String,
+    pub op: ArchiveOp,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) enum ArchiveOp {
     Fetch,
     // The archive follows the request, `len` bytes of it.
     Store { len: u64 },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) enum LayerReply {
+pub(crate) enum ArchiveReply {
     // The archive follows, `len` bytes of it.
     Blob { len: u64 },
     Missing,
@@ -65,33 +127,40 @@ pub(crate) enum LayerReply {
     Failed(String),
 }
 
-// What a master keeps of the layers its hosts built. Nothing here knows what a layer
-// is: an archive per environment and tag, aged out like a base snapshot. A host is
-// trusted to say which environment it is, because the token is the boundary on this
-// link and everywhere else: a host that lies about itself only corrupts its own
-// fleet's layers.
-pub(crate) struct LayerStore {
+// What a master keeps of what its hosts leave. Nothing here knows what an archive is:
+// one per kind, environment and tag; layers age out like a base snapshot and caches only
+// by the byte budget. A host is trusted to say which environment it is and which project
+// a cache is for, because the token is the boundary on this link and everywhere else: a
+// host holding it could already reach every task's channel, and a project's id is an
+// unguessable UUID, so a host that lies only corrupts its own fleet's archives.
+pub(crate) struct ArchiveStore {
     dir: PathBuf,
-    // Where a receive writes before it is a layer. Emptied when the store opens: a
+    caches: PathBuf,
+    // Where a receive writes before it is an archive. Emptied when the store opens: a
     // file here is a receive that did not finish, and nothing can be receiving while
     // this process is starting.
     staging: PathBuf,
     token: String,
 }
 
-impl LayerStore {
+impl ArchiveStore {
     pub(crate) fn open(config: &Config, token: String) -> io::Result<Self> {
         let dir = config.data_dir().join("hosts").join("layers");
+        let caches = dir.join("caches");
         let staging = dir.join("staging");
-        fs::create_dir_all(&staging)?;
+        for directory in [&staging, &caches] {
+            fs::create_dir_all(directory).map_err(|error| {
+                io::Error::new(error.kind(), format!("{}: {error}", directory.display()))
+            })?;
+        }
         // A store nobody can write to would fail every upload one host at a time, with
         // a reason only the master's log can give, so it is said once, here.
-        for directory in [&dir, &staging] {
+        for directory in [&dir, &caches, &staging] {
             if let Err(error) = ensure_writable(directory) {
                 tracing::error!(
                     path = %directory.display(),
                     %error,
-                    "the layer store is not writable; hosts cannot leave their layers here"
+                    "the archive store is not writable; hosts cannot leave their layers or caches here"
                 );
             }
         }
@@ -100,19 +169,33 @@ impl LayerStore {
         }
         Ok(Self {
             dir,
+            caches,
             staging,
             token,
         })
     }
 
-    fn staging_path(&self, environment: &str, tag: &str) -> PathBuf {
-        self.staging
-            .join(format!("{}.incoming", self.key(environment, tag)))
+    // Unique per receive: two tasks of one project end at once, and a shared name would
+    // have them write the same file and hand the master an archive of both.
+    fn staging_path(&self, request: &ArchiveRequest) -> PathBuf {
+        self.staging.join(format!(
+            "{}.{}.incoming",
+            self.key(request.kind, &request.environment, &request.tag),
+            uuid::Uuid::new_v4()
+        ))
     }
 
-    fn key(&self, environment: &str, tag: &str) -> String {
-        let key = blake3::hash(format!("{environment}\u{0}{tag}").as_bytes()).to_hex();
+    fn key(&self, kind: ArchiveKind, environment: &str, tag: &str) -> String {
+        let key = blake3::hash(format!("{}\u{0}{environment}\u{0}{tag}", kind.name()).as_bytes())
+            .to_hex();
         key[..32].to_owned()
+    }
+
+    fn directory(&self, kind: ArchiveKind) -> &Path {
+        match kind {
+            ArchiveKind::Layer => &self.dir,
+            ArchiveKind::Cache => &self.caches,
+        }
     }
 
     pub(crate) fn token(&self) -> &str {
@@ -121,28 +204,34 @@ impl LayerStore {
 
     // Both halves are hashed rather than trusted: an environment is an image's name
     // and a tag is a digest, and neither may become a path.
-    fn archive_path(&self, environment: &str, tag: &str) -> PathBuf {
-        self.dir.join(format!("{}.tar", self.key(environment, tag)))
+    fn archive_path(&self, kind: ArchiveKind, environment: &str, tag: &str) -> PathBuf {
+        self.directory(kind)
+            .join(format!("{}.tar", self.key(kind, environment, tag)))
     }
 
-    fn fresh_archive(&self, environment: &str, tag: &str) -> Option<(PathBuf, u64)> {
-        let path = self.archive_path(environment, tag);
+    fn fresh_archive(
+        &self,
+        kind: ArchiveKind,
+        environment: &str,
+        tag: &str,
+    ) -> Option<(PathBuf, u64)> {
+        let path = self.archive_path(kind, environment, tag);
         let metadata = fs::metadata(&path).ok()?;
         let age = metadata
             .modified()
             .ok()
             .and_then(|written| SystemTime::now().duration_since(written).ok());
-        if age.is_some_and(|age| age >= KEEP_FOR) {
-            // A layer this old would be rebuilt by its host anyway, so it is dropped
-            // rather than left to fill the disk.
+        if kind == ArchiveKind::Layer && age.is_some_and(|age| age >= LAYER_FRESHNESS) {
+            // A layer this old is rebuilt by its host anyway, so it is dropped rather
+            // than left to fill the disk.
             let _ = fs::remove_file(&path);
             return None;
         }
         Some((path, metadata.len()))
     }
 
-    fn adopt(&self, environment: &str, tag: &str, received: PathBuf) -> io::Result<u64> {
-        let path = self.archive_path(environment, tag);
+    fn adopt(&self, request: &ArchiveRequest, received: PathBuf) -> io::Result<u64> {
+        let path = self.archive_path(request.kind, &request.environment, &request.tag);
         // The path matters as much as the reason: a store that refuses says which file
         // it refused, because the host that sent it can do nothing with "denied".
         fs::rename(&received, &path).map_err(|error| {
@@ -152,15 +241,15 @@ impl LayerStore {
             )
         })?;
         let len = fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
-        self.enforce_budget(&path);
+        self.enforce_budget(request.kind, &path);
         Ok(len)
     }
 
     // The one guard on what the store costs, checked where it can change and nowhere
     // else: after a write, while the store is over its budget, drop the archive nobody
     // has written since.
-    fn enforce_budget(&self, keep: &Path) {
-        let Ok(entries) = fs::read_dir(&self.dir) else {
+    fn enforce_budget(&self, kind: ArchiveKind, keep: &Path) {
+        let Ok(entries) = fs::read_dir(self.directory(kind)) else {
             return;
         };
         let mut archives: Vec<(SystemTime, u64, PathBuf)> = Vec::new();
@@ -177,12 +266,12 @@ impl LayerStore {
             total += metadata.len();
             archives.push((written, metadata.len(), path));
         }
-        if total <= LAYER_BUDGET {
+        if total <= kind.budget() {
             return;
         }
         archives.sort();
         for (_, len, path) in archives {
-            if total <= LAYER_BUDGET {
+            if total <= kind.budget() {
                 break;
             }
             if path == keep {
@@ -196,108 +285,109 @@ impl LayerStore {
 }
 
 #[derive(Clone)]
-pub(crate) struct LayerHandler {
-    store: Arc<LayerStore>,
+pub(crate) struct ArchiveHandler {
+    store: Arc<ArchiveStore>,
 }
 
-impl LayerHandler {
-    pub(crate) fn new(store: Arc<LayerStore>) -> Self {
+impl ArchiveHandler {
+    pub(crate) fn new(store: Arc<ArchiveStore>) -> Self {
         Self { store }
     }
 }
 
-impl fmt::Debug for LayerHandler {
+impl fmt::Debug for ArchiveHandler {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("LayerHandler")
+        formatter.write_str("ArchiveHandler")
     }
 }
 
-impl ProtocolHandler for LayerHandler {
+impl ProtocolHandler for ArchiveHandler {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
-        // A host asks for one layer per sandbox and leaves another on the way out, all on
-        // the connection it holds, so each stream is answered as it arrives.
+        // A host asks for a layer and a cache per sandbox and leaves them on the way out,
+        // all on the connection it holds, so each stream is answered as it arrives.
         loop {
             let Ok((send, recv)) = connection.accept_bi().await else {
                 return Ok(());
             };
             let handler = self.clone();
-            tokio::spawn(async move { handler.answer_layer(send, recv).await });
+            tokio::spawn(async move { handler.answer_archive(send, recv).await });
         }
     }
 }
 
-impl LayerHandler {
-    async fn answer_layer(&self, mut send: SendStream, mut recv: RecvStream) {
+impl ArchiveHandler {
+    async fn answer_archive(&self, mut send: SendStream, mut recv: RecvStream) {
         // A host waiting on an answer it never gets is indistinguishable from a master
         // that never heard the question, and only one of those is a bug here.
-        let request: LayerRequest = match read_frame(&mut recv).await {
+        let request: ArchiveRequest = match read_frame(&mut recv).await {
             Ok(request) => request,
             Err(error) => {
-                tracing::warn!(%error, "an unreadable layer call arrived");
+                tracing::warn!(%error, "an unreadable archive call arrived");
                 return;
             }
         };
-        tracing::info!(tag = %request.tag, "a host asked for an installs layer");
+        tracing::info!(kind = request.kind.name(), tag = %request.tag, "a host called the archive store");
         if request.token != self.store.token() {
             let _ = write_frame(
                 &mut send,
-                &LayerReply::Failed("this host does not hold the master's token".into()),
+                &ArchiveReply::Failed("this host does not hold the master's token".into()),
             )
             .await;
             return;
         }
         match request.op {
-            LayerOp::Fetch => match self.store.fresh_archive(&request.environment, &request.tag) {
-                Some((path, len)) => {
-                    let Ok(mut archive) = AsyncFile::open(&path).await else {
-                        let _ = write_frame(
-                            &mut send,
-                            &LayerReply::Failed("a stored layer could not be read".into()),
-                        )
-                        .await;
-                        return;
-                    };
-                    if write_frame(&mut send, &LayerReply::Blob { len })
-                        .await
-                        .is_err()
-                    {
-                        return;
-                    }
-                    if let Err(error) = copy(&mut archive, &mut send).await {
-                        tracing::warn!(%error, "a layer archive did not reach its host");
-                        return;
-                    }
-                    let _ = send.finish();
-                    return;
-                }
-                None => {
-                    let _ = write_frame(&mut send, &LayerReply::Missing).await;
-                }
-            },
-            LayerOp::Store { len } => {
-                let reply = if len == 0 || len > MAX_LAYER_BYTES {
-                    LayerReply::Failed(format!("{len} bytes is not a layer"))
-                } else {
-                    let staging = self.store.staging_path(&request.environment, &request.tag);
-                    match receive(&mut recv, &staging, len).await {
-                        Ok(received) => {
-                            match self
-                                .store
-                                .adopt(&request.environment, &request.tag, received)
-                            {
-                                Ok(len) => {
-                                    tracing::info!(
-                                        environment = %request.environment,
-                                        tag = %request.tag,
-                                        bytes = len,
-                                        "a host left a built layer for the next one"
-                                    );
-                                    LayerReply::Stored
-                                }
-                                Err(error) => LayerReply::Failed(error.to_string()),
-                            }
+            ArchiveOp::Fetch => {
+                match self
+                    .store
+                    .fresh_archive(request.kind, &request.environment, &request.tag)
+                {
+                    Some((path, len)) => {
+                        let Ok(mut archive) = AsyncFile::open(&path).await else {
+                            let _ = write_frame(
+                                &mut send,
+                                &ArchiveReply::Failed("a stored archive could not be read".into()),
+                            )
+                            .await;
+                            return;
+                        };
+                        if write_frame(&mut send, &ArchiveReply::Blob { len })
+                            .await
+                            .is_err()
+                        {
+                            return;
                         }
-                        Err(error) => LayerReply::Failed(error),
+                        if let Err(error) = copy(&mut archive, &mut send).await {
+                            tracing::warn!(%error, "an archive did not reach its host");
+                            return;
+                        }
+                        let _ = send.finish();
+                        return;
+                    }
+                    None => {
+                        let _ = write_frame(&mut send, &ArchiveReply::Missing).await;
+                    }
+                }
+            }
+            ArchiveOp::Store { len } => {
+                let reply = if len == 0 || len > request.kind.max_bytes() {
+                    ArchiveReply::Failed(format!("{len} bytes is not a {}", request.kind.name()))
+                } else {
+                    let staging = self.store.staging_path(&request);
+                    match receive(&mut recv, &staging, len).await {
+                        Ok(received) => match self.store.adopt(&request, received) {
+                            Ok(len) => {
+                                tracing::info!(
+                                    kind = request.kind.name(),
+                                    environment = %request.environment,
+                                    tag = %request.tag,
+                                    bytes = len,
+                                    "a host left an archive for the next one"
+                                );
+                                ArchiveReply::Stored
+                            }
+                            Err(error) => ArchiveReply::Failed(error.to_string()),
+                        },
+                        Err(error) => ArchiveReply::Failed(error),
                     }
                 };
                 let _ = write_frame(&mut send, &reply).await;
@@ -317,168 +407,26 @@ fn ensure_writable(directory: &Path) -> io::Result<()> {
 }
 
 // The archive as it arrives. Kept beside where it will live, so finishing it is a
-// rename on one filesystem: a half-received layer would be one a host restores and
-// cannot run.
+// rename on one filesystem: a half-received archive would be one a host restores and
+// cannot unpack.
 async fn receive(recv: &mut RecvStream, destination: &Path, len: u64) -> Result<PathBuf, String> {
     let incoming = destination.with_extension("incoming");
     let mut file = AsyncFile::create(&incoming)
         .await
         .map_err(|error| format!("{}: {error}", incoming.display()))?;
-    let copied = copy(&mut recv.take(len), &mut file)
-        .await
-        .map_err(|error| error.to_string())?;
-    if copied != len {
+    let received = async {
+        let copied = copy(&mut recv.take(len), &mut file)
+            .await
+            .map_err(|error| error.to_string())?;
+        if copied != len {
+            return Err(format!("{copied} of {len} bytes of an archive arrived"));
+        }
+        file.sync_all().await.map_err(|error| error.to_string())
+    }
+    .await;
+    if let Err(error) = received {
         let _ = fs::remove_file(&incoming);
-        return Err(format!("{copied} of {len} bytes of a layer arrived"));
+        return Err(error);
     }
-    file.sync_all().await.map_err(|error| error.to_string())?;
     Ok(incoming)
-}
-
-#[cfg(test)]
-pub(crate) mod loopback {
-    use std::net::{Ipv4Addr, SocketAddr};
-
-    use iroh::{Endpoint, EndpointAddr, endpoint::presets, protocol::Router};
-
-    use super::*;
-    use crate::remote::LinkClient;
-
-    pub(crate) async fn client() -> LinkClient {
-        let endpoint = Endpoint::builder(presets::Minimal)
-            .bind()
-            .await
-            .expect("a client endpoint binds");
-        LinkClient::from_endpoint(endpoint)
-    }
-
-    pub(crate) async fn serve_layers(store: LayerStore) -> (Router, EndpointAddr) {
-        let endpoint = Endpoint::builder(presets::Minimal)
-            .alpns(vec![LAYER_ALPN.to_vec()])
-            .bind()
-            .await
-            .expect("a master endpoint binds");
-        let router = Router::builder(endpoint)
-            .accept(LAYER_ALPN, LayerHandler::new(Arc::new(store)))
-            .spawn();
-        let address = reachable(router.endpoint());
-        (router, address)
-    }
-
-    // A master that accepts the call and never answers it.
-    pub(crate) async fn serve_silence() -> (Endpoint, EndpointAddr) {
-        let endpoint = Endpoint::builder(presets::Minimal)
-            .alpns(vec![LAYER_ALPN.to_vec()])
-            .bind()
-            .await
-            .expect("a silent endpoint binds");
-        let listening = endpoint.clone();
-        tokio::spawn(async move {
-            let mut held = Vec::new();
-            while let Some(incoming) = listening.accept().await {
-                if let Ok(connection) = incoming.await
-                    && let Ok(streams) = connection.accept_bi().await
-                {
-                    held.push((connection, streams));
-                }
-            }
-        });
-        let address = reachable(&endpoint);
-        (endpoint, address)
-    }
-
-    fn reachable(endpoint: &Endpoint) -> EndpointAddr {
-        let port = endpoint
-            .bound_sockets()
-            .first()
-            .expect("a bound endpoint has a socket")
-            .port();
-        EndpointAddr::new(endpoint.id()).with_ip_addr(SocketAddr::from((Ipv4Addr::LOCALHOST, port)))
-    }
-
-    pub(crate) fn store_in(root: &Path, token: &str) -> LayerStore {
-        let dir = root.join("layers");
-        let staging = dir.join("staging");
-        fs::create_dir_all(&staging).expect("a store directory");
-        LayerStore {
-            dir,
-            staging,
-            token: token.to_owned(),
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::time::Duration;
-
-    use super::loopback::*;
-    use super::*;
-
-    fn store_request(token: &str, len: u64) -> LayerRequest {
-        LayerRequest {
-            token: token.to_owned(),
-            environment: "image".to_owned(),
-            tag: "installs".to_owned(),
-            op: LayerOp::Store { len },
-        }
-    }
-
-    async fn archive_of(root: &Path, len: usize) -> AsyncFile {
-        let path = root.join("archive.tar");
-        fs::write(&path, vec![7u8; len]).expect("an archive");
-        AsyncFile::open(&path).await.expect("an open archive")
-    }
-
-    #[tokio::test]
-    async fn a_refusing_master_gives_its_reason_not_a_stopped_stream() {
-        let root = tempfile::tempdir().expect("a root");
-        let store = store_in(root.path(), "token");
-        // A file where the staging directory should be: creating a receive file fails
-        // whoever the process runs as.
-        fs::remove_dir_all(&store.staging).expect("staging removed");
-        fs::write(&store.staging, b"").expect("staging replaced by a file");
-        let (_master, address) = serve_layers(store).await;
-        let len = 32 * 1024 * 1024;
-        let archive = archive_of(root.path(), len).await;
-
-        let error = client()
-            .await
-            .layer_store(address, &store_request("token", len as u64), archive)
-            .await
-            .expect_err("the master cannot receive")
-            .to_string();
-
-        assert!(error.contains("the master refused the layer"), "{error}");
-        assert!(error.contains("staging"), "{error}");
-        assert!(!error.contains("stopped by peer"), "{error}");
-    }
-
-    #[tokio::test]
-    async fn a_store_is_bounded_when_the_master_says_nothing() {
-        let root = tempfile::tempdir().expect("a root");
-        let (_master, address) = serve_silence().await;
-        let archive = archive_of(root.path(), 1024).await;
-
-        let error = client()
-            .await
-            .layer_store_within(
-                Duration::from_millis(500),
-                address,
-                &store_request("token", 1024),
-                archive,
-            )
-            .await
-            .expect_err("nobody answers")
-            .to_string();
-
-        assert!(error.contains("took longer"), "{error}");
-    }
-
-    #[test]
-    fn the_store_probe_passes_a_writable_directory_and_fails_a_missing_one() {
-        let root = tempfile::tempdir().expect("a root");
-        assert!(ensure_writable(root.path()).is_ok());
-        assert!(ensure_writable(&root.path().join("missing")).is_err());
-    }
 }

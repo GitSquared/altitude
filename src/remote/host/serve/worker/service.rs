@@ -1,5 +1,9 @@
 use std::os::unix::fs::PermissionsExt;
-use std::{fs, net::Ipv4Addr, path::PathBuf, process::Command, time::Instant};
+use std::{
+    fs,
+    net::Ipv4Addr,
+    time::{Instant, SystemTime},
+};
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 
@@ -21,11 +25,10 @@ use crate::{
         worker_protocol::{CommandFrame, WorkerCall, WorkerProfile, WorkerReply},
     },
     logging,
-    remote::cache::share::client_ip,
     remote::protocol::{MAX_BLOB_BYTES, read_frame, write_frame},
 };
 
-use super::WorkerService;
+use super::{WorkerService, cache::CacheLease};
 
 // What a host says while it works, and the answer it ends with. A provision is minutes
 // of work — an installs layer is built or restored inside it — so the host keeps
@@ -175,70 +178,6 @@ impl WorkerService {
         }
     }
 
-    // The project's cache, as the master exports it to this host for as long as its
-    // sandbox lives. Mounting is best-effort: a cache that is not there costs time and
-    // nothing else, so a host with nothing exported to it — no owner named, no export
-    // named, no address to reach it at — works on a cold one.
-    fn mount_cache(&self, cache: Option<&str>, owner: &str, project: &str) -> Result<(), String> {
-        if owner.is_empty() {
-            return Ok(());
-        }
-        let (Some(source), Some(server)) = (cache, client_ip(&self.master)) else {
-            return Ok(());
-        };
-        let path = self.config.project_cache_dir(project);
-        if fs::create_dir_all(&path).is_err() {
-            return Ok(());
-        }
-        let mounted = Command::new("sudo")
-            .arg("-n")
-            .arg("mount")
-            .arg("-t")
-            .arg("nfs4")
-            .arg(format!("{server}:{source}"))
-            .arg(&path)
-            .output();
-        match mounted {
-            Ok(output) if output.status.success() => {
-                tracing::info!(project, "the project cache is mounted from the master")
-            }
-            Ok(output) => tracing::warn!(
-                project,
-                reason = %String::from_utf8_lossy(&output.stderr).trim(),
-                "no export for this project's cache; the sandbox starts with a cold one"
-            ),
-            Err(error) => tracing::warn!(%error, "could not run mount"),
-        }
-        Ok(())
-    }
-
-    // The lend ends with the sandbox: the mount goes, so nothing of the master's stays
-    // reachable on a host that is about to be thrown away.
-    fn unmount_cache(&self, path: PathBuf) {
-        let Some(project) = path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-        else {
-            return;
-        };
-        let unmounted = Command::new("sudo")
-            .arg("-n")
-            .arg("umount")
-            .arg(&path)
-            .output();
-        match unmounted {
-            Ok(output) if output.status.success() => {
-                tracing::info!(project, "the project cache is no longer mounted")
-            }
-            Ok(output) => tracing::warn!(
-                project,
-                reason = %String::from_utf8_lossy(&output.stderr).trim(),
-                "could not unmount the project cache"
-            ),
-            Err(error) => tracing::warn!(%error, "could not run umount"),
-        }
-    }
-
     // The calls that reach here are quick; the long one, a provision, has its own path
     // because it reads the profile files before it answers.
     pub(super) async fn dispatch(&self, call: WorkerCall, _progress: &Progress) -> WorkerReply {
@@ -253,15 +192,12 @@ impl WorkerService {
             },
             WorkerCall::Remove { id } => {
                 self.stop_channel(&id);
-                let mounted = self
-                    .mounted
-                    .lock()
-                    .ok()
-                    .and_then(|mut mounted| mounted.remove(&id));
-                if let Some(path) = mounted {
-                    self.unmount_cache(path);
-                }
-                match self.engine.remove(id).await {
+                // Only once the sandbox is gone does nothing write the cache any more. The
+                // master destroys this host as soon as it answers, so the upload is done, or
+                // given up on, before it does.
+                let removed = self.engine.remove(id.clone()).await;
+                self.leave_cache(&id).await;
+                match removed {
                     Ok(()) => WorkerReply::Ok,
                     Err(error) => WorkerReply::Failed(error.to_string()),
                 }
@@ -368,8 +304,6 @@ impl WorkerService {
             id,
             snapshot,
             project,
-            owner,
-            cache,
             agent_profile,
             vcs_profile,
             vsock,
@@ -389,16 +323,15 @@ impl WorkerService {
             ),
             Err(error) => return WorkerReply::Failed(error),
         }
-        progress.say("mounting this project's cache");
-        if let Err(error) = self.mount_cache(cache.as_deref(), &owner, &project.id) {
-            return WorkerReply::Failed(error);
+        let caches = !project.caches.is_empty();
+        let project_id = project.id.clone();
+        if caches {
+            progress.say("restoring this project's cache");
+            self.restore_cache(&project_id).await;
         }
-        if cache.is_some()
-            && !owner.is_empty()
-            && let Ok(mut mounted) = self.mounted.lock()
-        {
-            mounted.insert(id.clone(), self.config.project_cache_dir(&project.id));
-        }
+        // Taken before the sandbox's setup runs, so what setup installs into a cache that
+        // was cold counts as the task's own writing and is left for the next host.
+        let restored_at = SystemTime::now();
         let recipes = match (
             profile_recipe(&agent_profile, &self.agents),
             profile_recipe(&vcs_profile, &self.agents),
@@ -423,6 +356,15 @@ impl WorkerService {
         );
         match outcome {
             Ok(()) => {
+                if caches && let Ok(mut leases) = self.caches.lock() {
+                    leases.insert(
+                        id.clone(),
+                        CacheLease {
+                            project: project_id,
+                            restored_at,
+                        },
+                    );
+                }
                 self.start_channels(&id, &channels);
                 WorkerReply::Ok
             }
