@@ -2,6 +2,7 @@ use std::{
     cmp::Reverse,
     collections::{HashMap, HashSet},
     env, fs, io,
+    io::Read,
     os::unix::fs::{MetadataExt, PermissionsExt},
     path::{Component, Path, PathBuf},
     process::Command,
@@ -37,6 +38,10 @@ const LAYER_SANDBOX: &str = "layer";
 // target), as a JSON object. A checkpoint leaves out what still matches, since a resume
 // restores the layer before it overlays the checkpoint.
 const HOME_MANIFEST: &str = "testbed-home-manifest";
+
+// The first entry of a checkpoint that leaves out what an installs layer provides: that
+// layer's tag.
+const INSTALLS_LAYER_ENTRY: &str = "installs-layer";
 
 // One path of a manifest. A file is told apart by its size and modification time, a link
 // by where it points.
@@ -93,6 +98,9 @@ pub(super) struct SandboxRecord {
     // The guest paths of the mounts that are project caches, which a checkpoint carries
     // under their own keys because their contents live outside the sandbox's tree.
     pub caches: Vec<String>,
+    // The installs layer the home was laid down from, set once the sandbox is provisioned.
+    #[serde(default)]
+    pub installs_tag: Option<String>,
 }
 
 impl TestbedIsolation {
@@ -275,6 +283,7 @@ impl TestbedIsolation {
         machine::prepare_root(&root)?;
         let record = SandboxRecord {
             caches: Vec::new(),
+            installs_tag: None,
             mounts: view
                 .mounts
                 .iter()
@@ -368,21 +377,19 @@ impl TestbedIsolation {
         }
     }
 
-    // What the installs layers of this machine provide, or nothing when no layer left a
-    // manifest.
-    fn provided_by_layers(&self) -> Option<HomeManifest> {
-        let mut provided: Option<HomeManifest> = None;
-        let layers = fs::read_dir(self.config.installs_snapshots_dir()).ok()?;
-        for layer in layers.flatten() {
-            let Ok(text) = fs::read(layer.path().join(HOME_MANIFEST)) else {
-                continue;
-            };
-            match serde_json::from_slice::<HomeManifest>(&text) {
-                Ok(manifest) => provided.get_or_insert_with(HashMap::new).extend(manifest),
-                Err(error) => tracing::warn!(%error, "an installs layer's manifest is unreadable"),
-            }
-        }
-        provided
+    // What one installs layer provides, or nothing when it left no readable manifest.
+    fn provided_by_layer(&self, tag: &str) -> Option<HomeManifest> {
+        let path = self
+            .config
+            .installs_snapshots_dir()
+            .join(tag)
+            .join(HOME_MANIFEST);
+        let text = fs::read(path).ok()?;
+        serde_json::from_slice(&text)
+            .inspect_err(
+                |error| tracing::warn!(%error, tag, "an installs layer's manifest is unreadable"),
+            )
+            .ok()
     }
 
     // The home as this host holds it, minus altitude's own state, which is the whole of
@@ -495,9 +502,21 @@ impl TestbedIsolation {
         );
         let file = fs::File::create(destination).map_err(io_error)?;
         let mut builder = Builder::new(file);
-        // Without a manifest there is no telling what the layer provides, and the whole home
-        // is carried.
-        let provided = self.provided_by_layers();
+        // Without a manifest for this sandbox's own layer there is no telling what it
+        // provides, and the whole home is carried. The archive names the layer it leaves
+        // out first, so a restore refuses before it changes anything.
+        let provided = record
+            .installs_tag
+            .as_deref()
+            .and_then(|tag| self.provided_by_layer(tag).map(|manifest| (tag, manifest)));
+        if let Some((tag, _)) = &provided {
+            let mut header = tar::Header::new_gnu();
+            header.set_mode(0o600);
+            builder
+                .append_data(&mut header, INSTALLS_LAYER_ENTRY, tag.as_bytes())
+                .map_err(io_error)?;
+        }
+        let provided = provided.map(|(_, manifest)| manifest);
         archive_whole_tree(&mut builder, "root", &root, &[], None).map_err(IsolationError::new)?;
         archive_whole_tree(&mut builder, "home", home, &skipped, provided.as_ref())
             .map_err(IsolationError::new)?;
@@ -535,6 +554,18 @@ impl TestbedIsolation {
                 )));
             };
             let rest = components.as_path();
+            if section == INSTALLS_LAYER_ENTRY {
+                let mut tag = String::new();
+                entry.read_to_string(&mut tag).map_err(io_error)?;
+                if record.installs_tag.as_deref() != Some(tag.as_str()) {
+                    return Err(IsolationError::new(format!(
+                        "this checkpoint leaves out what installs layer {tag} provides, and this \
+                         sandbox's is {}",
+                        record.installs_tag.as_deref().unwrap_or("none")
+                    )));
+                }
+                continue;
+            }
             let (base, rest, overwrite) = match section.to_str() {
                 Some("root") => (root.clone(), rest, true),
                 Some("home") => (home.to_path_buf(), rest, true),
