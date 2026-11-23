@@ -26,8 +26,7 @@ use plan::{cache_storage_path, expand_guest_path};
 
 pub(crate) use guest::{guest_absolute, run_collecting, shell_quote};
 pub(crate) use plan::{
-    ProvisionRequest, SandboxKind, SnapshotSource, environment_layers, environment_top_layer,
-    provision,
+    ProvisionRequest, SandboxKind, SnapshotSource, environment_top_layer, provision,
 };
 pub use profile::{DefaultFile, GuestPath, PersistentDirectory, ProfileRecipe, SignInCommand};
 pub(crate) use run::{

@@ -85,15 +85,6 @@ pub(crate) fn environment_top_layer(
     Ok(SandboxPlan::compose(config, project, recipes)?.layers.pop())
 }
 
-// Every layer a task runs on, the installs layer first.
-pub(crate) fn environment_layers(
-    config: &Config,
-    project: Project,
-    recipes: Vec<ProfileRecipe>,
-) -> Result<Vec<BaseSandboxRecipe>, IsolationError> {
-    Ok(SandboxPlan::compose(config, project, recipes)?.layers)
-}
-
 pub(crate) fn cache_storage_path(cache: &str) -> PathBuf {
     let cache = cache.trim().trim_end_matches('/');
     match cache.strip_prefix("~/") {

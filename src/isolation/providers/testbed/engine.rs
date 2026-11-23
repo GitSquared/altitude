@@ -1,4 +1,10 @@
-use std::{fs, io, io::ErrorKind, path::PathBuf, process, time::Duration};
+use std::{
+    fs, io,
+    io::ErrorKind,
+    path::{Component, Path, PathBuf},
+    process,
+    time::Duration,
+};
 
 use tempfile::NamedTempFile;
 use tokio::{sync::watch, task::spawn_blocking, time::sleep};
@@ -91,7 +97,7 @@ impl IsolationEngine for TestbedIsolation {
             mounts,
             environment: options.environment,
             caches: options.caches,
-            installs_tag: None,
+            checkout: None,
         };
         // A task-local bind's source is a guest path on the sandbox's own disk, so it
         // is resolved once here and stored beside the host mounts. Every command's
@@ -166,14 +172,15 @@ impl IsolationEngine for TestbedIsolation {
         if resumed_from.is_some() {
             self.workspace_home()?;
         }
-        let installs_tag =
-            sandbox::environment_layers(&self.config, project.clone(), recipes.clone())
-                .ok()
-                .and_then(|layers| {
-                    layers
-                        .iter()
-                        .find_map(|layer| self.installs_layer_tag(layer))
-                });
+        // The checkout is a directory under the home, named after the repository.
+        let checkout = project
+            .checkout_path()
+            .and_then(|path| path.strip_prefix("~/").map(str::to_owned))
+            .filter(|rest| {
+                Path::new(rest)
+                    .components()
+                    .all(|part| matches!(part, Component::Normal(_)))
+            });
         sandbox::provision(
             self,
             &self.config,
@@ -187,11 +194,9 @@ impl IsolationEngine for TestbedIsolation {
             progress,
         )
         .await?;
-        // Which installs layer this sandbox's home was laid down from, so a checkpoint
-        // names the one it leaves out and a restore checks it is the one present.
-        if installs_tag.is_some() {
+        if checkout.is_some() {
             let mut record = self.read_record(&id)?;
-            record.installs_tag = installs_tag;
+            record.checkout = checkout;
             self.write_record(&id, &record)?;
         }
         // The same restore a worker host does when the master delivers the archive: the
