@@ -464,7 +464,8 @@ impl TestbedIsolation {
         let home = self.workspace_home()?;
         let root = self.sandbox_root(id);
         let record = self.read_record(id)?;
-        let file = fs::File::open(source).map_err(io_error)?;
+        let file = fs::File::open(source)
+            .map_err(|error| IsolationError::new(format!("{}: {error}", source.display())))?;
         let mut archive = Archive::new(file);
         let mut modes: Vec<(PathBuf, u32)> = Vec::new();
         let mut undeclared: HashSet<String> = HashSet::new();

@@ -205,7 +205,7 @@ impl WorkersIsolation {
         let peer = self.peer_for(id)?;
         let file = AsyncFile::open(snapshot)
             .await
-            .map_err(|error| phase(error.to_string()))?;
+            .map_err(|error| phase(format!("{snapshot}: {error}")))?;
         let request = WorkerRequest {
             token: self.fleet.token().to_owned(),
             call: WorkerCall::Restore { id: id.to_owned() },
@@ -521,7 +521,13 @@ impl IsolationEngine for WorkersIsolation {
         // The snapshot is a file on this machine, which the host cannot open: it is
         // delivered once the sandbox exists, as a resume through `provision` does.
         let mut options = options;
-        let snapshot = options.snapshot_path.take();
+        // Only a task has a workspace to get back. A command sandbox (a credential
+        // renewal, a sign-in shell) is built from the installs layer alone, and a host
+        // that has no layer file reports an empty path there, not an archive.
+        let snapshot = options
+            .snapshot_path
+            .take()
+            .filter(|path| !path.is_empty() && purpose == SandboxPurpose::Capsule);
         let worker = self.provision_host(&id).await?;
 
         let call = WorkerCall::Create {
