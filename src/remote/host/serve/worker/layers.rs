@@ -88,29 +88,52 @@ impl HostLayers for LinkLayers {
             let Ok(metadata) = fs::metadata(&archive) else {
                 return;
             };
+            // The open handle is what keeps the archive alive: the caller's temporary
+            // file is deleted when it returns, and an unlinked file stays readable
+            // through a descriptor already holding it.
             let Ok(file) = AsyncFile::open(&archive).await else {
                 return;
             };
-            let request = self.request(
-                tag,
-                LayerOp::Store {
-                    len: metadata.len(),
-                },
-            );
-            match self
-                .client
-                .layer_store(self.master.clone(), &request, file)
-                .await
-            {
-                Ok(()) => tracing::info!(
-                    tag,
-                    bytes = metadata.len(),
-                    "left this host's layer for the next one"
-                ),
-                Err(error) => {
-                    tracing::warn!(%error, %tag, "the master did not keep this host's layer")
+            let bytes = metadata.len();
+            let request = self.request(tag, LayerOp::Store { len: bytes });
+            let client = self.client.clone();
+            let master = self.master.clone();
+            let tag = tag.to_owned();
+            // A sandbox start must not wait on an upload that only the next host
+            // benefits from. A host torn down mid-upload drops the task, and the
+            // next host builds its own layer.
+            tokio::spawn(async move {
+                match client.layer_store(master, &request, file).await {
+                    Ok(()) => {
+                        tracing::info!(%tag, bytes, "left this host's layer for the next one")
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, %tag, "the master did not keep this host's layer")
+                    }
                 }
-            }
+            });
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use super::*;
+    use crate::remote::layers::loopback::{client, serve_silence};
+
+    #[tokio::test]
+    async fn storing_a_layer_returns_before_the_master_answers() {
+        let (_master, address) = serve_silence().await;
+        let layers = LinkLayers::new(client().await, address, "token".into(), "image".into());
+        let root = tempfile::tempdir().expect("a root");
+        let archive = root.path().join("layer.tar");
+        fs::write(&archive, b"layer").expect("an archive");
+
+        let began = Instant::now();
+        layers.store("installs", archive).await;
+
+        assert!(began.elapsed() < Duration::from_secs(2));
     }
 }
