@@ -148,8 +148,11 @@ impl ArchiveStore {
         let dir = config.data_dir().join("hosts").join("layers");
         let caches = dir.join("caches");
         let staging = dir.join("staging");
-        fs::create_dir_all(&staging)?;
-        fs::create_dir_all(&caches)?;
+        for directory in [&staging, &caches] {
+            fs::create_dir_all(directory).map_err(|error| {
+                io::Error::new(error.kind(), format!("{}: {error}", directory.display()))
+            })?;
+        }
         // A store nobody can write to would fail every upload one host at a time, with
         // a reason only the master's log can give, so it is said once, here.
         for directory in [&dir, &caches, &staging] {

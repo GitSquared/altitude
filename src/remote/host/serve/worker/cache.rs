@@ -171,6 +171,13 @@ fn pack_if_changed(
 }
 
 fn changed_since(directory: &Path, restored_at: SystemTime) -> bool {
+    // The directory's own time too: removing a top-level entry changes only that.
+    if fs::symlink_metadata(directory)
+        .and_then(|metadata| metadata.modified())
+        .is_ok_and(|written| written > restored_at)
+    {
+        return true;
+    }
     let mut pending = vec![directory.to_path_buf()];
     while let Some(path) = pending.pop() {
         let Ok(entries) = fs::read_dir(&path) else {
