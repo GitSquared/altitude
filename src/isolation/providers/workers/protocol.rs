@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-use crate::isolation::{Command, CommandEvent, SandboxOptions, SandboxPurpose, VsockRoute};
+use crate::isolation::{
+    Command, CommandEvent, SandboxOptions, SandboxPurpose, TaskSnapshot, VsockRoute,
+};
 use crate::project::Project;
 
 // The ALPN a master dials a worker on. It is not the link's: the link is clients
@@ -37,7 +39,7 @@ pub(crate) enum WorkerCall {
     // name the credentials to mount; the host rebuilds their recipes itself.
     Provision {
         id: String,
-        snapshot: Option<String>,
+        snapshot: Option<TaskSnapshot>,
         project: Project,
         agent_profile: String,
         vcs_profile: String,
@@ -74,16 +76,14 @@ pub(crate) enum WorkerCall {
         root: String,
         excluded: Vec<String>,
     },
-    // The whole sandbox comes back as a stream: the tree it wrote and, when the task
-    // has one, the project checkout it worked in. `Restore` is the same bytes going
-    // the other way, onto a host that has just been provisioned.
+    // The whole workspace comes back as a stream. The host knows which tree is the
+    // project checkout, because it was provisioned with the project. `Restore` is the
+    // same bytes going the other way, onto a host that has just been provisioned.
     Snapshot {
         id: String,
-        checkout: Option<String>,
     },
     Restore {
         id: String,
-        checkout: Option<String>,
     },
     // A command sandbox a credential flow or a provider's read needs. The host
     // rebuilds the recipes from the pushed profiles, as `Provision` does.

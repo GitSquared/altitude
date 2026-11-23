@@ -67,8 +67,7 @@ pub(crate) fn project_scripts(project: &Project) -> Result<String, IsolationErro
         // asked whether a directory is empty answers "yes" both when it is and
         // when it may not read it, while git, a line later, disagrees. What the
         // question stood for is whether git has started here, which git answers
-        // itself: where it has, this is a task resuming into its own tree and is
-        // left alone.
+        // itself. A resume never runs this: its workspace is restored, not cloned.
         script.push_str(&format!(
             r#"mkdir -p {parent} {checkout}
 if ! git -C {checkout} rev-parse --git-dir >/dev/null 2>&1; then

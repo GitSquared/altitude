@@ -253,12 +253,12 @@ impl WorkerService {
                 self.send_tree(send, recv, id, root, excluded).await;
                 Ok(())
             }
-            WorkerCall::Snapshot { id, checkout } => {
-                self.send_snapshot(send, recv, id, checkout).await;
+            WorkerCall::Snapshot { id } => {
+                self.send_snapshot(send, recv, id).await;
                 Ok(())
             }
-            WorkerCall::Restore { id, checkout } => {
-                self.receive_snapshot(send, recv, id, checkout).await;
+            WorkerCall::Restore { id } => {
+                self.receive_snapshot(send, recv, id).await;
                 Ok(())
             }
             call @ WorkerCall::Provision { .. } => {
