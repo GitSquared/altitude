@@ -31,6 +31,7 @@ use crate::{
     logging,
     remote::{
         InstallationKey, LinkClient,
+        cache::mount::{MountPrivilege, probe as probe_cache_mount},
         protocol::{RemoteTicket, WorkerReport, builder, read_frame, write_frame},
     },
     version::VERSION,
@@ -104,6 +105,8 @@ pub(crate) async fn run(args: &WorkerArgs, base: Config) -> Result<(), Box<dyn E
         }
     }
 
+    let cache_mount = probe_cache_mount();
+    let cache_unavailable = cache_mount.as_ref().err().cloned();
     let service = WorkerService {
         engine,
         config: base.clone(),
@@ -113,13 +116,14 @@ pub(crate) async fn run(args: &WorkerArgs, base: Config) -> Result<(), Box<dyn E
         master: peer.clone(),
         channels: Arc::new(Mutex::new(HashMap::new())),
         mounted: Arc::new(Mutex::new(HashMap::new())),
+        cache_mount: cache_mount.ok(),
     };
     let worker_addr = endpoint.addr();
     let _router = Router::builder(endpoint)
         .accept(WORKER_ALPN, service)
         .spawn();
 
-    let capacity = local_capacity();
+    let capacity = local_capacity(cache_unavailable);
     let mut terminate = signal(SignalKind::terminate())?;
     let mut interrupt = signal(SignalKind::interrupt())?;
 
@@ -131,7 +135,7 @@ pub(crate) async fn run(args: &WorkerArgs, base: Config) -> Result<(), Box<dyn E
                     worker_addr.clone(),
                     &args.token,
                     &args.name,
-                    capacity,
+                    capacity.clone(),
                 )
                 .await
             {
@@ -179,6 +183,9 @@ struct WorkerService {
     channels: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
     // The project cache each sandbox borrows, until the sandbox is gone.
     mounted: Arc<Mutex<HashMap<String, PathBuf>>>,
+    // How this host mounts a project's cache; none when it cannot, and then the master
+    // never names one.
+    cache_mount: Option<MountPrivilege>,
 }
 
 impl fmt::Debug for WorkerService {
@@ -282,16 +289,18 @@ mod service;
 
 use service::Narrator;
 
-fn local_capacity() -> WorkerReport {
+fn local_capacity(cache_unavailable: Option<String>) -> WorkerReport {
     let Ok(mut system) = sysinfo::System::new() else {
         return WorkerReport {
             cpus: 1,
             memory_mib: 0,
+            cache_unavailable,
         };
     };
     system.refresh_memory();
     WorkerReport {
         cpus: system.cpus().len().max(1),
         memory_mib: system.total_memory() / (1024 * 1024),
+        cache_unavailable,
     }
 }

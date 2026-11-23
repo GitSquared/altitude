@@ -392,7 +392,10 @@ impl IsolationEngine for WorkersIsolation {
         let checkout = checkout_guest(&project);
         self.remember_checkout(&id, checkout.clone());
         let worker = self.provision_host(&id).await?;
-        let cache = Some(share::cache_path(&project.id));
+        let cache = self
+            .fleet
+            .may_share_cache(&worker)
+            .then(|| share::cache_path(&project.id));
         progress.report(EnvironmentProgress {
             label: "getting the worker ready".to_owned(),
             completed: 0,

@@ -172,10 +172,13 @@ impl Project {
         }
         if !self.caches.is_empty() {
             brief.push_str(
-                "\n## Shared caches\n\nThese are the complete set of directories shared \
-                 with every task in this project on this machine. Another task may be \
-                 using them, so read and write them freely and never clear them. Anything \
-                 not listed here is local to this task and disappears with it.\n\n",
+                "\n## Caches\n\nThese are the complete set of cache directories this \
+                 project asks for. They are kept between tasks only where the machine \
+                 that runs this task keeps them: on a disposable host they start empty \
+                 and go with it, so a task never depends on what an earlier one left \
+                 there. Where they are kept, another task may be using them, so read and \
+                 write them freely and never clear them. Anything not listed here is \
+                 local to this task and disappears with it.\n\n",
             );
             for cache in &self.caches {
                 brief.push_str(&format!("- {cache}\n"));

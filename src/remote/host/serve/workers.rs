@@ -143,6 +143,14 @@ impl WorkerFleet {
         }
     }
 
+    pub(crate) fn may_share_cache(&self, name: &str) -> bool {
+        let state = self.state.lock().expect("worker fleet lock poisoned");
+        state
+            .connected
+            .get(name)
+            .is_some_and(|worker| worker.capacity.cache_unavailable.is_none())
+    }
+
     // Provision a host for one sandbox. The fleet spawns toward the demand, and
     // this waits for one that has not already been given a sandbox. A host is not
     // returned to the pool: deprovisioning it destroys it.
@@ -432,6 +440,13 @@ impl WorkerHost for WorkerFleet {
                         addrs = peer.addrs.len(),
                         "an isolation worker joined"
                     );
+                    if let Some(reason) = &capacity.cache_unavailable {
+                        tracing::info!(
+                            worker = %name,
+                            "this host cannot share the project cache ({reason}); its \
+                             sandbox keeps a cache of its own"
+                        );
+                    }
                 }
                 // A host joins once, as it starts, and a host that starts holds no
                 // sandbox. Whatever this machine last gave this name is on a machine that

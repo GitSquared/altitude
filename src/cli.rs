@@ -159,17 +159,20 @@ To set workers up on a remote:
     mount namespace over the account's home, so the host needs unprivileged user
     namespaces (the kernel default on modern systems) and no more than that. Every
     step a profile or a project runs is in that account's view: it can write its home
-    and the caches mounted there, and nothing under /usr or /etc — a step that reached
-    for apt was doing work that belongs to the image.
+    and the caches there, and nothing under /usr or /etc — a step that reached for apt
+    was doing work that belongs to the image.
  5. Stock the host image, because the host is the sandbox and the account can install
     nothing: what a task needs has to be here already.
       git, gh, openssh-client   the version-control profile checks for them
       python3                   the bridge altitude's tools arrive through
       the agent harness         or the network to fetch it
-      nfs-common                the project's cache, which the master exports to
-                                this host for as long as its sandbox lives
     The Dockerfile's worker target and compose.worker.example.yaml are a starting
     point.
+    Each host keeps its own project caches, and they go with it. Sharing one between
+    hosts takes two things this guide does not set up: an NFS server on the master
+    exporting /projects, and a host that may run mount -t nfs4 as root or through
+    passwordless sudo, with nfs-common installed. A host without them says so to the
+    master when it joins, and the master logs that its sandbox has a cache of its own.
  6. Say what the image is. Set ALTITUDE_WORKER_ENVIRONMENT to the image's own name.
     A host builds the installs layer - the agent harness, git and gh - the first time
     one runs it, and leaves it on its master; the next host of that image restores it

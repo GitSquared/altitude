@@ -1,5 +1,5 @@
 use std::os::unix::fs::PermissionsExt;
-use std::{fs, net::Ipv4Addr, path::PathBuf, process::Command, time::Instant};
+use std::{fs, net::Ipv4Addr, path::PathBuf, time::Instant};
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 
@@ -180,6 +180,9 @@ impl WorkerService {
     // nothing else, so a host with nothing exported to it — no owner named, no export
     // named, no address to reach it at — works on a cold one.
     fn mount_cache(&self, cache: Option<&str>, owner: &str, project: &str) -> Result<(), String> {
+        let Some(privilege) = self.cache_mount else {
+            return Ok(());
+        };
         if owner.is_empty() {
             return Ok(());
         }
@@ -190,9 +193,8 @@ impl WorkerService {
         if fs::create_dir_all(&path).is_err() {
             return Ok(());
         }
-        let mounted = Command::new("sudo")
-            .arg("-n")
-            .arg("mount")
+        let mounted = privilege
+            .command("mount")
             .arg("-t")
             .arg("nfs4")
             .arg(format!("{server}:{source}"))
@@ -215,17 +217,16 @@ impl WorkerService {
     // The lend ends with the sandbox: the mount goes, so nothing of the master's stays
     // reachable on a host that is about to be thrown away.
     fn unmount_cache(&self, path: PathBuf) {
+        let Some(privilege) = self.cache_mount else {
+            return;
+        };
         let Some(project) = path
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
         else {
             return;
         };
-        let unmounted = Command::new("sudo")
-            .arg("-n")
-            .arg("umount")
-            .arg(&path)
-            .output();
+        let unmounted = privilege.command("umount").arg(&path).output();
         match unmounted {
             Ok(output) if output.status.success() => {
                 tracing::info!(project, "the project cache is no longer mounted")

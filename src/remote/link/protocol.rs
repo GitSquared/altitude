@@ -192,10 +192,12 @@ pub enum LinkRequest {
 
 // What an empty host says it can host. The master keeps its own book of what it
 // has promised; this is only the size of the host.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorkerReport {
     pub cpus: usize,
     pub memory_mib: u64,
+    // Why this host cannot mount a project's cache from the master; none when it can.
+    pub cache_unavailable: Option<String>,
 }
 
 #[derive(Clone, Debug)]

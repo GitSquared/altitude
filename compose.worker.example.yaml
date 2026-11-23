@@ -29,5 +29,6 @@ services:
       - apparmor=unconfined
     cap_add:
       - SYS_ADMIN
-    # A project's cache is mounted from the remote over NFS, which the container does
-    # as root: SYS_ADMIN above is what a mount needs, and no device is involved.
+    # Sharing a project's cache over NFS also needs the worker to mount as root, which
+    # this image's unprivileged user cannot, and an NFS server on the master: without
+    # them each host keeps its own cache.
