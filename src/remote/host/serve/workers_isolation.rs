@@ -18,8 +18,8 @@ use crate::{
         BaseSandboxRecipe, BaseSandboxSnapshot, CommandSession, CredentialSandbox,
         EnvironmentDescription, EnvironmentProgress, EnvironmentProgressSink, FileTally,
         FileTransferSink, IsolationEngine, IsolationError, IsolationStatus, LayerView, Pressure,
-        ProfileRecipe, SandboxCeiling, SandboxOptions, SandboxPurpose, SandboxRoom, VsockRoute,
-        guest_absolute,
+        ProfileRecipe, SandboxCeiling, SandboxOptions, SandboxPurpose, SandboxRoom, TaskSnapshot,
+        VsockRoute, guest_absolute,
         worker_protocol::{WorkerCall, WorkerProfile, WorkerReply, WorkerRequest},
     },
     project::Project,
@@ -194,10 +194,12 @@ impl WorkersIsolation {
         checkout: Option<&str>,
         snapshot: &str,
     ) -> Result<(), IsolationError> {
+        let phase =
+            |error: String| IsolationError::new(format!("restoring the parked workspace: {error}"));
         let peer = self.peer_for(id)?;
         let file = AsyncFile::open(snapshot)
             .await
-            .map_err(|error| IsolationError::new(error.to_string()))?;
+            .map_err(|error| phase(error.to_string()))?;
         let request = WorkerRequest {
             token: self.fleet.token().to_owned(),
             call: WorkerCall::Restore {
@@ -208,7 +210,7 @@ impl WorkersIsolation {
         self.client
             .worker_deliver(peer, &request, file)
             .await
-            .map_err(|error| IsolationError::new(error.to_string()))
+            .map_err(|error| phase(error.to_string()))
     }
 
     // The host a sandbox lives on, for a call that must reach it directly.
@@ -366,7 +368,7 @@ impl IsolationEngine for WorkersIsolation {
     async fn provision(
         &self,
         id: String,
-        task_snapshot: Option<String>,
+        task_snapshot: Option<TaskSnapshot>,
         project: Project,
         recipes: Vec<ProfileRecipe>,
         vsock: Vec<VsockRoute>,
@@ -400,7 +402,9 @@ impl IsolationEngine for WorkersIsolation {
         });
         let call = WorkerCall::Provision {
             id: id.clone(),
-            snapshot: None,
+            // The archive is delivered after the sandbox exists, so the host is only told
+            // that this is a resume.
+            snapshot: task_snapshot.as_ref().map(|_| TaskSnapshot::Awaited),
             project,
             owner: self.owner.clone().unwrap_or_default(),
             cache,
@@ -435,7 +439,7 @@ impl IsolationEngine for WorkersIsolation {
             total: 0,
         });
         // A task that was parked gets its workspace back on the new host.
-        if let Some(snapshot) = task_snapshot
+        if let Some(TaskSnapshot::File(snapshot)) = task_snapshot
             && let Err(error) = self
                 .restore_workspace(&id, checkout.as_deref(), &snapshot)
                 .await

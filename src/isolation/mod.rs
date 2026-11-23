@@ -200,6 +200,16 @@ pub struct EnvironmentDescription {
     pub built_at_ms: i64,
 }
 
+// A resume puts back the workspace the last turn left, so the host it lands on neither
+// clones the project nor runs its setup: either would write the tree the workspace is
+// about to be restored over. `File` is a snapshot the engine can restore itself;
+// `Awaited` is one the caller delivers once the sandbox exists.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum TaskSnapshot {
+    File(String),
+    Awaited,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SandboxOptions {
     pub snapshot_path: Option<String>,
@@ -480,7 +490,7 @@ pub trait IsolationEngine: Send + Sync {
     fn provision(
         &self,
         id: String,
-        task_snapshot: Option<String>,
+        task_snapshot: Option<TaskSnapshot>,
         project: Project,
         recipes: Vec<ProfileRecipe>,
         vsock: Vec<VsockRoute>,

@@ -7,7 +7,8 @@ use crate::{
         BaseSandboxRecipe, BaseSandboxSnapshot, CommandSession, CredentialSandbox,
         EnvironmentDescription, EnvironmentProgressSink, FileTally, FileTransferSink,
         IsolationEngine, IsolationError, IsolationStatus, LAYER_MARKER, LayerView, Pressure,
-        ProfileRecipe, SandboxOptions, SandboxPurpose, SandboxRoom, VsockRoute, private_directory,
+        ProfileRecipe, SandboxOptions, SandboxPurpose, SandboxRoom, TaskSnapshot, VsockRoute,
+        private_directory,
         sandbox::{self, ProvisionRequest},
     },
     project::Project,
@@ -147,7 +148,7 @@ impl IsolationEngine for TestbedIsolation {
     async fn provision(
         &self,
         id: String,
-        task_snapshot: Option<String>,
+        task_snapshot: Option<TaskSnapshot>,
         project: Project,
         recipes: Vec<ProfileRecipe>,
         vsock: Vec<VsockRoute>,

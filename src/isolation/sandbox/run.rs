@@ -186,10 +186,14 @@ pub(crate) async fn create(
     .await
     .map_err(|error| IsolationError::new(error.to_string()))??;
     tracing::info!(sandbox = %id, "the sandbox's directories are prepared");
+    let is_resume = matches!(
+        snapshot,
+        Some(SnapshotSource::Capsule(_) | SnapshotSource::Awaited)
+    );
     let path = match snapshot {
         Some(SnapshotSource::Capsule(path)) => path,
         Some(SnapshotSource::Environment(path)) => path,
-        None => {
+        Some(SnapshotSource::Awaited) | None => {
             let view = plan.layer_view();
             tracing::info!(sandbox = %id, "ensuring the installs layer");
             let base = engine.ensure_base(plan.layers, view, progress).await?;
@@ -234,10 +238,7 @@ pub(crate) async fn create(
         command.push_str(&install_script());
     }
     command.push_str(&local_mounts);
-    if kind == SandboxKind::Task {
-        command.push_str(&project_scripts(&plan.project)?);
-        command.push_str(&project_setup(&plan.project)?);
-    }
+    command.push_str(&project_commands(&plan.project, kind, is_resume)?);
     tracing::info!(sandbox = %id, "setting up the sandbox's mounts and project");
     if let Err(error) = run_setup(engine, id.clone(), command).await {
         if let Err(cleanup_error) = engine.remove(id).await {
@@ -246,6 +247,20 @@ pub(crate) async fn create(
         return Err(error);
     }
     Ok(())
+}
+
+// A resume gets the workspace the last turn left, installed dependencies and the
+// agent's edits included; cloning or running setup first would populate the tree the
+// restore is about to write over.
+fn project_commands(
+    project: &Project,
+    kind: SandboxKind,
+    is_resume: bool,
+) -> Result<String, IsolationError> {
+    if kind != SandboxKind::Task || is_resume {
+        return Ok(String::new());
+    }
+    Ok(project_scripts(project)? + &project_setup(project)?)
 }
 
 pub(crate) fn add_commits_env(environment: &mut Vec<(String, String)>, commits: &ProjectCommits) {
@@ -294,5 +309,43 @@ pub(crate) fn add_commits_env(environment: &mut Vec<(String, String)>, commits: 
             format!("GIT_CONFIG_VALUE_{}", offset + index),
             value.to_owned(),
         ));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn project_with_repository_and_setup() -> Project {
+        let mut project = Project::new("demo");
+        project.repository = Some("https://example.invalid/team/demo.git".to_owned());
+        project.setup_command = "make install".to_owned();
+        project
+    }
+
+    #[test]
+    fn a_start_clones_and_runs_setup() {
+        let project = project_with_repository_and_setup();
+        let commands = project_commands(&project, SandboxKind::Task, false).unwrap();
+        assert!(commands.contains("fetch -q origin"));
+        assert!(commands.contains("make install"));
+    }
+
+    #[test]
+    fn a_resume_neither_clones_nor_runs_setup() {
+        let project = project_with_repository_and_setup();
+        assert_eq!(
+            project_commands(&project, SandboxKind::Task, true).unwrap(),
+            ""
+        );
+    }
+
+    #[test]
+    fn a_shell_never_clones_or_runs_setup() {
+        let project = project_with_repository_and_setup();
+        assert_eq!(
+            project_commands(&project, SandboxKind::Shell, false).unwrap(),
+            ""
+        );
     }
 }

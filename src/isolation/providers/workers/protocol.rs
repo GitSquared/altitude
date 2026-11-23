@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-use crate::isolation::{Command, CommandEvent, SandboxOptions, SandboxPurpose, VsockRoute};
+use crate::isolation::{
+    Command, CommandEvent, SandboxOptions, SandboxPurpose, TaskSnapshot, VsockRoute,
+};
 use crate::project::Project;
 
 // The ALPN a master dials a worker on. It is not the link's: the link is clients
@@ -37,7 +39,7 @@ pub(crate) enum WorkerCall {
     // name the credentials to mount; the host rebuilds their recipes itself.
     Provision {
         id: String,
-        snapshot: Option<String>,
+        snapshot: Option<TaskSnapshot>,
         project: Project,
         // The operator whose cache this is, and where this master exports it from: the
         // host mounts that path on its own cache directory before building.

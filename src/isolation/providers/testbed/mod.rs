@@ -25,6 +25,8 @@ use crate::{
 mod engine;
 mod files;
 mod machine;
+#[cfg(test)]
+mod tests;
 
 // The sandbox directory a layer's steps run in: the view, without a task in it.
 const LAYER_SANDBOX: &str = "layer";
@@ -447,8 +449,8 @@ impl TestbedIsolation {
             let rest = components.as_path();
             // A hard link is unpacked by its link target, which `Entry::unpack` does not
             // resolve against the destination, so it could name a file outside the
-            // section. A checkpoint carries regular files and symlinks and never one of
-            // these, so refuse it before any filesystem change.
+            // section. `pack_home` writes files and symlinks and never one of these, so
+            // refuse it before any filesystem change.
             if entry.header().entry_type().is_hard_link() {
                 return Err(IsolationError::new(format!(
                     "a checkpoint entry is a hard link, which a restore does not carry: {}",
@@ -475,6 +477,7 @@ impl TestbedIsolation {
             }
             let target = base.join(rest);
             ensure_parent_within(base, &target)?;
+            clear_other_kind(&target, entry.header().entry_type().is_dir())?;
             entry.unpack(&target).map_err(io_error)?;
         }
         Ok(())
@@ -519,6 +522,23 @@ fn ensure_parent_within(base: &Path, target: &Path) -> Result<(), IsolationError
     ensure_inside(&base, parent)
 }
 
+// Whatever is at the destination already is replaced by what the checkpoint carries:
+// a file, link or directory of another kind than the entry would otherwise fail the
+// unpack with `File exists`, or, for a link, be written through. A directory that meets
+// a directory is kept, since its contents are restored entry by entry.
+fn clear_other_kind(target: &Path, entry_is_directory: bool) -> Result<(), IsolationError> {
+    let Ok(existing) = fs::symlink_metadata(target) else {
+        return Ok(());
+    };
+    if existing.is_dir() {
+        if entry_is_directory {
+            return Ok(());
+        }
+        return fs::remove_dir_all(target).map_err(io_error);
+    }
+    fs::remove_file(target).map_err(io_error)
+}
+
 // Whether a path a restore is about to write through still resolves inside its
 // destination. Canonicalizing follows a link, so an entry beneath one the checkpoint
 // carried is refused instead of followed out of the tree.
@@ -534,6 +554,10 @@ fn ensure_inside(base: &Path, path: &Path) -> Result<(), IsolationError> {
 }
 
 fn pack_home(builder: &mut Builder<fs::File>, entry: &str, home: &Path) -> Result<(), String> {
+    // A link is archived as a link: followed, a link to a directory becomes a bare
+    // directory entry and a link out of the tree copies what it points at into the
+    // checkpoint.
+    builder.follow_symlinks(false);
     let mut pending = vec![(home.to_path_buf(), entry.to_owned())];
     while let Some((path, name)) = pending.pop() {
         let read = match fs::read_dir(&path) {

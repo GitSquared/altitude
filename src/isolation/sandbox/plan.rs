@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use super::guest::relative_path;
 use super::*;
 
-use crate::{config::Config, project::Project};
+use crate::{config::Config, isolation::TaskSnapshot, project::Project};
 
 use super::{
     BaseSandboxRecipe, EnvironmentProgressSink, IsolationEngine, IsolationError, SandboxPurpose,
@@ -12,6 +12,7 @@ use super::{
 
 pub(crate) enum SnapshotSource {
     Capsule(String),
+    Awaited,
     Environment(String),
 }
 
@@ -39,7 +40,7 @@ impl SandboxKind {
 
 pub(crate) struct ProvisionRequest {
     pub id: String,
-    pub snapshot: Option<String>,
+    pub snapshot: Option<TaskSnapshot>,
     pub project: Project,
     pub recipes: Vec<ProfileRecipe>,
     pub vsock: Vec<VsockRoute>,
@@ -66,7 +67,10 @@ pub(crate) async fn provision(
         id,
         plan,
         SandboxKind::Task,
-        snapshot.map(SnapshotSource::Capsule),
+        snapshot.map(|snapshot| match snapshot {
+            TaskSnapshot::File(path) => SnapshotSource::Capsule(path),
+            TaskSnapshot::Awaited => SnapshotSource::Awaited,
+        }),
         progress,
     )
     .await
