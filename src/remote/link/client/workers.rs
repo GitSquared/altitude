@@ -1,22 +1,13 @@
-use std::time::Duration;
-
 use tokio::{io::AsyncReadExt, time};
 
 use super::*;
 
-// A host waiting on a layer it may not get is a host not doing its own work.
-const LAYER_PATIENCE: Duration = Duration::from_secs(10);
-
-// An upload moves the whole archive, so it gets minutes where a fetch's question gets
-// seconds, and it is still not left to the connection's ten-minute idle window.
-const LAYER_STORE_PATIENCE: Duration = Duration::from_secs(5 * 60);
-
 impl LinkClient {
-    // What another host built, fetched by this one: the archive is copied into the
-    // sink, and `false` says the master has nothing for this environment and tag.
-    // A layer is an optimisation and a host that cannot fetch one builds its own, so the
-    // fetch is bounded: a conversation that stalls costs this host a build, not the ten
-    // minutes a connection's idle window takes to decide the conversation is over.
+    // What another host left, fetched by this one: the archive is copied into the sink,
+    // and `false` says the master has nothing for this kind, environment and tag.
+    // An archive is an optimisation and a host that cannot fetch one does without, so the
+    // fetch is bounded: a conversation that stalls costs this host a build or a cold
+    // start, not the ten minutes a connection's idle window takes to end it.
     pub(crate) async fn layer_fetch(
         &self,
         peer: impl Into<EndpointAddr>,
@@ -24,12 +15,14 @@ impl LinkClient {
         mut sink: AsyncFile,
     ) -> LinkResult<bool> {
         let peer = peer.into();
-        match time::timeout(LAYER_PATIENCE, self.fetch_layer(peer, request, &mut sink)).await {
+        let patience = request.kind.fetch_patience();
+        match time::timeout(patience, self.fetch_layer(peer, request, &mut sink)).await {
             Ok(result) => result,
             Err(_) => {
                 tracing::warn!(
-                    patience = ?LAYER_PATIENCE,
-                    "asking the master for an installs layer timed out, dial included; this host builds its own"
+                    ?patience,
+                    kind = ?request.kind,
+                    "asking the master for an archive timed out, dial included; this host does without"
                 );
                 Ok(false)
             }
@@ -59,7 +52,7 @@ impl LinkClient {
     }
 
     // This host's copy, left for the next one. A failure is the caller's to log and
-    // forget: a layer that cannot be shared is a layer the next host builds itself.
+    // forget: an archive that cannot be shared is one the next host does without.
     // Bounded as a whole, dial and upload and answer: nothing else ends a conversation
     // whose peer stays connected and says nothing, short of the connection's idle window.
     pub(crate) async fn layer_store(
@@ -69,7 +62,7 @@ impl LinkClient {
         mut archive: AsyncFile,
     ) -> LinkResult<()> {
         let peer = peer.into();
-        let patience = LAYER_STORE_PATIENCE;
+        let patience = request.kind.store_patience();
         let stored = time::timeout(patience, async {
             let dial = self.dial(peer, Conversation::Layers).await?;
             let (mut send, mut recv) = dial.0.open_bi().await?;
@@ -85,7 +78,7 @@ impl LinkClient {
             // reason it stopped is already waiting in the reply.
             match read_frame::<_, LayerReply>(&mut recv).await {
                 Ok(LayerReply::Failed(reason)) => {
-                    Err(format!("the master refused the layer: {reason}").into())
+                    Err(format!("the master refused the archive: {reason}").into())
                 }
                 Ok(LayerReply::Stored) => sent,
                 Ok(other) => Err(format!("unexpected answer: {other:?}").into()),
@@ -95,7 +88,7 @@ impl LinkClient {
         .await;
         match stored {
             Ok(result) => result,
-            Err(_) => Err(format!("storing a layer took longer than {patience:?}").into()),
+            Err(_) => Err(format!("storing an archive took longer than {patience:?}").into()),
         }
     }
 

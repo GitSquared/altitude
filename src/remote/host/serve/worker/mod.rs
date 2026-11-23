@@ -3,7 +3,6 @@ use std::{
     error::Error,
     fmt, io,
     io::IsTerminal,
-    path::PathBuf,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -38,6 +37,7 @@ use crate::{
 
 use super::workers::HEARTBEAT_INTERVAL;
 
+use cache::CacheLease;
 use layers::LinkLayers;
 
 // The other end of the fleet contract: an empty host that knows nothing but who
@@ -75,12 +75,13 @@ pub(crate) async fn run(args: &WorkerArgs, base: Config) -> Result<(), Box<dyn E
     // It is given the link too, because the software a task's sandbox expects is the
     // one thing worth fetching rather than building: an installs layer another of this
     // master's hosts built is restored here, and this host leaves its own for the next.
-    let engine = TestbedIsolation::new(&base).with_host_layers(Arc::new(LinkLayers::new(
+    let layers = LinkLayers::new(
         client.clone(),
         peer.clone(),
         args.token.clone(),
         environment_identity().unwrap_or_else(|| layers::UNDECLARED.to_owned()),
-    )));
+    );
+    let engine = TestbedIsolation::new(&base).with_host_layers(Arc::new(layers.clone()));
     // Preparing is quick for a host engine, but it can still fail (no unprivileged
     // user namespaces, say). A host that cannot make sandboxes must not register and
     // take work it will fail, so it prepares before it dials the master.
@@ -112,7 +113,9 @@ pub(crate) async fn run(args: &WorkerArgs, base: Config) -> Result<(), Box<dyn E
         client: client.clone(),
         master: peer.clone(),
         channels: Arc::new(Mutex::new(HashMap::new())),
-        mounted: Arc::new(Mutex::new(HashMap::new())),
+        layers,
+        caches: Arc::new(Mutex::new(HashMap::new())),
+        uploads: Arc::new(Mutex::new(HashMap::new())),
     };
     let worker_addr = endpoint.addr();
     let _router = Router::builder(endpoint)
@@ -177,8 +180,11 @@ struct WorkerService {
     master: EndpointAddr,
     // The loopback listeners carrying each sandbox's agent channel to the master.
     channels: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
-    // The project cache each sandbox borrows, until the sandbox is gone.
-    mounted: Arc<Mutex<HashMap<String, PathBuf>>>,
+    layers: LinkLayers,
+    // The project cache each sandbox restored and has yet to hand back.
+    caches: Arc<Mutex<HashMap<String, CacheLease>>>,
+    // The uploads of caches whose sandbox is gone, until the master asks to settle them.
+    uploads: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
 }
 
 impl fmt::Debug for WorkerService {
@@ -276,6 +282,7 @@ impl WorkerService {
     }
 }
 
+mod cache;
 mod files;
 mod layers;
 mod service;

@@ -39,10 +39,6 @@ pub(crate) enum WorkerCall {
         id: String,
         snapshot: Option<String>,
         project: Project,
-        // The operator whose cache this is, and where this master exports it from: the
-        // host mounts that path on its own cache directory before building.
-        owner: String,
-        cache: Option<String>,
         agent_profile: String,
         vcs_profile: String,
         vsock: Vec<VsockRoute>,
@@ -104,6 +100,12 @@ pub(crate) enum WorkerCall {
         project: Project,
     },
     Remove {
+        id: String,
+    },
+    // Answered once the cache a removed sandbox left is on the master or has failed to
+    // be. The master calls it after `Remove` so that destroying the host, which ends an
+    // upload, waits for the upload without the task waiting for either.
+    Settle {
         id: String,
     },
     HasSandbox {

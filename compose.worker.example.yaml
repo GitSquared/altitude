@@ -22,12 +22,9 @@ services:
     image: altitude-worker:local
     init: true
     # The sandbox is an unprivileged user and mount namespace over the account's home,
-    # and the default profiles refuse the calls that make one and the cache mount that
-    # goes inside it.
+    # and the default profiles refuse the calls that make one.
     security_opt:
       - seccomp=unconfined
       - apparmor=unconfined
     cap_add:
       - SYS_ADMIN
-    # A project's cache is mounted from the remote over NFS, which the container does
-    # as root: SYS_ADMIN above is what a mount needs, and no device is involved.

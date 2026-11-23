@@ -1,7 +1,6 @@
 mod acting;
 pub(crate) mod archive;
 mod bundle;
-pub(crate) mod cache;
 pub(crate) mod host;
 pub(crate) mod identity;
 pub(crate) mod layers;

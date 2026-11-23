@@ -1,20 +1,27 @@
-use std::{env, fs, future::Future, path::PathBuf, pin::Pin};
+use std::{
+    env, fs,
+    future::Future,
+    path::{Path, PathBuf},
+    pin::Pin,
+};
 
 use iroh::EndpointAddr;
 use tokio::fs::File as AsyncFile;
 
 use crate::isolation::HostLayers;
 use crate::remote::LinkClient;
-use crate::remote::layers::{LayerOp, LayerRequest};
+use crate::remote::layers::{ArchiveKind, LayerOp, LayerRequest};
 
 // What a host that declares no environment calls itself. Hosts that declare nothing
 // share one key, which the 72-hour window bounds: an image that changes without
 // saying so is restored the old software until that window passes.
 pub(super) const UNDECLARED: &str = "undeclared";
 
-// A host's end of the layer store: it asks its master for an installs layer another
-// host built, and leaves its own there when it had to build it. Nothing here decides
-// what a layer is: the engine says which one, and whether it already has it.
+// A host's end of the master's archive store: it asks for an installs layer another
+// host built and leaves its own when it had to build it, and does the same with a
+// project's cache. Nothing here decides what an archive holds: the engine says which
+// layer, and whether it already has it.
+#[derive(Clone)]
 pub(super) struct LinkLayers {
     client: LinkClient,
     master: EndpointAddr,
@@ -39,12 +46,65 @@ impl LinkLayers {
         }
     }
 
-    fn request(&self, tag: &str, op: LayerOp) -> LayerRequest {
+    fn request(&self, kind: ArchiveKind, tag: &str, op: LayerOp) -> LayerRequest {
         LayerRequest {
             token: self.token.clone(),
+            kind,
             environment: self.environment.clone(),
             tag: tag.to_owned(),
             op,
+        }
+    }
+}
+
+impl LinkLayers {
+    pub(super) async fn fetch_archive(&self, kind: ArchiveKind, tag: &str) -> Option<PathBuf> {
+        let path = env::temp_dir().join(format!("altitude-{kind:?}-{tag}.tar"));
+        let sink = AsyncFile::create(&path).await.ok()?;
+        let request = self.request(kind, tag, LayerOp::Fetch);
+        match self
+            .client
+            .layer_fetch(self.master.clone(), &request, sink)
+            .await
+        {
+            Ok(true) => Some(path),
+            Ok(false) => {
+                let _ = fs::remove_file(&path);
+                None
+            }
+            // An unreachable master leaves the host to do without, which is what a host
+            // did before there was a store at all.
+            Err(error) => {
+                tracing::warn!(%error, ?kind, %tag, "could not ask the master for an archive");
+                let _ = fs::remove_file(&path);
+                None
+            }
+        }
+    }
+
+    // The open handle is what keeps the archive alive: the caller's temporary file is
+    // deleted when it returns, and an unlinked file stays readable through a descriptor
+    // already holding it.
+    pub(super) async fn send_archive(&self, kind: ArchiveKind, tag: &str, archive: &Path) {
+        let Ok(metadata) = fs::metadata(archive) else {
+            return;
+        };
+        let Ok(file) = AsyncFile::open(archive).await else {
+            return;
+        };
+        let bytes = metadata.len();
+        let request = self.request(kind, tag, LayerOp::Store { len: bytes });
+        match self
+            .client
+            .layer_store(self.master.clone(), &request, file)
+            .await
+        {
+            Ok(()) => {
+                tracing::info!(?kind, %tag, bytes, "left this host's archive for the next one")
+            }
+            Err(error) => {
+                tracing::warn!(%error, ?kind, %tag, "the master did not keep this host's archive")
+            }
         }
     }
 }
@@ -54,29 +114,7 @@ impl HostLayers for LinkLayers {
         &'a self,
         tag: &'a str,
     ) -> Pin<Box<dyn Future<Output = Option<PathBuf>> + Send + 'a>> {
-        Box::pin(async move {
-            let path = env::temp_dir().join(format!("altitude-layer-{tag}.tar"));
-            let sink = AsyncFile::create(&path).await.ok()?;
-            let request = self.request(tag, LayerOp::Fetch);
-            match self
-                .client
-                .layer_fetch(self.master.clone(), &request, sink)
-                .await
-            {
-                Ok(true) => Some(path),
-                Ok(false) => {
-                    let _ = fs::remove_file(&path);
-                    None
-                }
-                // An unreachable master leaves the layer to be built here, which is
-                // what a host did before there was a store at all.
-                Err(error) => {
-                    tracing::warn!(%error, %tag, "could not ask the master for a layer");
-                    let _ = fs::remove_file(&path);
-                    None
-                }
-            }
-        })
+        Box::pin(self.fetch_archive(ArchiveKind::Layer, tag))
     }
 
     fn store<'a>(
@@ -85,17 +123,11 @@ impl HostLayers for LinkLayers {
         archive: PathBuf,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
-            let Ok(metadata) = fs::metadata(&archive) else {
-                return;
-            };
-            // The open handle is what keeps the archive alive: the caller's temporary
-            // file is deleted when it returns, and an unlinked file stays readable
-            // through a descriptor already holding it.
             let Ok(file) = AsyncFile::open(&archive).await else {
                 return;
             };
-            let bytes = metadata.len();
-            let request = self.request(tag, LayerOp::Store { len: bytes });
+            let bytes = file.metadata().await.map(|meta| meta.len()).unwrap_or(0);
+            let request = self.request(ArchiveKind::Layer, tag, LayerOp::Store { len: bytes });
             let client = self.client.clone();
             let master = self.master.clone();
             let tag = tag.to_owned();

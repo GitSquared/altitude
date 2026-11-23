@@ -4,13 +4,13 @@ use std::{
     io::ErrorKind,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use iroh::EndpointAddr;
 use tempfile::NamedTempFile;
-use tokio::sync::watch;
 use tokio::{fs::File as AsyncFile, io::AsyncWriteExt};
+use tokio::{sync::watch, time};
 
 use crate::{
     config::Config,
@@ -23,13 +23,15 @@ use crate::{
         worker_protocol::{WorkerCall, WorkerProfile, WorkerReply, WorkerRequest},
     },
     project::Project,
-    remote::LinkClient,
+    remote::{LinkClient, layers::ArchiveKind},
 };
 
 use crate::remote::bundle::ProfileBundle;
-use crate::remote::cache::share;
 
 use super::workers::WorkerFleet;
+
+// What a host is given beyond the upload's own bound to answer that it is done.
+const SETTLE_MARGIN: Duration = Duration::from_secs(30);
 
 // The isolation provider for a remote that has no sandbox runtime of its own: it
 // spawns a disposable host per sandbox and speaks to it over the link. The master
@@ -392,7 +394,6 @@ impl IsolationEngine for WorkersIsolation {
         let checkout = checkout_guest(&project);
         self.remember_checkout(&id, checkout.clone());
         let worker = self.provision_host(&id).await?;
-        let cache = Some(share::cache_path(&project.id));
         progress.report(EnvironmentProgress {
             label: "getting the worker ready".to_owned(),
             completed: 0,
@@ -402,8 +403,6 @@ impl IsolationEngine for WorkersIsolation {
             id: id.clone(),
             snapshot: None,
             project,
-            owner: self.owner.clone().unwrap_or_default(),
-            cache,
             agent_profile,
             vcs_profile,
             vsock,
@@ -615,13 +614,35 @@ impl IsolationEngine for WorkersIsolation {
     }
 
     async fn remove(&self, id: String) -> Result<(), IsolationError> {
-        let worker = self.placement(&id);
+        let worker = self.placements.lock().ok().and_then(|mut p| p.remove(&id));
         let result = if let Some(worker) = worker {
             let result = self
                 .call_on(&worker, WorkerCall::Remove { id: id.clone() })
                 .await
                 .and_then(expect_ok);
-            self.deprovision_host(&id).await;
+            if result.is_ok() {
+                // The host may be holding the project's cache to upload. The task is
+                // finished with it either way, so only the host's release waits, and a
+                // host that never answers is released at the bound the upload has.
+                let this = self.clone();
+                let sandbox = id.clone();
+                tokio::spawn(async move {
+                    let settled = time::timeout(
+                        ArchiveKind::Cache.store_patience() + SETTLE_MARGIN,
+                        this.call_on(&worker, WorkerCall::Settle { id: sandbox }),
+                    )
+                    .await;
+                    if !matches!(settled, Ok(Ok(_))) {
+                        tracing::warn!(
+                            worker,
+                            "a host did not settle its cache upload; releasing it"
+                        );
+                    }
+                    this.fleet.deprovision_worker(&worker).await;
+                });
+            } else {
+                self.fleet.deprovision_worker(&worker).await;
+            }
             result
         } else {
             Ok(())

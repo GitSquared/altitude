@@ -310,7 +310,7 @@ impl TestbedIsolation {
 
     // The home as this host holds it, which is the whole of an installs layer: the
     // profile directories and project caches are mounted into the layer's view from
-    // the master, so taking the home from outside that view leaves them out.
+    // outside the home, so taking the home leaves them out.
     // A layer is a convenience for the next host, not a thing this one owes: an entry it
     // cannot read is left out and said aloud, because one socket or one root-owned file
     // in an account's home is not a reason for every host after this one to build the
