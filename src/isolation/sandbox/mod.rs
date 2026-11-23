@@ -115,6 +115,7 @@ impl SandboxPlan {
                 network_enabled: true,
                 mounts: Vec::new(),
                 binds: Vec::new(),
+                caches: Vec::new(),
                 environment,
                 vsock: Vec::new(),
             },
@@ -240,6 +241,9 @@ impl SandboxPlan {
                 );
             plan.managed_files
                 .push((host_path.join("README.md"), readme));
+            plan.options
+                .caches
+                .push(guest_path.to_string_lossy().into_owned());
             plan.options.mounts.push(SandboxMount {
                 host_path,
                 guest_path: guest_path.to_string_lossy().into_owned(),

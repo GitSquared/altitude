@@ -18,8 +18,8 @@ use crate::{
         BaseSandboxRecipe, BaseSandboxSnapshot, CommandSession, CredentialSandbox,
         EnvironmentDescription, EnvironmentProgress, EnvironmentProgressSink, FileTally,
         FileTransferSink, IsolationEngine, IsolationError, IsolationStatus, LayerView, Pressure,
-        ProfileRecipe, SandboxCeiling, SandboxOptions, SandboxPurpose, SandboxRoom, VsockRoute,
-        guest_absolute,
+        ProfileRecipe, SandboxCeiling, SandboxOptions, SandboxPurpose, SandboxRoom, TaskSnapshot,
+        VsockRoute,
         worker_protocol::{WorkerCall, WorkerProfile, WorkerReply, WorkerRequest},
     },
     project::Project,
@@ -40,9 +40,6 @@ pub(crate) struct WorkersIsolation {
     client: LinkClient,
     config: Config,
     placements: Arc<Mutex<HashMap<String, String>>>,
-    // The project checkout each sandbox works in, so a snapshot knows what to carry
-    // besides the sandbox tree. `None` for a sandbox with no project.
-    checkouts: Arc<Mutex<HashMap<String, Option<String>>>>,
     owner: Option<String>,
 }
 
@@ -53,7 +50,6 @@ impl WorkersIsolation {
             client,
             config: config.clone(),
             placements: Arc::new(Mutex::new(HashMap::new())),
-            checkouts: Arc::new(Mutex::new(HashMap::new())),
             owner: None,
         }
     }
@@ -66,16 +62,6 @@ impl WorkersIsolation {
         if let Ok(mut placements) = self.placements.lock() {
             placements.insert(id.to_owned(), worker.to_owned());
         }
-    }
-
-    fn remember_checkout(&self, id: &str, checkout: Option<String>) {
-        if let Ok(mut checkouts) = self.checkouts.lock() {
-            checkouts.insert(id.to_owned(), checkout);
-        }
-    }
-
-    fn checkout_of(&self, id: &str) -> Option<String> {
-        self.checkouts.lock().ok()?.get(id).cloned().flatten()
     }
 
     // An unanswered question must not destroy the work it was about, so a host that cannot
@@ -188,27 +174,21 @@ impl WorkersIsolation {
     }
 
     // The archive a parked task left on the master, put back on its new host.
-    async fn restore_workspace(
-        &self,
-        id: &str,
-        checkout: Option<&str>,
-        snapshot: &str,
-    ) -> Result<(), IsolationError> {
+    async fn restore_workspace(&self, id: &str, snapshot: &str) -> Result<(), IsolationError> {
+        let phase =
+            |error: String| IsolationError::new(format!("restoring the parked workspace: {error}"));
         let peer = self.peer_for(id)?;
         let file = AsyncFile::open(snapshot)
             .await
-            .map_err(|error| IsolationError::new(error.to_string()))?;
+            .map_err(|error| phase(error.to_string()))?;
         let request = WorkerRequest {
             token: self.fleet.token().to_owned(),
-            call: WorkerCall::Restore {
-                id: id.to_owned(),
-                checkout: checkout.map(str::to_owned),
-            },
+            call: WorkerCall::Restore { id: id.to_owned() },
         };
         self.client
             .worker_deliver(peer, &request, file)
             .await
-            .map_err(|error| IsolationError::new(error.to_string()))
+            .map_err(|error| phase(error.to_string()))
     }
 
     // The host a sandbox lives on, for a call that must reach it directly.
@@ -252,7 +232,7 @@ impl WorkersIsolation {
     }
 }
 
-fn pack_tree(source: &Path, tar_path: &Path) -> Result<FileTally, String> {
+fn tar_directory(source: &Path, tar_path: &Path) -> Result<FileTally, String> {
     let file = fs::File::create(tar_path).map_err(|error| error.to_string())?;
     let mut builder = tar::Builder::new(file);
     builder
@@ -291,12 +271,6 @@ fn extract_tree(tar_path: &Path, destination: &Path) -> Result<(), String> {
     archive
         .unpack(destination)
         .map_err(|error| error.to_string())
-}
-
-fn checkout_guest(project: &Project) -> Option<String> {
-    project
-        .checkout_path()
-        .and_then(|path| guest_absolute(&path).ok())
 }
 
 async fn sync_directory(path: &Path) -> Result<(), IsolationError> {
@@ -366,7 +340,7 @@ impl IsolationEngine for WorkersIsolation {
     async fn provision(
         &self,
         id: String,
-        task_snapshot: Option<String>,
+        task_snapshot: Option<TaskSnapshot>,
         project: Project,
         recipes: Vec<ProfileRecipe>,
         vsock: Vec<VsockRoute>,
@@ -389,8 +363,6 @@ impl IsolationEngine for WorkersIsolation {
         });
         // The host is fresh, so the operator's profile files travel with the spawn.
         let profiles = self.profile_bundles(&recipes)?;
-        let checkout = checkout_guest(&project);
-        self.remember_checkout(&id, checkout.clone());
         let worker = self.provision_host(&id).await?;
         let cache = Some(share::cache_path(&project.id));
         progress.report(EnvironmentProgress {
@@ -400,7 +372,9 @@ impl IsolationEngine for WorkersIsolation {
         });
         let call = WorkerCall::Provision {
             id: id.clone(),
-            snapshot: None,
+            // The archive is delivered after the sandbox exists, so the host is only told
+            // that this is a resume.
+            snapshot: task_snapshot.as_ref().map(|_| TaskSnapshot::Awaited),
             project,
             owner: self.owner.clone().unwrap_or_default(),
             cache,
@@ -435,10 +409,8 @@ impl IsolationEngine for WorkersIsolation {
             total: 0,
         });
         // A task that was parked gets its workspace back on the new host.
-        if let Some(snapshot) = task_snapshot
-            && let Err(error) = self
-                .restore_workspace(&id, checkout.as_deref(), &snapshot)
-                .await
+        if let Some(TaskSnapshot::File(snapshot)) = task_snapshot
+            && let Err(error) = self.restore_workspace(&id, &snapshot).await
         {
             self.deprovision_host(&id).await;
             return Err(error);
@@ -524,8 +496,10 @@ impl IsolationEngine for WorkersIsolation {
         options: SandboxOptions,
         purpose: SandboxPurpose,
     ) -> Result<(), IsolationError> {
-        // A sandbox with no project has no checkout to carry across a park.
-        self.remember_checkout(&id, None);
+        // The snapshot is a file on this machine, which the host cannot open: it is
+        // delivered once the sandbox exists, as a resume through `provision` does.
+        let mut options = options;
+        let snapshot = options.snapshot_path.take();
         let worker = self.provision_host(&id).await?;
 
         let call = WorkerCall::Create {
@@ -533,13 +507,17 @@ impl IsolationEngine for WorkersIsolation {
             options,
             purpose,
         };
-        match self.call_on(&worker, call).await.and_then(expect_ok) {
-            Ok(()) => Ok(()),
-            Err(error) => {
-                self.deprovision_host(&id).await;
-                Err(error)
-            }
+        let created = match self.call_on(&worker, call).await.and_then(expect_ok) {
+            Ok(()) => match snapshot {
+                Some(snapshot) => self.restore_workspace(&id, &snapshot).await,
+                None => Ok(()),
+            },
+            Err(error) => Err(error),
+        };
+        if created.is_err() {
+            self.deprovision_host(&id).await;
         }
+        created
     }
 
     async fn ensure_project(
@@ -616,7 +594,7 @@ impl IsolationEngine for WorkersIsolation {
 
     async fn remove(&self, id: String) -> Result<(), IsolationError> {
         let worker = self.placement(&id);
-        let result = if let Some(worker) = worker {
+        if let Some(worker) = worker {
             let result = self
                 .call_on(&worker, WorkerCall::Remove { id: id.clone() })
                 .await
@@ -625,11 +603,7 @@ impl IsolationEngine for WorkersIsolation {
             result
         } else {
             Ok(())
-        };
-        if let Ok(mut checkouts) = self.checkouts.lock() {
-            checkouts.remove(&id);
         }
-        result
     }
 
     async fn has_sandbox(&self, id: String) -> bool {
@@ -660,10 +634,7 @@ impl IsolationEngine for WorkersIsolation {
         let peer = self.peer_for(&id)?;
         let request = WorkerRequest {
             token: self.fleet.token().to_owned(),
-            call: WorkerCall::Snapshot {
-                id: id.clone(),
-                checkout: self.checkout_of(&id),
-            },
+            call: WorkerCall::Snapshot { id: id.clone() },
         };
         // The host is released only once the archive is whole and flushed, so a crash
         // mid-snapshot leaves the task rebuildable rather than silent.
@@ -799,7 +770,7 @@ impl IsolationEngine for WorkersIsolation {
     ) -> Result<FileTally, IsolationError> {
         let peer = self.peer_for(&id)?;
         let tar = NamedTempFile::new().map_err(|error| IsolationError::new(error.to_string()))?;
-        let tally = pack_tree(&source, tar.path()).map_err(IsolationError::new)?;
+        let tally = tar_directory(&source, tar.path()).map_err(IsolationError::new)?;
         let file = AsyncFile::open(tar.path())
             .await
             .map_err(|error| IsolationError::new(error.to_string()))?;

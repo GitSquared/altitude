@@ -200,6 +200,16 @@ pub struct EnvironmentDescription {
     pub built_at_ms: i64,
 }
 
+// A resume puts back the workspace the last turn left, so the host it lands on neither
+// clones the project nor runs its setup: either would write the tree the workspace is
+// about to be restored over. `File` is a snapshot the engine can restore itself;
+// `Awaited` is one the caller delivers once the sandbox exists.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum TaskSnapshot {
+    File(String),
+    Awaited,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SandboxOptions {
     pub snapshot_path: Option<String>,
@@ -210,6 +220,9 @@ pub struct SandboxOptions {
     // writes to. A provider whose commands each run in a fresh mount namespace has to
     // re-apply these for every command; one that keeps its guest applies them once.
     pub binds: Vec<SandboxBind>,
+    // The guest paths of the mounts that are the project's caches, so a provider that
+    // checkpoints a workspace off the machine that holds them can carry their contents.
+    pub caches: Vec<String>,
     pub environment: Vec<(String, String)>,
     pub vsock: Vec<VsockRoute>,
 }
@@ -333,6 +346,7 @@ impl SandboxOptions {
             network_enabled: false,
             mounts: Vec::new(),
             binds: Vec::new(),
+            caches: Vec::new(),
             environment: Vec::new(),
             vsock: Vec::new(),
         }
@@ -480,7 +494,7 @@ pub trait IsolationEngine: Send + Sync {
     fn provision(
         &self,
         id: String,
-        task_snapshot: Option<String>,
+        task_snapshot: Option<TaskSnapshot>,
         project: Project,
         recipes: Vec<ProfileRecipe>,
         vsock: Vec<VsockRoute>,
@@ -575,6 +589,18 @@ pub trait IsolationEngine: Send + Sync {
         async move { sandbox::stop_work(self, id).await }
     }
 
+    // A snapshot holds the whole workspace the sandbox was working in, because a resume
+    // neither clones nor runs setup: the guest's home with the project checkout, the
+    // agent's edits and whatever setup installed, and the sandbox's own disk. A disk
+    // snapshot (microsandbox) has all of that. A host checkpoint (testbed) archives its
+    // project checkout and the sandbox's tree, and the contents of the project cache mounts
+    // too, since a resume lands on another machine; the rest of the home is what the
+    // installs layer restores first. A microVM
+    // resumes on the machine that holds its cache directories, which persist and are
+    // shared, so its snapshot leaves them (an operator who clears a cache clears it for a
+    // resume too). Mounts that are credentials, memory or altitude's own notes belong to
+    // the machine and are never carried. A workspace that cannot be captured whole fails
+    // the suspend, and the sandbox is left running.
     fn suspend(
         &self,
         id: String,

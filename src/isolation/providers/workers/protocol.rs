@@ -1,11 +1,13 @@
 use serde::{Deserialize, Serialize};
 
-use crate::isolation::{Command, CommandEvent, SandboxOptions, SandboxPurpose, VsockRoute};
+use crate::isolation::{
+    Command, CommandEvent, SandboxOptions, SandboxPurpose, TaskSnapshot, VsockRoute,
+};
 use crate::project::Project;
 
 // The ALPN a master dials a worker on. It is not the link's: the link is clients
 // talking about their tasks, and this is a master asking an empty host for compute.
-pub(crate) const WORKER_ALPN: &[u8] = b"altitude/worker/1";
+pub(crate) const WORKER_ALPN: &[u8] = b"altitude/worker/2";
 
 // A worker only ever speaks to the master that provisioned it, and the token it
 // was provisioned with is what says so. It travels with each call because a worker
@@ -37,7 +39,7 @@ pub(crate) enum WorkerCall {
     // name the credentials to mount; the host rebuilds their recipes itself.
     Provision {
         id: String,
-        snapshot: Option<String>,
+        snapshot: Option<TaskSnapshot>,
         project: Project,
         // The operator whose cache this is, and where this master exports it from: the
         // host mounts that path on its own cache directory before building.
@@ -78,16 +80,14 @@ pub(crate) enum WorkerCall {
         root: String,
         excluded: Vec<String>,
     },
-    // The whole sandbox comes back as a stream: the tree it wrote and, when the task
-    // has one, the project checkout it worked in. `Restore` is the same bytes going
-    // the other way, onto a host that has just been provisioned.
+    // The whole workspace comes back as a stream. The host knows which tree is the
+    // project checkout, because it was provisioned with the project. `Restore` is the
+    // same bytes going the other way, onto a host that has just been provisioned.
     Snapshot {
         id: String,
-        checkout: Option<String>,
     },
     Restore {
         id: String,
-        checkout: Option<String>,
     },
     // A command sandbox a credential flow or a provider's read needs. The host
     // rebuilds the recipes from the pushed profiles, as `Provision` does.

@@ -4,7 +4,7 @@ use crate::{
     credentials,
     isolation::{
         CommandEvent, CommandSession, FileTransferSink, GuestPath, IsolationEngine, SandboxOptions,
-        SandboxPurpose, VsockRoute, guest_absolute, mounts,
+        SandboxPurpose, TaskSnapshot, VsockRoute, guest_absolute, mounts,
     },
     project::Project,
     vcs::{VcsProviderKind, now_ms},
@@ -324,7 +324,7 @@ where
                 isolation
                     .provision(
                         sandbox_id.clone(),
-                        snapshot_path.clone(),
+                        snapshot_path.clone().map(TaskSnapshot::File),
                         project,
                         vec![agent_recipe, vcs_recipe],
                         vsock,

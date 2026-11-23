@@ -7,7 +7,8 @@ use crate::{
         BaseSandboxRecipe, BaseSandboxSnapshot, CommandSession, CredentialSandbox,
         EnvironmentDescription, EnvironmentProgressSink, FileTally, FileTransferSink,
         IsolationEngine, IsolationError, IsolationStatus, LayerView, MicrosandboxIsolation,
-        Pressure, ProfileRecipe, SandboxOptions, SandboxPurpose, SandboxRoom, VsockRoute,
+        Pressure, ProfileRecipe, SandboxOptions, SandboxPurpose, SandboxRoom, TaskSnapshot,
+        VsockRoute,
     },
     project::Project,
 };
@@ -65,7 +66,7 @@ impl IsolationEngine for ServeIsolation {
     fn provision(
         &self,
         id: String,
-        task_snapshot: Option<String>,
+        task_snapshot: Option<TaskSnapshot>,
         project: Project,
         recipes: Vec<ProfileRecipe>,
         vsock: Vec<VsockRoute>,

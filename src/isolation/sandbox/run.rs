@@ -186,10 +186,14 @@ pub(crate) async fn create(
     .await
     .map_err(|error| IsolationError::new(error.to_string()))??;
     tracing::info!(sandbox = %id, "the sandbox's directories are prepared");
+    let is_resume = matches!(
+        snapshot,
+        Some(SnapshotSource::Capsule(_) | SnapshotSource::Awaited)
+    );
     let path = match snapshot {
         Some(SnapshotSource::Capsule(path)) => path,
         Some(SnapshotSource::Environment(path)) => path,
-        None => {
+        Some(SnapshotSource::Awaited) | None => {
             let view = plan.layer_view();
             tracing::info!(sandbox = %id, "ensuring the installs layer");
             let base = engine.ensure_base(plan.layers, view, progress).await?;
@@ -234,10 +238,7 @@ pub(crate) async fn create(
         command.push_str(&install_script());
     }
     command.push_str(&local_mounts);
-    if kind == SandboxKind::Task {
-        command.push_str(&project_scripts(&plan.project)?);
-        command.push_str(&project_setup(&plan.project)?);
-    }
+    command.push_str(&project_commands(&plan.project, kind, is_resume)?);
     tracing::info!(sandbox = %id, "setting up the sandbox's mounts and project");
     if let Err(error) = run_setup(engine, id.clone(), command).await {
         if let Err(cleanup_error) = engine.remove(id).await {
@@ -246,6 +247,20 @@ pub(crate) async fn create(
         return Err(error);
     }
     Ok(())
+}
+
+// A resume gets the workspace the last turn left, installed dependencies and the
+// agent's edits included; cloning or running setup first would populate the tree the
+// restore is about to write over.
+fn project_commands(
+    project: &Project,
+    kind: SandboxKind,
+    is_resume: bool,
+) -> Result<String, IsolationError> {
+    if kind != SandboxKind::Task || is_resume {
+        return Ok(String::new());
+    }
+    Ok(project_scripts(project)? + &project_setup(project)?)
 }
 
 pub(crate) fn add_commits_env(environment: &mut Vec<(String, String)>, commits: &ProjectCommits) {

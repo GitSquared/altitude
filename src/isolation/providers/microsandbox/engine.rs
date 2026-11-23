@@ -15,7 +15,7 @@ use crate::isolation::{
     CommandSession, CredentialSandbox, EnvironmentDescription, EnvironmentProgressSink, FileTally,
     FileTransferSink, ImagePull, IsolationEngine, IsolationError, IsolationStatus, LayerView,
     OutputStream, PackageInstall, PackageInstallSink, Pressure, ProfileRecipe, SandboxCeiling,
-    SandboxOptions, SandboxPurpose, SandboxRoom, VsockRoute, WATCHER_PREFIX,
+    SandboxOptions, SandboxPurpose, SandboxRoom, TaskSnapshot, VsockRoute, WATCHER_PREFIX,
     sandbox::{self, REFRESH_AFTER, private_directory},
 };
 
@@ -97,7 +97,7 @@ impl IsolationEngine for MicrosandboxIsolation {
     async fn provision(
         &self,
         id: String,
-        task_snapshot: Option<String>,
+        task_snapshot: Option<TaskSnapshot>,
         project: Project,
         recipes: Vec<ProfileRecipe>,
         vsock: Vec<VsockRoute>,
