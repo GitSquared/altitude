@@ -7,6 +7,10 @@ use super::*;
 // A host waiting on a layer it may not get is a host not doing its own work.
 const LAYER_PATIENCE: Duration = Duration::from_secs(10);
 
+// An upload moves the whole archive, so it gets minutes where a fetch's question gets
+// seconds, and it is still not left to the connection's ten-minute idle window.
+const LAYER_STORE_PATIENCE: Duration = Duration::from_secs(5 * 60);
+
 impl LinkClient {
     // What another host built, fetched by this one: the archive is copied into the
     // sink, and `false` says the master has nothing for this environment and tag.
@@ -23,7 +27,10 @@ impl LinkClient {
         match time::timeout(LAYER_PATIENCE, self.fetch_layer(peer, request, &mut sink)).await {
             Ok(result) => result,
             Err(_) => {
-                tracing::warn!("an installs layer went unanswered; this host builds its own");
+                tracing::warn!(
+                    patience = ?LAYER_PATIENCE,
+                    "asking the master for an installs layer timed out, dial included; this host builds its own"
+                );
                 Ok(false)
             }
         }
@@ -57,17 +64,47 @@ impl LinkClient {
         &self,
         peer: impl Into<EndpointAddr>,
         request: &LayerRequest,
+        archive: AsyncFile,
+    ) -> LinkResult<()> {
+        self.layer_store_within(LAYER_STORE_PATIENCE, peer.into(), request, archive)
+            .await
+    }
+
+    // Bounded as a whole, dial and upload and answer: nothing else ends a conversation
+    // whose peer stays connected and says nothing, short of the connection's idle window.
+    pub(crate) async fn layer_store_within(
+        &self,
+        patience: Duration,
+        peer: EndpointAddr,
+        request: &LayerRequest,
         mut archive: AsyncFile,
     ) -> LinkResult<()> {
-        let dial = self.dial(peer, Conversation::Layers).await?;
-        let (mut send, mut recv) = dial.0.open_bi().await?;
-        write_frame(&mut send, request).await?;
-        copy(&mut archive, &mut send).await?;
-        send.finish()?;
-        match read_frame::<_, LayerReply>(&mut recv).await? {
-            LayerReply::Stored => Ok(()),
-            LayerReply::Failed(reason) => Err(reason.into()),
-            other => Err(format!("unexpected answer: {other:?}").into()),
+        let stored = time::timeout(patience, async {
+            let dial = self.dial(peer, Conversation::Layers).await?;
+            let (mut send, mut recv) = dial.0.open_bi().await?;
+            let sent: LinkResult<()> = async {
+                write_frame(&mut send, request).await?;
+                copy(&mut archive, &mut send).await?;
+                send.finish()?;
+                Ok(())
+            }
+            .await;
+            // A master that refuses a layer answers before it has read the archive and
+            // stops the stream, so the write fails with "stopped by peer" while the
+            // reason it stopped is already waiting in the reply.
+            match read_frame::<_, LayerReply>(&mut recv).await {
+                Ok(LayerReply::Failed(reason)) => {
+                    Err(format!("the master refused the layer: {reason}").into())
+                }
+                Ok(LayerReply::Stored) => sent,
+                Ok(other) => Err(format!("unexpected answer: {other:?}").into()),
+                Err(error) => sent.and(Err(error)),
+            }
+        })
+        .await;
+        match stored {
+            Ok(result) => result,
+            Err(_) => Err(format!("storing a layer took longer than {patience:?}").into()),
         }
     }
 
