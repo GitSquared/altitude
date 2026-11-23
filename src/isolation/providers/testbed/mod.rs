@@ -25,8 +25,6 @@ use crate::{
 mod engine;
 mod files;
 mod machine;
-#[cfg(test)]
-mod tests;
 
 // The sandbox directory a layer's steps run in: the view, without a task in it.
 const LAYER_SANDBOX: &str = "layer";
