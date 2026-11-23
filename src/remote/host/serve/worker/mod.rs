@@ -261,7 +261,9 @@ impl WorkerService {
                 self.receive_snapshot(send, recv, id).await;
                 Ok(())
             }
-            call @ WorkerCall::Provision { .. } => {
+            call @ (WorkerCall::Provision { .. }
+            | WorkerCall::CredentialShell { .. }
+            | WorkerCall::Watcher { .. }) => {
                 let narrator = Narrator::start(send);
                 logging::relay(Some(narrator.relay_log()));
                 let reply = self.provision(recv, call, &narrator.progress()).await;

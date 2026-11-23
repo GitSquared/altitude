@@ -26,7 +26,8 @@ pub(crate) struct WorkerRequest {
 //
 // They do not travel in the call: a profile is a CLI's whole home, which is
 // megabytes of plugins and caches, and a call is a frame of at most `MAX_FRAME_BYTES`.
-// A provision sends them after the frame, as the rest of the stream.
+// A call that needs them (`Provision`, `CredentialShell`, `Watcher`) sends them after
+// the frame, as the rest of the stream.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct WorkerProfile {
     pub profile: String,
@@ -89,14 +90,12 @@ pub(crate) enum WorkerCall {
     // rebuilds the recipes from the pushed profiles, as `Provision` does.
     CredentialShell {
         id: String,
-        profiles: Vec<WorkerProfile>,
         snapshot: Option<String>,
         vsock: Vec<VsockRoute>,
         profile: String,
     },
     Watcher {
         id: String,
-        profiles: Vec<WorkerProfile>,
         project: Project,
     },
     // Answered once the sandbox is gone and the project cache it left is on the master or
