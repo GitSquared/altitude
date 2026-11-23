@@ -593,9 +593,9 @@ pub trait IsolationEngine: Send + Sync {
     // neither clones nor runs setup: the guest's home with the project checkout, the
     // agent's edits and whatever setup installed, and the sandbox's own disk. A disk
     // snapshot (microsandbox) has all of that. A host checkpoint (testbed) archives its
-    // account's home and the sandbox's tree, and the contents of the project cache mounts
-    // too, since a resume lands on another machine; a cache that is itself a mount point is
-    // the master's export, which outlives the host, so it is left where it is. A microVM
+    // account's home (less what the installs layer provides, which a resume restores
+    // first) and the sandbox's tree, and the contents of the project cache mounts too,
+    // since a resume lands on another machine. A microVM
     // resumes on the machine that holds its cache directories, which persist and are
     // shared, so its snapshot leaves them (an operator who clears a cache clears it for a
     // resume too). Mounts that are credentials, memory or altitude's own notes belong to
