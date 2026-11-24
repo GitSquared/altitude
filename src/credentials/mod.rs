@@ -318,7 +318,7 @@ where
             })
             .unwrap_or_default();
         let sandbox = CredentialSandbox {
-            id: renewal_id(profile),
+            id: renewal_id(&self.config, profile),
             recipes,
             snapshot,
             vsock: Vec::new(),
@@ -504,8 +504,16 @@ pub fn stored_outlasts(
 
 // Prefixed like every throwaway profile sandbox, so one left by a crash is recognisable and
 // swept.
-fn renewal_id(profile: &str) -> String {
-    format!("credentials-renew-{}", profile.replace('/', "-"))
+// Unique per operator as well as per profile: on a remote every operator's keeper renews
+// the same profile names, and a worker is placed by its sandbox's id, so two renewals
+// sharing one would take each other's worker away.
+fn renewal_id(config: &Config, profile: &str) -> String {
+    let scope = blake3::hash(config.scoped_data_dir().to_string_lossy().as_bytes()).to_hex();
+    format!(
+        "credentials-renew-{}-{}",
+        &scope[..8],
+        profile.replace('/', "-")
+    )
 }
 
 // A status command is a file test or a version probe: one that has not answered by now has
