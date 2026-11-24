@@ -78,12 +78,12 @@ impl ArchiveKind {
     }
 
     // A host waiting on an archive it may not get is a host not doing its own work, so
-    // asking is bounded as a whole, dial and download included. A cache is larger, and
-    // still only ever costs the cold start the host would have had without it.
+    // asking is bounded as a whole, dial and download included. A layer is hundreds of
+    // megabytes from a master that may be serving several hosts at once: giving up on
+    // one mid-transfer costs a rebuild and an upload of the same size back.
     pub(crate) fn fetch_patience(self) -> Duration {
         match self {
-            Self::Layer => Duration::from_secs(10),
-            Self::Cache => CACHE_PATIENCE,
+            Self::Layer | Self::Cache => CACHE_PATIENCE,
         }
     }
 

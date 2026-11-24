@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use tokio::time::{Instant, sleep_until};
@@ -58,6 +59,24 @@ where
     }
 
     async fn poll_profile(&mut self, profile: &str) {
+        // A refusal outlives the process: a restart that asked every refused credential
+        // again would spend a sandbox on each, all at once, for the same answer.
+        if !self.backoff.contains_key(profile)
+            && let Some(seen) = self.recorded_refusal(profile)
+        {
+            if seen == self.credentials.session_expiry(profile) {
+                self.backoff.insert(
+                    profile.to_owned(),
+                    Backoff {
+                        failures: 0,
+                        retry_at: Instant::now(),
+                        refused_at: Some(seen),
+                    },
+                );
+                return;
+            }
+            let _ = fs::remove_file(self.refusal_path(profile));
+        }
         if let Some(backoff) = self.backoff.get(profile) {
             let waiting = match backoff.refused_at {
                 Some(seen) => seen == self.credentials.session_expiry(profile),
@@ -144,14 +163,43 @@ where
     }
 
     fn park(&mut self, profile: &str) {
+        let seen = self.credentials.session_expiry(profile);
         self.backoff.insert(
             profile.to_owned(),
             Backoff {
                 failures: 0,
                 retry_at: Instant::now(),
-                refused_at: Some(self.credentials.session_expiry(profile)),
+                refused_at: Some(seen),
             },
         );
+        let path = self.refusal_path(profile);
+        let recorded = seen.map_or_else(|| "none".to_owned(), |at| at.to_string());
+        if let Err(error) = path
+            .parent()
+            .map_or(Ok(()), fs::create_dir_all)
+            .and_then(|()| fs::write(&path, recorded))
+        {
+            tracing::warn!(profile, %error, "could not record a refused renewal");
+        }
+    }
+
+    // Beside this scope's data, not in the profile: a profile's files travel to every
+    // sandbox that mounts it, and this is the keeper's own note.
+    fn refusal_path(&self, profile: &str) -> PathBuf {
+        self.credentials
+            .config()
+            .data_dir()
+            .join("refused-renewals")
+            .join(profile.replace('/', "__"))
+    }
+
+    // The session expiry a recorded refusal was given for, when there is one.
+    fn recorded_refusal(&self, profile: &str) -> Option<Option<i64>> {
+        let recorded = fs::read_to_string(self.refusal_path(profile)).ok()?;
+        match recorded.trim() {
+            "none" => Some(None),
+            at => at.parse().ok().map(Some),
+        }
     }
 
     fn defer(&mut self, profile: &str) -> Duration {
