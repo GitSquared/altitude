@@ -59,6 +59,13 @@ where
     }
 
     async fn poll_profile(&mut self, profile: &str) {
+        // Each operator has a keeper of its own, so a line names whose profile it is.
+        let scope = self
+            .credentials
+            .config()
+            .scoped_data_dir()
+            .display()
+            .to_string();
         // A refusal outlives the process: a restart that asked every refused credential
         // again would spend a sandbox on each, all at once, for the same answer.
         if !self.backoff.contains_key(profile)
@@ -95,6 +102,7 @@ where
                 self.backoff.remove(profile);
                 tracing::info!(
                     profile,
+                    scope,
                     expires_at_ms = self.credentials.session_expiry(profile),
                     "renewed a credential before it expired"
                 );
@@ -106,6 +114,7 @@ where
                 self.park(profile);
                 tracing::warn!(
                     profile,
+                    scope,
                     "a credential has no session to renew; a sign-in is needed"
                 );
             }
@@ -113,6 +122,7 @@ where
                 self.park(profile);
                 tracing::warn!(
                     profile,
+                    scope,
                     %reason,
                     "a credential could not be renewed; a sign-in is needed"
                 );
@@ -121,6 +131,7 @@ where
                 let retry = self.defer(profile);
                 tracing::warn!(
                     profile,
+                    scope,
                     retry_in_s = retry.as_secs(),
                     "a renewal left the deadline where it was"
                 );
@@ -129,6 +140,7 @@ where
                 let retry = self.defer(profile);
                 tracing::warn!(
                     profile,
+                    scope,
                     %error,
                     retry_in_s = retry.as_secs(),
                     "a credential could not be renewed; the sandbox failed"
