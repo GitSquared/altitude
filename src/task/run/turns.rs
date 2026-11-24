@@ -43,7 +43,7 @@ where
     ) -> Result<(Task, TaskAgentRun, CommandSession), TaskServiceError> {
         self.start_autopilot_turn(
             task,
-            "Continue the task autonomously from the current state.",
+            "Continue the task autonomously from the current state. You were resumed because nothing of yours is waiting on the operator: a message in a thread does not hand the work back. If the work is done, raise `in_review`; if you cannot go on without them, raise `blocked`. Otherwise carry on with the next step.",
             None,
         )
         .await
