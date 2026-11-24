@@ -213,53 +213,9 @@ impl WorkerService {
                     Err(error) => WorkerReply::Failed(error.to_string()),
                 }
             }
-            WorkerCall::CredentialShell {
-                id,
-                profiles,
-                snapshot,
-                vsock,
-                profile,
-            } => {
-                if let Err(error) = write_profiles(&self.config, &profiles) {
-                    return WorkerReply::Failed(error);
-                }
-                let recipes = match rebuild_recipes(&profiles, &self.agents) {
-                    Ok(recipes) => recipes,
-                    Err(error) => return WorkerReply::Failed(error),
-                };
-                let sandbox = CredentialSandbox {
-                    id,
-                    recipes,
-                    snapshot,
-                    vsock,
-                };
-                match self
-                    .engine
-                    .credential_shell(sandbox, &profile, &Unwatched)
-                    .await
-                {
-                    Ok(command) => WorkerReply::Text(command),
-                    Err(error) => WorkerReply::Failed(error.to_string()),
-                }
-            }
-            WorkerCall::Watcher {
-                id,
-                profiles,
-                project,
-            } => {
-                if let Err(error) = write_profiles(&self.config, &profiles) {
-                    return WorkerReply::Failed(error);
-                }
-                let recipes = match rebuild_recipes(&profiles, &self.agents) {
-                    Ok(recipes) => recipes,
-                    Err(error) => return WorkerReply::Failed(error),
-                };
-                match self.engine.watcher(id, project, recipes, &Unwatched).await {
-                    Ok(()) => WorkerReply::Ok,
-                    Err(error) => WorkerReply::Failed(error.to_string()),
-                }
-            }
             WorkerCall::Provision { .. }
+            | WorkerCall::CredentialShell { .. }
+            | WorkerCall::Watcher { .. }
             | WorkerCall::RunCommand { .. }
             | WorkerCall::DeliverFile { .. }
             | WorkerCall::DeliverFiles { .. }
@@ -270,8 +226,8 @@ impl WorkerService {
         }
     }
 
-    // A provision's profiles are the rest of the stream: a CLI's home is megabytes of
-    // plugins and caches, which no frame would hold.
+    // The profiles of a provision, a credential shell or a watcher are the rest of the
+    // stream: a CLI's home is megabytes of plugins and caches, which no frame would hold.
     pub(super) async fn provision(
         &self,
         mut recv: RecvStream,
@@ -291,7 +247,52 @@ impl WorkerService {
                 return WorkerReply::Failed(format!("could not read the profile files: {error}"));
             }
         };
-        self.provision_call(call, profiles, progress).await
+        match call {
+            call @ WorkerCall::Provision { .. } => {
+                self.provision_call(call, profiles, progress).await
+            }
+            call => self.profiled_call(call, profiles).await,
+        }
+    }
+
+    async fn profiled_call(&self, call: WorkerCall, profiles: Vec<WorkerProfile>) -> WorkerReply {
+        if let Err(error) = write_profiles_off_thread(self.config.clone(), profiles.clone()).await {
+            return WorkerReply::Failed(error);
+        }
+        let recipes = match rebuild_recipes(&profiles, &self.agents) {
+            Ok(recipes) => recipes,
+            Err(error) => return WorkerReply::Failed(error),
+        };
+        match call {
+            WorkerCall::CredentialShell {
+                id,
+                snapshot,
+                vsock,
+                profile,
+            } => {
+                let sandbox = CredentialSandbox {
+                    id,
+                    recipes,
+                    snapshot,
+                    vsock,
+                };
+                match self
+                    .engine
+                    .credential_shell(sandbox, &profile, &Unwatched)
+                    .await
+                {
+                    Ok(command) => WorkerReply::Text(command),
+                    Err(error) => WorkerReply::Failed(error.to_string()),
+                }
+            }
+            WorkerCall::Watcher { id, project } => {
+                match self.engine.watcher(id, project, recipes, &Unwatched).await {
+                    Ok(()) => WorkerReply::Ok,
+                    Err(error) => WorkerReply::Failed(error.to_string()),
+                }
+            }
+            _ => WorkerReply::Failed("not a call that carries profiles".into()),
+        }
     }
 
     async fn provision_call(

@@ -20,6 +20,10 @@ const LONGEST_SLEEP: Duration = Duration::from_secs(60 * 15);
 struct Backoff {
     failures: u32,
     retry_at: Instant,
+    // Set when the harness said a sign-in is needed: asking again cannot change that,
+    // only a new session can, so the profile waits for its session to differ from this
+    // one rather than for a clock.
+    refused_at: Option<Option<i64>>,
 }
 
 // A machine's renewal clock: it holds the profiles one scope owns and renews each
@@ -54,12 +58,14 @@ where
     }
 
     async fn poll_profile(&mut self, profile: &str) {
-        if self
-            .backoff
-            .get(profile)
-            .is_some_and(|backoff| backoff.retry_at > Instant::now())
-        {
-            return;
+        if let Some(backoff) = self.backoff.get(profile) {
+            let waiting = match backoff.refused_at {
+                Some(seen) => seen == self.credentials.session_expiry(profile),
+                None => backoff.retry_at > Instant::now(),
+            };
+            if waiting {
+                return;
+            }
         }
         if !self.credentials.can_renew(profile) {
             self.backoff.remove(profile);
@@ -78,19 +84,17 @@ where
                 self.backoff.remove(profile);
             }
             Ok(Renewal::NoSession) => {
-                let retry = self.defer(profile);
+                self.park(profile);
                 tracing::warn!(
                     profile,
-                    retry_in_s = retry.as_secs(),
                     "a credential has no session to renew; a sign-in is needed"
                 );
             }
             Ok(Renewal::Refused(reason)) => {
-                let retry = self.defer(profile);
+                self.park(profile);
                 tracing::warn!(
                     profile,
                     %reason,
-                    retry_in_s = retry.as_secs(),
                     "a credential could not be renewed; a sign-in is needed"
                 );
             }
@@ -122,7 +126,9 @@ where
         let mut wake = now + LONGEST_SLEEP;
         for profile in profiles {
             if let Some(backoff) = self.backoff.get(profile) {
-                wake = wake.min(backoff.retry_at);
+                if backoff.refused_at.is_none() {
+                    wake = wake.min(backoff.retry_at);
+                }
                 continue;
             }
             if !self.credentials.can_renew(profile) {
@@ -137,11 +143,24 @@ where
         wake
     }
 
+    fn park(&mut self, profile: &str) {
+        self.backoff.insert(
+            profile.to_owned(),
+            Backoff {
+                failures: 0,
+                retry_at: Instant::now(),
+                refused_at: Some(self.credentials.session_expiry(profile)),
+            },
+        );
+    }
+
     fn defer(&mut self, profile: &str) -> Duration {
         let entry = self.backoff.entry(profile.to_owned()).or_insert(Backoff {
             failures: 0,
             retry_at: Instant::now(),
+            refused_at: None,
         });
+        entry.refused_at = None;
         entry.failures = entry.failures.saturating_add(1);
         let wait = FIRST_RETRY
             .saturating_mul(1u32 << (entry.failures.min(5) - 1))

@@ -456,18 +456,28 @@ impl IsolationEngine for WorkersIsolation {
         &self,
         sandbox: CredentialSandbox,
         profile: &str,
-        _progress: &dyn EnvironmentProgressSink,
+        progress: &dyn EnvironmentProgressSink,
     ) -> Result<String, IsolationError> {
         let worker = self.provision_host(&sandbox.id).await?;
-        let profiles = self.profile_bundles(&sandbox.recipes)?;
         let call = WorkerCall::CredentialShell {
             id: sandbox.id.clone(),
-            profiles,
             snapshot: sandbox.snapshot,
             vsock: sandbox.vsock,
             profile: profile.to_owned(),
         };
-        match self.call_on(&worker, call).await? {
+        // A call that never got an answer still made a host, and nothing else knows it.
+        let answer = match self.profile_bundles(&sandbox.recipes) {
+            Ok(profiles) => self.provision_on(&worker, call, &profiles, progress).await,
+            Err(error) => Err(error),
+        };
+        let answer = match answer {
+            Ok(answer) => answer,
+            Err(error) => {
+                self.deprovision_host(&sandbox.id).await;
+                return Err(error);
+            }
+        };
+        match answer {
             WorkerReply::Text(command) => Ok(command),
             WorkerReply::Failed(reason) => {
                 self.deprovision_host(&sandbox.id).await;
@@ -487,17 +497,26 @@ impl IsolationEngine for WorkersIsolation {
         id: String,
         project: Project,
         recipes: Vec<ProfileRecipe>,
-        _progress: &dyn EnvironmentProgressSink,
+        progress: &dyn EnvironmentProgressSink,
     ) -> Result<(), IsolationError> {
         let worker = self.provision_host(&id).await?;
 
-        let profiles = self.profile_bundles(&recipes)?;
         let call = WorkerCall::Watcher {
             id: id.clone(),
-            profiles,
             project,
         };
-        match self.call_on(&worker, call).await? {
+        let answer = match self.profile_bundles(&recipes) {
+            Ok(profiles) => self.provision_on(&worker, call, &profiles, progress).await,
+            Err(error) => Err(error),
+        };
+        let answer = match answer {
+            Ok(answer) => answer,
+            Err(error) => {
+                self.deprovision_host(&id).await;
+                return Err(error);
+            }
+        };
+        match answer {
             WorkerReply::Ok => Ok(()),
             WorkerReply::Failed(reason) => {
                 self.deprovision_host(&id).await;
