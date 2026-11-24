@@ -33,9 +33,10 @@ pub(super) struct IssueData {
     #[serde(default)]
     pub(super) state_id: Option<String>,
     // Linear's own "delegate" action: the issue is handed to an app without its state
-    // moving, which is the gesture an operator actually makes.
+    // moving, which is the gesture an operator actually makes. Linear sends the app as
+    // an object, and only whether there is one matters here.
     #[serde(default)]
-    pub(super) delegate: Option<String>,
+    pub(super) delegate: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Deserialize)]
