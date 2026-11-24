@@ -96,16 +96,17 @@ impl TaskAsk {
             .find(|message| message.author == TaskAskAuthor::Agent)
     }
 
-    // An open thread wants a person until someone speaks in it after it was asked. What
-    // a thread says after that is conversation, and an agent that keeps talking in one the
-    // operator is already answering has not handed the work back by doing so: asking again
-    // is raising it again, which moves the question to the end of the thread.
+    // An open thread wants a person until the operator speaks in it after it was asked.
+    // What a thread says after that is conversation, and an agent that keeps talking in one
+    // the operator is already answering has not handed the work back by doing so: asking
+    // again is raising it again, which moves the question to the end of the thread. The
+    // agent's own messages never count as an answer, or an agent that adds a line after
+    // raising would be taken for one that was replied to and be sent round again.
     pub fn waits_on_operator(&self) -> bool {
         self.is_unresolved()
-            && self
-                .messages
-                .iter()
-                .all(|message| message.at_ms <= self.last_raised_at_ms)
+            && self.messages.iter().all(|message| {
+                message.author != TaskAskAuthor::Operator || message.at_ms <= self.last_raised_at_ms
+            })
     }
 }
 
