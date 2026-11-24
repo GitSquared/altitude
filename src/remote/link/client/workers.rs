@@ -1,3 +1,8 @@
+use std::{
+    sync::atomic::{AtomicU8, Ordering::Relaxed},
+    time::Instant,
+};
+
 use tokio::{io::AsyncReadExt, time};
 
 use super::*;
@@ -16,13 +21,30 @@ impl LinkClient {
     ) -> LinkResult<bool> {
         let peer = peer.into();
         let patience = request.kind.fetch_patience();
-        match time::timeout(patience, self.download_archive(peer, request, &mut sink)).await {
+        // How far the fetch got, so a timeout says whether the connection or the transfer
+        // is what stalled.
+        let reached = AtomicU8::new(0);
+        let began = Instant::now();
+        match time::timeout(
+            patience,
+            self.download_archive(peer, request, &mut sink, &reached),
+        )
+        .await
+        {
             Ok(result) => result,
             Err(_) => {
+                let stage = match reached.load(Relaxed) {
+                    0 => "connecting",
+                    1 => "opening a stream",
+                    2 => "waiting for the answer",
+                    _ => "receiving the archive",
+                };
                 tracing::warn!(
                     ?patience,
                     kind = ?request.kind,
-                    "asking the master for an archive timed out, dial included; this host does without"
+                    stage,
+                    elapsed_ms = began.elapsed().as_millis() as u64,
+                    "asking the master for an archive timed out; this host does without"
                 );
                 Ok(false)
             }
@@ -34,13 +56,17 @@ impl LinkClient {
         peer: EndpointAddr,
         request: &ArchiveRequest,
         sink: &mut AsyncFile,
+        reached: &AtomicU8,
     ) -> LinkResult<bool> {
         let dial = self.dial(peer, Conversation::Layers).await?;
+        reached.store(1, Relaxed);
         let (mut send, mut recv) = dial.0.open_bi().await?;
         write_frame(&mut send, request).await?;
         send.finish()?;
+        reached.store(2, Relaxed);
         match read_frame::<_, ArchiveReply>(&mut recv).await? {
             ArchiveReply::Blob { .. } => {
+                reached.store(3, Relaxed);
                 copy(&mut recv, sink).await?;
                 sink.sync_all().await?;
                 Ok(true)
