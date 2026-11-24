@@ -183,12 +183,12 @@ where
         }
     }
 
-    // Beside this scope's data, not in the profile: a profile's files travel to every
+    // In this operator's own data, not in the profile: a profile's files travel to every
     // sandbox that mounts it, and this is the keeper's own note.
     fn refusal_path(&self, profile: &str) -> PathBuf {
         self.credentials
             .config()
-            .data_dir()
+            .scoped_data_dir()
             .join("refused-renewals")
             .join(profile.replace('/', "__"))
     }
