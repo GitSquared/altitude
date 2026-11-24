@@ -32,7 +32,7 @@ DATABASE = Path.home() / "Library/Application Support/altitude/altitude.db"
 
 PROJECTS = {
     "altitude": "b777a587-46ba-4713-b65b-6d9d66a6b88d",
-    "carbonfact": "7d60f0aa-1b6c-4ef7-bf86-497946fd2757",
+    "webapp": "3f0c5a52-9d1e-4c7b-8a64-2b9e17d4c0aa",
 }
 
 
@@ -257,7 +257,7 @@ HOST = "gaby@neuromancer.local"
 def dataset(now_ms):
     data = Dataset(now_ms)
     altitude = project("altitude", "pi")
-    carbonfact = project("carbonfact", "claude")
+    webapp = project("webapp", "claude")
 
     failed = data.task(
         "failed-sandbox-exit",
@@ -314,7 +314,7 @@ def dataset(now_ms):
 
     data.task(
         "needs-you-tool-names",
-        carbonfact,
+        webapp,
         "claude",
         "Two harnesses disagree on tool names",
         9,
@@ -384,7 +384,7 @@ def dataset(now_ms):
 
     data.task(
         "working-watcher",
-        carbonfact,
+        webapp,
         "claude",
         "Rewrite the watcher with one channel",
         18,
@@ -417,7 +417,7 @@ def dataset(now_ms):
 
     data.task(
         "queued-retry-guard",
-        carbonfact,
+        webapp,
         "claude",
         "Bringing the retry guard home",
         1,
@@ -435,7 +435,7 @@ def dataset(now_ms):
 
     data.task(
         "limited-weekly",
-        carbonfact,
+        webapp,
         "claude",
         "Split the watcher into two channels",
         45,
@@ -459,7 +459,7 @@ def dataset(now_ms):
 
     data.task(
         "done-shells",
-        carbonfact,
+        webapp,
         "claude",
         "Close a shell without ending the task",
         2900,
