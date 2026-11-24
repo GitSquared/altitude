@@ -38,6 +38,7 @@ use crate::{
         ClientRecord, InstallationKey, LinkClient, LinkServer, TrackerConnection,
         announce::{Phase, TrackerReadiness},
         layers::ArchiveStore,
+        protocol::builder,
         server::{AgentChannelAccess, ServerParts, WorkerHost},
     },
     task::{TaskEventLoop, TaskExecutionUpdate, TaskService, TaskStore},
@@ -207,10 +208,14 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
     let keeper_isolation = match &fleet {
         Some(fleet) => {
             // A remote that has hosts speaks to them on a link of its own; it
-            // needs no sandbox runtime here.
-            let client = LinkClient::bind(&identity)
-                .await
-                .map_err(io::Error::other)?;
+            // needs no sandbox runtime here. That link has a key of its own too: the
+            // serving endpoint holds this machine's identity, and a second endpoint
+            // under the same key is, to a host, one peer at two addresses. A host can
+            // then send a connection meant for the server to this endpoint, which
+            // serves nothing, and it hangs. Hosts know this machine by its fleet
+            // token, not its key.
+            let client =
+                LinkClient::from_endpoint(builder().bind().await.map_err(io::Error::other)?);
             ServeIsolation::Workers(WorkersIsolation::new(Arc::clone(fleet), client, &config))
         }
         None => ServeIsolation::Microsandbox(MicrosandboxIsolation::new(&config)),
