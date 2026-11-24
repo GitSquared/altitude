@@ -384,6 +384,7 @@ where
                 | TaskHistoryEvent::AgentRunEnded { .. }
                 | TaskHistoryEvent::AgentModelObserved { .. }
                 | TaskHistoryEvent::AgentUsageReported { .. }
+                | TaskHistoryEvent::AgentStandingReported { .. }
                 | TaskHistoryEvent::TrackerSynced { .. }
                 | TaskHistoryEvent::ExecutionRecovered { .. } => continue,
                 _ => break,
