@@ -67,10 +67,12 @@ where
             TaskHistoryEvent::Wake
         };
         let mut events = vec![TaskHistoryEvent::TaskInputExpressed { input }, taken];
-        // An awake task has no queue write to carry the clear, so a held review ends
-        // here; a sleeping task's hold is cleared with the queue that wakes it, in one
-        // write, so a crash between the two cannot leave the task with neither.
-        if awake {
+        // A held review ends only where a turn is already guaranteed: a queued task
+        // has its wake, and a stopped task's hold is cleared with the queue that
+        // wakes it, in one write. A running task's ending reads the hold and pauses
+        // into it, so clearing it here would race that pause and leave a task stopped
+        // for a review that is no longer held, with no turn queued.
+        if task.facts.execution_status == TaskExecutionStatus::Pending {
             events.extend(TaskHistoryEvent::held_review_cleared(
                 &task,
                 "the operator asked this task to continue while its review was held",
