@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    sync::atomic::AtomicBool,
+    sync::atomic::{AtomicBool, Ordering},
     sync::{Arc, Mutex, MutexGuard},
 };
 
@@ -73,6 +73,9 @@ pub enum TaskExecutionUpdate {
 pub struct TaskEventLoop<E> {
     service: TaskService<E>,
     admission_enabled: Arc<AtomicBool>,
+    // Whether the periodic watchers have been started, so a loop started twice does
+    // not leave two of each behind.
+    watching: Arc<AtomicBool>,
     events: mpsc::UnboundedSender<TaskExecutionUpdate>,
     runs: Arc<Mutex<HashMap<String, ActiveRun>>>,
     control_requests: Arc<Mutex<HashMap<String, RequestedControl>>>,
@@ -104,10 +107,17 @@ impl<E> TaskEventLoop<E>
 where
     E: IsolationEngine + Clone + 'static,
 {
+    // A resident loop: admission is enabled and the watchers that keep the machine
+    // sampled and its held reviews observed start now.
     pub fn new(service: TaskService<E>) -> (Self, mpsc::UnboundedReceiver<TaskExecutionUpdate>) {
-        Self::with_admission(service, true)
+        let (event_loop, receiver) = Self::with_admission(service, true);
+        event_loop.watch_for_work();
+        (event_loop, receiver)
     }
 
+    // A host that is not yet the resident driver: construction starts nothing, so a
+    // caller can handle a command and return without a scheduler left behind. The
+    // watchers start when admission does.
     pub fn waiting_for_runtime(
         service: TaskService<E>,
     ) -> (Self, mpsc::UnboundedReceiver<TaskExecutionUpdate>) {
@@ -123,6 +133,7 @@ where
         let event_loop = Self {
             service,
             admission_enabled: Arc::new(AtomicBool::new(enabled)),
+            watching: Arc::new(AtomicBool::new(false)),
             events,
             runs: Arc::new(Mutex::new(HashMap::new())),
             control_requests: Arc::new(Mutex::new(HashMap::new())),
@@ -134,9 +145,18 @@ where
             review_waits: Arc::new(ReviewWaits::default()),
             sends_home: Arc::new(Mutex::new(None)),
         };
-        event_loop.watch_pressure();
-        event_loop.watch_held_reviews();
         (event_loop, receiver)
+    }
+
+    // The periodic work only a resident host does: sampling the machine so room opens
+    // as it frees, and observing held reviews so they are not left unread. A dormant
+    // host starts neither, and a loop already watching starts nothing a second time.
+    fn watch_for_work(&self) {
+        if self.watching.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        self.watch_pressure();
+        self.watch_held_reviews();
     }
 
     pub async fn task(&self, task_id: &str) -> Result<Option<Task>, TaskServiceError> {

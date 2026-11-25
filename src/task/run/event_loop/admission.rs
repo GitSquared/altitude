@@ -137,6 +137,7 @@ impl<E: IsolationEngine + Clone + 'static> TaskEventLoop<E> {
 
     pub fn enable_admission(&self) {
         self.admission_enabled.store(true, Ordering::Release);
+        self.watch_for_work();
         self.admit();
     }
 
