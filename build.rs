@@ -19,11 +19,13 @@ fn main() {
     let package = env::var("CARGO_PKG_VERSION").expect("Cargo sets the package version");
     // A build of a tagged commit is that release and nothing else. The commit is how
     // two builds of one version are told apart, which a release does not have to be.
-    let version = match commit() {
-        Some(commit) if !is_tagged_head() => format!("v{package}-{commit}"),
-        _ => format!("v{package}"),
+    let build = match commit() {
+        Some(commit) if !is_tagged_head() => format!("{package}-{commit}"),
+        _ => package.clone(),
     };
-    println!("cargo::rustc-env=ALTITUDE_VERSION={version}");
+    println!("cargo::rustc-env=ALTITUDE_VERSION=v{build}");
+    // The same identity without the `v`, which is how a remote announces itself.
+    println!("cargo::rustc-env=ALTITUDE_BUILD={build}");
 
     if env::var("CARGO_CFG_TARGET_OS").is_ok_and(|target| target == "macos") {
         let manifest =

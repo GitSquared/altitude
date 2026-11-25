@@ -1,5 +1,6 @@
 use super::{DiscoveredRemote, DiscoveryEvent, clean, format_address};
 use crate::remote::{LinkResult, compat::Compatibility};
+use crate::version::BUILD;
 use futures_util::{Stream, StreamExt};
 use iroh::{
     Endpoint,
@@ -40,7 +41,7 @@ pub(super) async fn browse(endpoint: &Endpoint) -> LinkResult<Browser> {
 pub(super) fn advertise(endpoint: &Endpoint, label: &str) -> LinkResult<()> {
     let metadata = Metadata {
         label: clean(label, 64),
-        version: env!("CARGO_PKG_VERSION").to_owned(),
+        version: BUILD.to_owned(),
     };
     let user_data: UserData = serde_json::to_string(&metadata)?.parse()?;
     endpoint.set_user_data_for_address_lookup(Some(user_data));
