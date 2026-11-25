@@ -17,6 +17,11 @@ const LONGEST_RETRY: Duration = Duration::from_secs(60 * 30);
 // A keeper wakes at the next deadline, but never sleeps longer than this, so a
 // profile that appears on disk while it sleeps is noticed by the next pass.
 const LONGEST_SLEEP: Duration = Duration::from_secs(60 * 15);
+// A harness decides for itself how close to its deadline a session must be before it
+// refreshes, and that can be later than the keeper's lead: a renewal that comes back
+// unchanged while the session still runs is retried this long before the deadline,
+// once, rather than on a clock that can carry the retry past it.
+const LAST_CHANCE_MS: i64 = 2 * 60 * 1000;
 
 struct Backoff {
     failures: u32,
@@ -104,7 +109,7 @@ where
                     profile,
                     scope,
                     expires_at_ms = self.credentials.session_expiry(profile),
-                    "renewed a credential before it expired"
+                    "renewed a credential"
                 );
             }
             Ok(Renewal::NotDue | Renewal::NothingToRenew) => {
@@ -128,7 +133,10 @@ where
                 );
             }
             Ok(Renewal::Unchanged) => {
-                let retry = self.defer(profile);
+                let retry = match self.last_chance(profile) {
+                    Some(wait) => self.retry_in(profile, wait),
+                    None => self.defer(profile),
+                };
                 tracing::warn!(
                     profile,
                     scope,
@@ -212,6 +220,25 @@ where
             "none" => Some(None),
             at => at.parse().ok().map(Some),
         }
+    }
+
+    // How long until the last moment worth asking again before the session runs out,
+    // when that moment is still ahead.
+    fn last_chance(&self, profile: &str) -> Option<Duration> {
+        let expires_at_ms = self.credentials.session_expiry(profile)?;
+        let wait_ms = expires_at_ms - LAST_CHANCE_MS - freshness::now_ms();
+        (wait_ms > 0).then(|| Duration::from_millis(wait_ms as u64))
+    }
+
+    fn retry_in(&mut self, profile: &str, wait: Duration) -> Duration {
+        let entry = self.backoff.entry(profile.to_owned()).or_insert(Backoff {
+            failures: 0,
+            retry_at: Instant::now(),
+            refused_at: None,
+        });
+        entry.refused_at = None;
+        entry.retry_at = Instant::now() + wait;
+        wait
     }
 
     fn defer(&mut self, profile: &str) -> Duration {

@@ -215,6 +215,7 @@ pub async fn credential_renewal_fixture() -> Result<(), String> {
         credentials::{Credentials, freshness, keeper::Keeper},
         isolation::{PortRelays, TestbedIsolation},
     };
+    use tokio::time::Instant;
 
     const PROFILE: &str = "claude";
     const SESSION: &str = "fixture-session.json";
@@ -224,6 +225,7 @@ pub async fn credential_renewal_fixture() -> Result<(), String> {
     const RENEWED_AT_MS: i64 = 4_102_444_800_000;
     const RENEW_COMMAND: &str = r#"printf '%s' '{"expiresAt":4102444800000}' > /altitude/fixture/fixture-session.json; echo x >> /altitude/fixture/fixture-attempts"#;
     const REFUSE_COMMAND: &str = r#"echo x >> /altitude/fixture/fixture-attempts; exit 1"#;
+    const UNCHANGED_COMMAND: &str = r#"echo x >> /altitude/fixture/fixture-attempts"#;
 
     // The keeper's own lines are the evidence that only profile, deadline and attempt
     // are logged, so a fixture run shows them.
@@ -335,6 +337,24 @@ pub async fn credential_renewal_fixture() -> Result<(), String> {
         ));
     }
     println!("refusal: {made} attempt, then backoff");
+
+    // A harness that is not ready to refresh yet leaves the deadline alone: the keeper
+    // asks again just before the session runs out, not on a doubling clock that can
+    // carry the retry past it.
+    credentials.override_recipe(PROFILE, recipe(UNCHANGED_COMMAND));
+    let expires = freshness::now_ms() + 10 * 60_000;
+    write_session(&session, expires)?;
+    let _ = fs::remove_file(&attempts);
+    let mut keeper = Keeper::new(credentials.clone());
+    let wake = keeper.poll().await;
+    let made = attempts_made(&attempts)?;
+    let retry_in_s = wake.saturating_duration_since(Instant::now()).as_secs();
+    if made != 1 || !(7 * 60..=8 * 60).contains(&retry_in_s) {
+        return Err(format!(
+            "an unchanged renewal made {made} attempts and retries in {retry_in_s}s"
+        ));
+    }
+    println!("unchanged: {made} attempt, retry in {retry_in_s}s, before the deadline");
 
     println!("credential renewal fixture passed");
     Ok(())
