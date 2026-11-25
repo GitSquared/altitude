@@ -12,8 +12,8 @@ use crate::isolation::IsolationEngine;
 use crate::agent::tool::{AgentTool, AgentToolError, AgentToolFuture, AgentToolProvider};
 use crate::project::validate_cache;
 use crate::task::{
-    ProjectProposal, Task, TaskAsk, TaskAskAuthor, TaskAskKind, TaskHistoryEvent, TaskPlanStatus,
-    TaskPlanStep, TaskStore, normalize_title, picture,
+    DeferredReview, ProjectProposal, Task, TaskAsk, TaskAskAuthor, TaskAskKind, TaskHistoryEvent,
+    TaskPlanStatus, TaskPlanStep, TaskStore, normalize_title, picture,
 };
 use crate::tracker::IssueReader;
 
@@ -258,13 +258,12 @@ impl TaskAgentTools {
         // a thread yet, so a list of threads is not the whole state of the task. It
         // is said here rather than only when the next question is refused, because
         // the agent reading its own signals is exactly who needs to know.
-        let held_review = self.task().await?.facts.deferred_review.map(|review| {
-            json!({
-                "kind": "review",
-                "title": review.signal.title,
-                "held_until": "its pull requests settle, or they stop moving and the operator decides",
-            })
-        });
+        let held_review = self
+            .task()
+            .await?
+            .facts
+            .deferred_review
+            .map(|review| held_review_json(&review));
         Ok(json!({
             "signals": threads
                 .iter()
@@ -313,12 +312,27 @@ impl TaskAgentTools {
             }
         };
         let (body, pictures) = self.settle_pictures(body).await;
-        let (_, signal_id) = self
+        let (task, signal_id) = self
             .store
             .open_signal(&self.task_id, kind, title, &body, None)
             .await
             .map_err(tool_failure)?;
         self.announce();
+        // A review with pull requests to watch is held rather than raised, so it has
+        // no thread to read back yet. The write already returned the task that says
+        // which it was; answering from that instead of a thread is what keeps a
+        // successful deferred open from reading as a failure.
+        if let Some(review) = task
+            .facts
+            .deferred_review
+            .as_ref()
+            .filter(|review| review.signal.id == signal_id)
+        {
+            return Ok(json!({
+                "held_review": held_review_json(review),
+                "pictures": pictures,
+            }));
+        }
         let thread = self.thread(&signal_id).await?;
         Ok(json!({ "signal": thread_json(&thread, &self.attachments_dir), "pictures": pictures }))
     }
@@ -541,6 +555,14 @@ impl TaskAgentTools {
             .map_err(tool_failure)?
             .ok_or_else(|| AgentToolError::new("this task is no longer in play"))
     }
+}
+
+fn held_review_json(review: &DeferredReview) -> Value {
+    json!({
+        "kind": "review",
+        "title": review.signal.title,
+        "held_until": "its pull requests settle, or they stop moving and the operator decides",
+    })
 }
 
 fn tool_failure(error: impl fmt::Display) -> AgentToolError {
