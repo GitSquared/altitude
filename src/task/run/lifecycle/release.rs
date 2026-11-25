@@ -127,10 +127,15 @@ where
                                 task_id = %task.id,
                                 "a task's sandbox did not survive the restart"
                             );
-                            let mut events = vec![TaskHistoryEvent::ExecutionQueued {
+                            let mut events = TaskHistoryEvent::held_review_cleared(
+                                &task,
+                                "the machine restarted and this task's sandbox was lost, so its \
+                                 held review is cleared and it starts again",
+                            );
+                            events.push(TaskHistoryEvent::ExecutionQueued {
                                 execution_status: TaskExecutionStatus::Pending,
                                 wake: None,
-                            }];
+                            });
                             events.extend(restart_events(
                                 &task,
                                 "This task's sandbox did not survive the restart, so it starts \

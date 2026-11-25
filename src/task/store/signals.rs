@@ -251,6 +251,15 @@ impl TaskStore {
                     wake: Some(wake_news),
                 });
             }
+            // The hold is cleared only where a turn is already guaranteed. A running
+            // task keeps it: its ending read the hold and will pause into it, and the
+            // review watcher is what clears a stopped, held task.
+            if !matches!(task.facts.execution_status, TaskExecutionStatus::Running) {
+                events.extend(TaskHistoryEvent::held_review_cleared(
+                    &task,
+                    "the operator replied while this task's review was held",
+                ));
+            }
         }
         Self::write_events(&mut transaction, task_id, &events).await?;
         let task = Self::read_task(&mut transaction, task_id).await?;

@@ -66,12 +66,19 @@ where
         } else {
             TaskHistoryEvent::Wake
         };
-        let task = self
-            .record(
-                &task.id,
-                &[TaskHistoryEvent::TaskInputExpressed { input }, taken],
-            )
-            .await?;
+        let mut events = vec![TaskHistoryEvent::TaskInputExpressed { input }, taken];
+        // A held review ends only where a turn is already guaranteed: a queued task
+        // has its wake, and a stopped task's hold is cleared with the queue that
+        // wakes it, in one write. A running task's ending reads the hold and pauses
+        // into it, so clearing it here would race that pause and leave a task stopped
+        // for a review that is no longer held, with no turn queued.
+        if task.facts.execution_status == TaskExecutionStatus::Pending {
+            events.extend(TaskHistoryEvent::held_review_cleared(
+                &task,
+                "the operator asked this task to continue while its review was held",
+            ));
+        }
+        let task = self.record(&task.id, &events).await?;
         if awake {
             return Ok(());
         }
@@ -210,14 +217,15 @@ where
     // task is queued with what woke it, and admission decides when the machine has
     // room for its sandbox. A wake is never the thing that makes a sandbox.
     async fn queue_wake(&self, task: &Task, prompt: String) -> Result<(), TaskServiceError> {
-        self.record(
-            &task.id,
-            &[TaskHistoryEvent::ExecutionQueued {
-                execution_status: TaskExecutionStatus::Pending,
-                wake: Some(prompt),
-            }],
-        )
-        .await?;
+        let mut events = TaskHistoryEvent::held_review_cleared(
+            task,
+            "the operator asked this task to continue while its review was held",
+        );
+        events.push(TaskHistoryEvent::ExecutionQueued {
+            execution_status: TaskExecutionStatus::Pending,
+            wake: Some(prompt),
+        });
+        self.record(&task.id, &events).await?;
         Ok(())
     }
 

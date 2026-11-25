@@ -215,6 +215,32 @@ impl From<&AgentUsage> for TaskHistoryEvent {
     }
 }
 
+impl TaskHistoryEvent {
+    // Ends a review hold only where the caller is already putting a turn in flight:
+    // it is written together with the ExecutionQueued that wakes a stopped task, or
+    // on a task still Pending from an earlier wake. It must not be used on a running
+    // task. The ending reads the hold before it suspends the capsule, so clearing the
+    // hold in that gap stops the task for a review it no longer holds, with no turn
+    // queued -- and the watcher only observes paused, held tasks.
+    pub(crate) fn held_review_cleared(task: &Task, reason: &str) -> Vec<Self> {
+        let Some(deferred) = task.facts.deferred_review.clone() else {
+            return Vec::new();
+        };
+        vec![
+            Self::ReviewDeferralCleared {
+                signal_id: deferred.signal.id.clone(),
+                reason: reason.to_owned(),
+            },
+            Self::OperatorSignalResolved {
+                signal_id: deferred.signal.id,
+                resolved: true,
+                by: TaskAskAuthor::Operator,
+                resolving_message_id: None,
+            },
+        ]
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TaskPlanStep {
     pub content: String,
