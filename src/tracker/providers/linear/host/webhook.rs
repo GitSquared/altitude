@@ -13,7 +13,8 @@ pub(super) struct IssueEvent {
     pub(super) organization_id: String,
     pub(super) webhook_timestamp: f64,
     pub(super) created_at: String,
-    pub(super) actor: IssueActor,
+    #[serde(default)]
+    pub(super) actor: Option<IssueActor>,
     pub(super) data: IssueData,
     #[serde(default)]
     pub(super) updated_from: Option<IssueUpdatedFrom>,
@@ -62,9 +63,7 @@ impl IssueEvent {
     }
 
     pub(super) fn into_stored(self) -> Option<StoredEvent> {
-        if self.actor.actor_type != "user" {
-            return None;
-        }
+        let actor = by_a_person(self.actor)?;
         let state_id = self.data.state_id?;
         let updated_from = self.updated_from?;
         let was_delegated = updated_from.delegate_id.is_some();
@@ -83,7 +82,7 @@ impl IssueEvent {
         Some(StoredEvent::IssueStateChanged(IssueStateChanged {
             issue_id: self.data.id,
             state_id,
-            actor_id: self.actor.id,
+            actor_id: actor.id,
             occurred_at_ms,
         }))
     }
@@ -189,7 +188,8 @@ pub(super) struct CommentEvent {
     pub(super) organization_id: String,
     pub(super) webhook_timestamp: f64,
     pub(super) action: String,
-    pub(super) actor: IssueActor,
+    #[serde(default)]
+    pub(super) actor: Option<IssueActor>,
     pub(super) data: CommentData,
 }
 
@@ -235,9 +235,7 @@ impl CommentEvent {
     // comment, so which one comes first decides what is known about it: this one knows
     // only that something was said, and saying it is enough to admit it.
     pub(super) fn into_stored(self) -> Option<StoredEvent> {
-        if self.actor.actor_type != "user" {
-            return None;
-        }
+        let actor = by_a_person(self.actor)?;
         // Resolving a thread is a comment event that says nothing new in the body: the
         // operator's word on whether the question is over, which the task reads as the
         // same close it would make in the interface.
@@ -254,7 +252,7 @@ impl CommentEvent {
             .data
             .user_id
             .filter(|id| !id.is_empty())
-            .unwrap_or(self.actor.id);
+            .unwrap_or(actor.id);
         Some(StoredEvent::Comment(CommentInput {
             comment_id: self.data.id,
             issue_id: self.data.issue_id,
@@ -275,7 +273,8 @@ pub(super) struct ReactionEvent {
     pub(super) organization_id: String,
     pub(super) webhook_timestamp: f64,
     pub(super) action: String,
-    pub(super) actor: IssueActor,
+    #[serde(default)]
+    pub(super) actor: Option<IssueActor>,
     pub(super) data: ReactionData,
 }
 
@@ -310,16 +309,17 @@ impl ReactionEvent {
     // Taking a reaction away is not a thing to say to the agent: it already read the
     // symbol, and a thread that says both is a thread arguing with itself.
     pub(super) fn into_stored(self) -> Option<StoredEvent> {
-        if self.action != "create" || self.actor.actor_type != "user" {
+        if self.action != "create" {
             return None;
         }
+        let actor = by_a_person(self.actor)?;
         let emoji = self.data.emoji.or(self.data.reaction)?.trim().to_owned();
         let comment_id = self.data.comment_id?;
         let actor_id = self
             .data
             .user_id
             .filter(|id| !id.is_empty())
-            .unwrap_or(self.actor.id);
+            .unwrap_or(actor.id);
         Some(StoredEvent::Reaction(ReactionInput {
             id: self
                 .data
@@ -330,4 +330,10 @@ impl ReactionEvent {
             actor_id,
         }))
     }
+}
+
+// Linear sends a null actor for a change no one made by hand, such as one an
+// automation made: like an integration's, it is not a person's word to act on.
+fn by_a_person(actor: Option<IssueActor>) -> Option<IssueActor> {
+    actor.filter(|actor| actor.actor_type == "user")
 }
