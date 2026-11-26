@@ -163,7 +163,9 @@ jobs:
 
           version="$(cargo metadata --locked --no-deps --format-version 1 \
             | jq -r '.packages[] | select(.name == "altitude") | .version')"
-          name="altitude-${version}-${GITHUB_SHA:0:6}-${TARGET}"
+          # Named the way install.sh names the asset of tag v<version>-main.<sha>,
+          # so a published main build installs like a release.
+          name="altitude-${version}-main.${GITHUB_SHA:0:7}-${TARGET}"
           mkdir -p "dist/${name}"
           cp target/release/altitude "dist/${name}/"
           cp README.md LICENSE "dist/${name}/"
@@ -181,3 +183,65 @@ jobs:
           retention-days: 7
           # The archive is already compressed; a second pass only costs time.
           compression-level: 0
+
+  # A remote that tracks main (the carbonfact one, while it is being tried out) installs
+  # these with install.sh, which reads only GitHub releases: an Actions artifact needs a
+  # token to download. Pre-releases, so `releases/latest` and the Homebrew tap still
+  # only ever see a real release. A tag made with this job's token starts no workflow,
+  # so release.yml does not run for it.
+  publish-main:
+    name: publish main build
+    needs: dist
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    concurrency:
+      group: publish-main
+      cancel-in-progress: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Download archives
+        uses: actions/download-artifact@v8
+        with:
+          pattern: altitude-*
+          path: dist
+          merge-multiple: true
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)"
+          tag="v${version}-main.${GITHUB_SHA:0:7}"
+          cd dist
+          sha256sum -- *.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+          gh release create "$tag" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --prerelease \
+            --latest=false \
+            --title "altitude $tag" \
+            --notes "Build of ${GITHUB_SHA} on main, for trying out before a release. Not a release." \
+            ./*.tar.gz SHA256SUMS
+
+      # A remote pins the build it booted and hands that same build to every worker
+      # host it starts, so a build has to outlive a few more pushes; twenty does.
+      - name: Prune older main builds
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 200 \
+              --json tagName,createdAt \
+              --jq '[.[] | select(.tagName | test("-main\\.[0-9a-f]+$"))] | sort_by(.createdAt) | reverse | .[20:] | .[].tagName' \
+            | while read -r tag; do
+                gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes
+              done
