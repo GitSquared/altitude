@@ -258,10 +258,13 @@ impl WorkerFleet {
                 gone.push(name.clone());
             }
         }
+        // Only a worker holding no work reaches here, so its silence loses nothing: most
+        // often it is a spare that stopped itself because nothing claimed it, which is
+        // how a fleet empties. Said as news, not as a warning.
         for name in &gone {
             state.connected.remove(name);
             state.provisioned.remove(name);
-            tracing::warn!(worker = %name, "an isolation worker stopped answering");
+            tracing::info!(worker = %name, "an idle isolation worker went quiet, so it is being removed");
         }
         gone
     }
