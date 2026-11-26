@@ -186,7 +186,21 @@ impl RemoteTracker {
         &self,
         host: &dyn DelegatedWork,
     ) {
-        for report in self.cursors().into_iter().filter(|report| !report.finished) {
+        // Only a task still in play has a session worth keeping. One that failed left
+        // its session in error and says nothing in a new one, so replacing it opened
+        // an empty session on its issue at every start.
+        let in_play: Vec<String> = match host.bound_tasks().await {
+            Ok(bound) => bound.into_iter().map(|task| task.task_id).collect(),
+            Err(error) => {
+                tracing::debug!(%error, "could not read bound tasks to verify sessions");
+                return;
+            }
+        };
+        for report in self
+            .cursors()
+            .into_iter()
+            .filter(|report| !report.finished && in_play.contains(&report.task_id))
+        {
             match self
                 .config
                 .automation
