@@ -640,13 +640,16 @@ impl RemoteTracker {
             }
             // Whether this work came from a delegation is a fact about the task, not
             // a second record beside it: a delegation's work ends when the issue
-            // stops being delegated, and a client's own work does not.
+            // stops being delegated, and a client's own work does not. Not compared
+            // with the report's session: a report moves to a new session when Linear
+            // lets the old one go stale, and the comparison then stopped this check
+            // for good, so an issue taken back from altitude kept its task running.
             let delegated = host
                 .delegation_of(report.task_id.clone())
                 .await
                 .ok()
                 .flatten()
-                == Some(report.session.clone());
+                .is_some();
             if delegated {
                 let delegation = match self
                     .config

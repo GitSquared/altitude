@@ -207,7 +207,11 @@ impl RemoteTracker {
                 .session_standing(&report.session)
                 .await
             {
-                Ok(standing) if !standing.can_receive => self.replace_session(host, &report).await,
+                Ok(standing) if !standing.can_receive => {
+                    if !self.delegation_lapsed(host, &report).await {
+                        self.replace_session(host, &report).await;
+                    }
+                }
                 Ok(standing) if standing.never_answered => {
                     self.introduce(host, &report).await;
                 }
@@ -263,6 +267,32 @@ impl RemoteTracker {
             .await
         {
             tracing::debug!(task = %report.task_id, %error, "could not say where a task stands");
+        }
+    }
+
+    // An issue the operator took back from altitude is not one to open a session on:
+    // the delegation sweep stops its task, and a new session would say altitude is
+    // still on it. Unknown reads as not lapsed, so a failed read never loses a session.
+    async fn delegation_lapsed(&self, host: &dyn DelegatedWork, report: &Cursor) -> bool {
+        let delegated = host
+            .delegation_of(report.task_id.clone())
+            .await
+            .ok()
+            .flatten()
+            .is_some();
+        if !delegated {
+            return false;
+        }
+        match self
+            .config
+            .automation
+            .issue_delegation(&report.issue_id)
+            .await
+        {
+            Ok(delegation) => {
+                delegation.delegate_id.as_deref() != Some(self.config.automation.app_user_id())
+            }
+            Err(_) => false,
         }
     }
 
