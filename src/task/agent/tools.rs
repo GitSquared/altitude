@@ -313,12 +313,28 @@ impl TaskAgentTools {
             }
         };
         let (body, pictures) = self.settle_pictures(body).await;
-        let (_, signal_id) = self
+        let (task, signal_id) = self
             .store
             .open_signal(&self.task_id, kind, title, &body, None)
             .await
             .map_err(tool_failure)?;
         self.announce();
+        // A review held for its pull requests is not a thread until they settle, so
+        // looking one up would answer a request that went through with an error.
+        if let Some(held) = task
+            .facts
+            .deferred_review
+            .filter(|held| held.signal.id == signal_id)
+        {
+            return Ok(json!({
+                "held_review": {
+                    "kind": "review",
+                    "title": held.signal.title,
+                    "held_until": "its pull requests settle, or they stop moving and the operator decides",
+                },
+                "pictures": pictures,
+            }));
+        }
         let thread = self.thread(&signal_id).await?;
         Ok(json!({ "signal": thread_json(&thread, &self.attachments_dir), "pictures": pictures }))
     }
