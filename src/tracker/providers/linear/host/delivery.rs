@@ -264,7 +264,10 @@ impl RemoteTracker {
                         body: pause_message(execution_pause_reason, &operator, asking),
                     }
                 } else {
-                    AgentActivityContent::Thought {
+                    // Still a response: a thought leaves the session active, and Linear
+                    // marks an active session that goes quiet stale, which the next
+                    // start then replaces with a new one.
+                    AgentActivityContent::Response {
                         body: execution_pause_reason.notice().to_owned(),
                     }
                 };
