@@ -279,6 +279,7 @@ const CONTRIBUTION_FIELDS: &str = r#"    ... on PullRequest {
       isDraft
       state
       statusCheckRollup {
+        state
         contexts(first: 100) {
           pageInfo { hasNextPage }
           nodes {
@@ -349,14 +350,23 @@ fn observation_of(
     pending_checks.sort();
     failing_checks.truncate(CHECK_NAMES_KEPT);
     pending_checks.truncate(CHECK_NAMES_KEPT);
-    // A rollup that has more than the queried page cannot be called settled:
-    // the check that would fail may be on the next page.
+    // The checks past the queried page are judged by the rollup's own state, which
+    // the provider computes over every check: a pull request with more than a page
+    // of checks would otherwise never settle, and its held review never go out.
     if rollup
         .and_then(|rollup| rollup.contexts.as_ref())
         .and_then(|contexts| contexts.page_info.as_ref())
         .is_some_and(|page| page.has_next_page)
     {
-        checks_pending += 1;
+        match rollup.and_then(|rollup| rollup.state.as_deref()) {
+            Some("SUCCESS") => {}
+            Some("FAILURE" | "ERROR") => {
+                if checks_failing == 0 {
+                    checks_failing += 1;
+                }
+            }
+            _ => checks_pending += 1,
+        }
     }
     let standing = merge_standing(view);
     let latest_review = view.latest_review();
@@ -485,6 +495,8 @@ struct PullRequestView {
 
 #[derive(Deserialize)]
 struct CheckRollup {
+    #[serde(default)]
+    state: Option<String>,
     #[serde(default)]
     contexts: Option<CheckContexts>,
 }
