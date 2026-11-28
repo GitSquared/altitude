@@ -55,6 +55,7 @@ use crate::remote::protocol::{
 use crate::remote::transfer::{TransferUpdate, Unit};
 use crate::tracker::{ACCOUNT_FILE, TrackerAccount, TrackerKind};
 use crate::tracker::{claim_account, logins_of, yield_account};
+use crate::version::BUILD;
 
 enum ConfigWrite {
     Written {
@@ -416,7 +417,7 @@ impl LinkServer {
                 protocol: String::from_utf8_lossy(LINK_ALPN).into_owned(),
                 id: identity.id().to_string(),
                 label: label.clone(),
-                version: env!("CARGO_PKG_VERSION").to_owned(),
+                version: BUILD.to_owned(),
                 state: Phase::Runtime.state(),
                 phase: Some(Phase::Runtime),
                 trackers,
